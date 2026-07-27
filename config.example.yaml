@@ -1,0 +1,210 @@
+wechat:
+  account_name: ""
+  app_id: ${WECHAT_APP_ID}
+  app_secret: ${WECHAT_APP_SECRET}
+  author: ""
+  need_open_comment: 0
+  only_fans_can_comment: 0
+
+ai:
+  # 可选: deepseek | qwen | moonshot | zhipu | manus | gemini | openai
+  primary: manus
+  fallback: manus
+  max_retries_per_model: 2
+  # 正文、标题和副标题由主模型一次性结构化返回；false 可避免第二次标题 API 调用
+  title_optimize: false
+  rewrite_prompt: >-
+    你是资深公众号主编。请根据给定话题与参考原文，重新撰写一篇完整的微信公众号文章。
+
+    硬性要求：
+    1. 正文（body）去除空白后不得少于 2000 字，不设置严格上限，不需要精确统计或截断字数。
+    2. 必须有新观点、新角度，禁止简单洗稿、逐段改写或照搬原句。
+    3. 结构完整：开头吸引读者 → 交代背景与矛盾 → 3–5 个观点展开 → 总结启发。每个观点必须使用能表达实际结论的自然小标题，并在标题下用至少 2 个自然段说明原因、案例、数据或对比；不得出现“开头钩子、背景冲突、分论点一、分论点1”等写作提示词，小标题也不得带“一、二、三、1、2、3、第一、第二”等序号。
+    4. 语气专业但好读，适合手机阅读；多用短段，段落之间用空行分隔；小标题可用「## 标题」形式。
+    5. 不要出现「原文说」「根据材料」等元叙述；不要输出 Markdown 代码块标记外的说明文字。
+    6. 同步给出 10 个标题、10 个副标题：标题偏爆款、可点击且角度各不相同；副标题偏信息补充，不与标题重复。
+
+    只输出严格 JSON（不要 markdown 代码围栏，不要其他文字），格式：
+    {"body":"完整正文，段落间用\\n\\n分隔","titles":["标题1","标题2","标题3","标题4","标题5","标题6","标题7","标题8","标题9","标题10"],"subtitles":["副标题1","副标题2","副标题3","副标题4","副标题5","副标题6","副标题7","副标题8","副标题9","副标题10"]}
+  title_prompt: >-
+    根据文章内容生成 10 个互不重复的爆款公众号标题：有悬念或利益相关点，长度约 16–28 字，避免夸张假大空。
+    只输出严格 JSON（不要代码围栏、不要解释）：{"titles":["标题1","标题2","标题3","标题4","标题5","标题6","标题7","标题8","标题9","标题10"]}
+  # 硬性下限：代码层也会锁定为不低于 2000
+  min_body_chars: 2000
+  max_similarity: 0.72
+
+  deepseek:
+    api_key: ${DEEPSEEK_API_KEY}
+    api_base: https://api.deepseek.com
+    model: deepseek-chat
+  qwen:
+    api_key: ${QWEN_API_KEY}
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen-plus
+  moonshot:
+    api_key: ${MOONSHOT_API_KEY}
+    api_base: https://api.moonshot.cn/v1
+    model: moonshot-v1-128k
+  zhipu:
+    api_key: ${ZHIPU_API_KEY}
+    api_base: https://open.bigmodel.cn/api/paas/v4
+    model: glm-4-flash
+
+  manus:
+    api_key: ${MANUS_API_KEY}
+    api_base: ${MANUS_API_BASE}
+    model: manus-1.6
+    timeout_seconds: 600
+  gemini:
+    api_key: ${GEMINI_API_KEY}
+    model: gemini-2.0-flash
+  askmany:
+    api_key: ${ASKMANY_API_KEY}
+    api_base: ${ASKMANY_API_BASE}
+    model: default
+
+template:
+  path: app/render/templates/article.html.j2
+  show_inline_ad: false
+  show_footer_follow: false
+  footer_qr_url: ""
+  footer_follow_text: "欢迎关注本公众号，获取更多干货"
+  show_byline: true
+  byline_author: "蓝血创作组"
+  byline_source: "蓝血经营管理系统（BMS_CN）"
+  byline_contact: "lanxueziben（微信）"
+  accent_color: "#ff6827"
+  body_font_size: "16px"
+  body_color: "#595959"
+  body_line_height: "35px"
+  paragraph_spacing: "16px"
+  body_horizontal_padding: "10px"
+  body_font_family: '微软雅黑, "Microsoft YaHei"'
+  h1_color: "#1a1a1a"
+  h2_color: "#0052ff"
+
+# 公众号编辑器“模板”的本地快照。先在后台插入一次模板并保存临时文章，
+# 程序会提取其 HTML；之后直接套用快照，不再依赖每次点击后台模板按钮。
+editor_template:
+  enabled: true
+  required: true
+  placeholder: "蓝血经营管理系统正文"
+  capture_title: "蓝血经营管理系统模板"
+  snapshot_path: "data/editor_template.html"
+  auto_capture_from_drafts: true
+  scan_limit: 80
+
+cover:
+  # true：未指定封面时，从公众号永久图片素材库随机挑一张
+  from_material_library: true
+  default_media_id: ""
+  keyword_map: {}
+
+ads:
+  default_pool:
+    - id: default_ad_1
+      title: "默认课程推荐"
+      url: "https://example.com/course"
+      description: "扫码了解更多课程信息"
+      priority: 0
+      course_start_at: null
+      enabled: true
+
+# 多图文编排：主稿下方挂草稿箱「已有内容」里所有「广告」打头条目
+layout:
+  enabled: true
+  # 0 = 搜到多少挂多少（次条最多 7，含主稿共 8）
+  secondary_count: 0
+  skip_ad_numbers: []
+  # 关闭随机打乱；匹配成功的广告会跟随对标公众号最新广告位顺序。
+  shuffle: false
+  strip_ad_prefix: true
+  fallback_recent: false
+  prefer_single_only: true
+  scan_limit: 80
+  secondary_media_ids: []
+  title_keywords: []
+
+# 对标公众号：按“蓝血研究”最新发表组的封面图，为本账号广告草稿同步标题。
+benchmark:
+  enabled: true
+  name: 蓝血研究
+  app_id: ${BENCHMARK_WECHAT_APP_ID}
+  app_secret: ${BENCHMARK_WECHAT_APP_SECRET}
+  # 后台“发表记录”比开放接口更完整；填写已登录后台会话后优先使用。
+  admin_url: ${BENCHMARK_WECHAT_ADMIN_URL}
+  admin_token: ${BENCHMARK_WECHAT_ADMIN_TOKEN}
+  admin_cookie: ${BENCHMARK_WECHAT_ADMIN_COOKIE}
+  cache_path: data/benchmark_latest.json
+  official_max_age_hours: 36
+  official_fallback_enabled: false
+  image_match_threshold: 0.90
+  # 图片匹配失败时保留广告草稿原有标题，不丢弃该广告。
+  matched_only: false
+  follow_source_order: true
+  deduplicate_by_image: true
+
+notify:
+  webhook_url: ${NOTIFY_WEBHOOK}
+
+publish:
+  default_mode: draft
+
+db:
+  path: data/app.db
+
+data_dir: data
+
+# 本地 HTTP API。默认仅监听本机；需要给其他服务调用时务必配置强随机 Token。
+api:
+  host: 127.0.0.1
+  port: 18766
+  token: ${WECHAT_ASSISTANT_API_TOKEN}
+  log_level: info
+
+# 飞书配置优先从桌面端“飞书接入”页面读取；以下字段仅用于无界面部署兜底。
+feishu:
+  enabled: false
+  app_id: ${FEISHU_APP_ID}
+  app_secret: ${FEISHU_APP_SECRET}
+  verification_token: ${FEISHU_VERIFICATION_TOKEN}
+  encrypt_key: ${FEISHU_ENCRYPT_KEY}
+  allow_all: false
+  allowed_open_ids: []
+  allowed_chat_ids: []
+  default_account_ids: []
+  agent_model_id: config:moonshot
+
+topics:
+  keywords_file: data/keywords.txt
+  # 兼容旧配置；新来源建议直接在桌面端“选题中心 → 来源管理”添加。
+  hot_api_url: ""
+  recent_days: 7
+  focus_keywords: [企业, 管理, 项目, 组织]
+  focus_terms: [企业, 公司, 经营, 业务, 商业, 管理, 战略, 流程, 效率, 绩效, 领导力, 项目, 交付, PMO, 协同, 组织, 架构, 机制, 团队, 人才]
+  rss_sources:
+    - name: 36氪
+      url: https://36kr.com/feed
+  news_queries:
+    - 企业 经营 管理
+    - 企业 项目 管理
+    - 企业 组织 管理
+    - 企业 战略 管理
+  # 首次启动时导入数据库，之后在“选题中心 → 关注公众号”维护。
+  followed_accounts:
+    - name: 蓝血研究
+      topics:
+        - "企业经营管理体系如何真正落地"
+        - "组织能力如何支撑企业持续增长"
+    - name: 华夏基石e洞察
+      topics:
+        - "企业战略与组织变革如何协同"
+        - "管理者如何打造高绩效组织"
+    - name: 中外管理传媒
+      topics:
+        - "企业管理中的增长与效率平衡"
+        - "组织管理如何应对经营不确定性"
+    - name: 项目管理评论
+      topics:
+        - "企业项目管理如何提升交付质量"
+        - "复杂项目中的组织协同与风险管理"

@@ -1,0 +1,2 @@
+"""Independent NiceGUI configuration panels."""
+

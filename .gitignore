@@ -1,0 +1,62 @@
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+config.yaml
+config.local.yaml
+config.*.local.yaml
+
+# Virtual environments and installed dependencies
+.venv/
+venv/
+env/
+__pypackages__/
+node_modules/
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+
+# Test and coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Packaging and release output
+*.egg-info/
+.eggs/
+dist/
+build/
+release_build*/
+
+# Runtime data, databases, and logs
+data/
+/None
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+~$*
+
+# Editors, local tooling, and operating-system files
+.agents/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

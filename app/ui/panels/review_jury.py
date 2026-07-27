@@ -1,0 +1,1143 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from typing import Any
+
+from nicegui import run, ui
+
+from app.config import load_config
+from app.services.batches import BatchService
+from app.ui.state import set_button_loading
+
+
+SEVERITY_LABELS = {
+    "high": "高优先级",
+    "medium": "中优先级",
+    "low": "低优先级",
+}
+
+SEVERITY_COLORS = {
+    "high": "red-7",
+    "medium": "orange-8",
+    "low": "blue-grey-6",
+}
+
+RESOLUTION_LABELS = {
+    "open": "待核实",
+    "resolved": "已核实",
+    "waived": "已接受风险",
+}
+
+
+def build_review_jury_panel(
+    *,
+    service: BatchService,
+    batch_id: str,
+    job_id: int,
+    job: dict[str, Any],
+    require_saved_editor: Callable[[], bool],
+    on_job_updated: Callable[[dict[str, Any]], None],
+) -> None:
+    """Render the manual AI editorial jury inside the shared review workbench.
+
+    The component never closes or rebuilds the parent workbench. Applying a
+    candidate delegates the returned job to ``on_job_updated`` so the existing
+    title/body/image/cover/preview controls can update in place.
+    """
+
+    owner_client = ui.context.client
+
+    def ui_alive() -> bool:
+        return not bool(getattr(owner_client, "is_deleted", False))
+
+    options = service.get_editorial_review_options()
+    profiles = [
+        item
+        for item in service.list_editorial_review_profiles(include_builtin=True)
+        if bool(item.get("builtin")) or bool(item.get("enabled"))
+    ]
+    profile_map = {str(item["id"]): item for item in profiles}
+    profile_options = {
+        str(item["id"]): (
+            f'{item["name"]}（内置）' if item.get("builtin") else str(item["name"])
+        )
+        for item in profiles
+    }
+    role_options = {
+        str(item["id"]): str(item["name"]) for item in options.get("roles") or []
+    }
+    style_options = {
+        str(item["id"]): str(item["name"]) for item in options.get("styles") or []
+    }
+    strictness_options = {
+        str(item["id"]): str(item["name"])
+        for item in options.get("strictness_levels") or []
+    }
+    account_id = str(
+        job.get("account_id")
+        or (job.get("meta") or {}).get("official_account_id")
+        or ""
+    )
+    try:
+        account_default = service.get_account_editorial_review_default(account_id)
+    except Exception:  # noqa: BLE001 - legacy/config.yaml accounts have no DB binding
+        account_default = {}
+    initial_profile_id = str(account_default.get("profile_id") or "")
+    if initial_profile_id not in profile_map:
+        initial_profile_id = next(iter(profile_options), "")
+    initial_config = dict(
+        (account_default.get("config") or {})
+        or (profile_map.get(initial_profile_id) or {}).get("config")
+        or {}
+    )
+    latest_reviews = service.list_editorial_reviews(job_id=job_id, limit=1)
+    runtime: dict[str, Any] = {
+        "review": latest_reviews[0] if latest_reviews else None,
+        "application": None,
+        "selected_issue_ids": set(),
+    }
+
+    review_expansion = ui.expansion(
+        "AI 评审团（手动触发）",
+        icon="groups",
+        value=False,
+    ).classes("w-full").props("header-class=text-indigo-9")
+    with review_expansion:
+        ui.label(
+            "AI 只从整篇运营效果出发，重点评估标题、开头、完读潜力、"
+            "点赞潜力和转发潜力，不做逐段校对或逐句挑字眼。"
+            "评审只在点击按钮后运行，不会自动覆盖当前文章。"
+        ).classes("muted")
+        ui.label(
+            "优先级：事实与合规底线 ＞ 公众号品牌规则 ＞ 用户选择的目标风格"
+        ).classes("text-warning text-caption")
+
+        profile_in = ui.select(
+            profile_options,
+            value=initial_profile_id or None,
+            label="评审方案",
+        ).classes("w-full q-mt-sm").props(
+            "outlined dense stack-label options-dense"
+        )
+        with ui.grid(columns=2).classes("w-full gap-3"):
+            roles_in = ui.select(
+                role_options,
+                value=list(initial_config.get("role_ids") or []),
+                label="评审角色（可多选）",
+                multiple=True,
+            ).classes("w-full").props(
+                "outlined dense stack-label options-dense use-chips"
+            )
+            styles_in = ui.select(
+                style_options,
+                value=list(initial_config.get("style_ids") or []),
+                label="目标风格（可多选）",
+                multiple=True,
+            ).classes("w-full").props(
+                "outlined dense stack-label options-dense use-chips"
+            )
+        strictness_in = ui.toggle(
+            strictness_options,
+            value=str(initial_config.get("strictness") or "standard"),
+        ).classes("q-mt-xs")
+
+        with ui.expansion("自定义本次评审规则", icon="tune", value=False).classes(
+            "w-full"
+        ):
+            focus_in = ui.textarea(
+                "评审重点",
+                value=str(initial_config.get("focus") or ""),
+                placeholder="例如：强化标题点击力、开头留存和转发价值，保留专业克制的品牌语气",
+            ).classes("w-full").props(
+                "outlined rows=3 stack-label maxlength=4000 counter"
+            )
+            audience_in = ui.input(
+                "期望读者",
+                value=str(initial_config.get("target_audience") or ""),
+                placeholder="例如：企业经营者、中高层管理者",
+            ).classes("w-full").props("outlined stack-label maxlength=1000")
+            with ui.grid(columns=2).classes("w-full gap-3"):
+                required_in = ui.textarea(
+                    "必须检查项（每行一项）",
+                    value=_join_lines(initial_config.get("required_checks")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+                ignored_in = ui.textarea(
+                    "忽略项（每行一项）",
+                    value=_join_lines(initial_config.get("ignored_items")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+                banned_in = ui.textarea(
+                    "禁用表达（每行一项）",
+                    value=_join_lines(initial_config.get("banned_expressions")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+                must_keep_in = ui.textarea(
+                    "必须保留内容（每行一项）",
+                    value=_join_lines(initial_config.get("must_keep")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+            advanced_in = ui.textarea(
+                "高级业务评审规则",
+                value=str(initial_config.get("advanced_rules") or ""),
+                placeholder=(
+                    "只填写业务规则。JSON 输出、评分字段和阶段协议由系统管理，"
+                    "不能在这里修改。"
+                ),
+            ).classes("w-full").props(
+                "outlined rows=5 stack-label maxlength=8000 counter"
+            )
+
+        def load_profile_config(profile_id: str) -> None:
+            config = dict((profile_map.get(str(profile_id)) or {}).get("config") or {})
+            if not config:
+                return
+            roles_in.value = list(config.get("role_ids") or [])
+            styles_in.value = list(config.get("style_ids") or [])
+            strictness_in.value = str(config.get("strictness") or "standard")
+            focus_in.value = str(config.get("focus") or "")
+            audience_in.value = str(config.get("target_audience") or "")
+            required_in.value = _join_lines(config.get("required_checks"))
+            ignored_in.value = _join_lines(config.get("ignored_items"))
+            banned_in.value = _join_lines(config.get("banned_expressions"))
+            must_keep_in.value = _join_lines(config.get("must_keep"))
+            advanced_in.value = str(config.get("advanced_rules") or "")
+
+        profile_in.on_value_change(
+            lambda event: load_profile_config(str(event.value or ""))
+        )
+
+        def collect_config() -> dict[str, Any]:
+            profile = profile_map.get(str(profile_in.value or "")) or {}
+            config = dict(profile.get("config") or {})
+            config.update(
+                {
+                    "role_ids": list(roles_in.value or []),
+                    "style_ids": list(styles_in.value or []),
+                    "strictness": str(strictness_in.value or "standard"),
+                    "focus": str(focus_in.value or ""),
+                    "target_audience": str(audience_in.value or ""),
+                    "required_checks": _split_lines(required_in.value),
+                    "ignored_items": _split_lines(ignored_in.value),
+                    "banned_expressions": _split_lines(banned_in.value),
+                    "must_keep": _split_lines(must_keep_in.value),
+                    "advanced_rules": str(advanced_in.value or ""),
+                }
+            )
+            return config
+
+        result_summary_host = ui.column().classes("w-full gap-2 q-mt-sm")
+        result_section = ui.column().classes("w-full gap-3 q-mt-md")
+        with result_section:
+            with ui.card().classes("w-full q-pa-md").style(
+                "border:1px solid #cbded8;box-shadow:none"
+            ):
+                result_host = ui.column().classes("w-full gap-3")
+        result_section.set_visibility(False)
+
+        async def scroll_to_review_result() -> None:
+            """Reveal the inline conclusion and keep the current workbench open."""
+
+            try:
+                if not ui_alive():
+                    return
+                review_expansion.value = True
+                result_section.set_visibility(True)
+                await asyncio.sleep(0)
+                if not ui_alive():
+                    return
+                result_section.run_method(
+                    "scrollIntoView",
+                    {"behavior": "smooth", "block": "start"},
+                )
+            except RuntimeError:
+                # The operator may close the parent workbench while a model call
+                # is returning; in that case there is no live client to scroll.
+                return
+
+        def render_rewrite_controls(review: dict[str, Any]) -> None:
+            review_status = str(review.get("status") or "")
+            if review_status == "applied":
+                ui.label(
+                    "已按所选建议完成智能修改，原稿已保存到历史版本。"
+                ).classes("text-positive")
+                return
+            if review_status not in {"completed", "candidate_ready"}:
+                return
+            ui.separator()
+            ui.label(
+                "请选择要采纳的整体改进方向。智能修改会围绕所选方向优化"
+                "标题、开头、阅读节奏和互动价值，原稿事实与核心观点保持不变。"
+            ).classes("muted")
+
+            async def use_original() -> None:
+                ui.notify(
+                    "已保留原文，本次 AI 评审没有修改文章内容",
+                    type="positive",
+                )
+
+            async def smart_rewrite() -> None:
+                if not require_saved_editor():
+                    return
+                selected_ids = sorted(runtime["selected_issue_ids"])
+                if not selected_ids:
+                    ui.notify("请至少勾选一条要采纳的改进意见", type="warning")
+                    return
+                set_button_loading(
+                    smart_btn,
+                    True,
+                    "AI 正在按已勾选意见修改原文并重新排版，请稍候…",
+                )
+                refreshed_review: dict[str, Any] | None = None
+                try:
+                    generated_review = await run.io_bound(
+                        lambda: service.generate_editorial_rewrite_candidate(
+                            batch_id,
+                            job_id,
+                            str(review["id"]),
+                            issue_ids=selected_ids,
+                            rewrite_mode="engagement_optimization",
+                            paragraph_numbers=[],
+                            instruction="",
+                        )
+                    )
+                    application = dict(generated_review.get("application") or {})
+                    if not application.get("id"):
+                        raise RuntimeError("AI 修改稿生成成功，但缺少应用记录")
+                    updated = await run.io_bound(
+                        lambda: service.apply_editorial_review_application(
+                            batch_id,
+                            job_id,
+                            str(application["id"]),
+                        )
+                    )
+                    if not ui_alive():
+                        return
+                    on_job_updated(updated)
+                    refreshed_review = await run.io_bound(
+                        lambda: service.get_editorial_review(str(review["id"]))
+                    )
+                    runtime["application"] = await run.io_bound(
+                        lambda: service.get_editorial_review_application(
+                            str(application["id"])
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if ui_alive():
+                        ui.notify(
+                            f"智能修改原文失败：{exc}",
+                            type="negative",
+                            timeout=12000,
+                        )
+                finally:
+                    if ui_alive():
+                        set_button_loading(smart_btn, False)
+                if refreshed_review is not None and ui_alive():
+                    runtime["review"] = refreshed_review
+                    render_review_result(refreshed_review)
+                    render_review_summary(refreshed_review)
+                    await scroll_to_review_result()
+                    ui.notify(
+                        "已按所选整体方向优化标题、开头和传播效果并刷新排版；"
+                        "当前仍停留在审核页，请检查后确认文章",
+                        type="positive",
+                        timeout=10000,
+                    )
+
+            with ui.row().classes("w-full justify-end q-gutter-sm q-mt-sm"):
+                ui.button(
+                    "使用原文",
+                    on_click=use_original,
+                ).props("outline color=blue-grey-7 no-caps icon=description")
+                smart_btn = ui.button(
+                    "智能修改原文",
+                    on_click=smart_rewrite,
+                ).props("unelevated color=indigo-7 no-caps icon=auto_fix_high")
+
+        def render_review_summary(review: dict[str, Any] | None) -> None:
+            result_summary_host.clear()
+            if not review:
+                return
+            result = dict(review.get("result") or {})
+            status = str(review.get("status") or "")
+            if status in {"failed", "stale"}:
+                return
+            with result_summary_host:
+                with ui.card().classes("w-full q-pa-md").style(
+                    "border:1px solid #dbe8e4;box-shadow:none"
+                ):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        with ui.column().classes("gap-0"):
+                            ui.label("AI 评审已完成").classes(
+                                "text-subtitle1 text-weight-bold"
+                            )
+                            ui.label(
+                                str(
+                                    result.get("conclusion")
+                                    or result.get("summary")
+                                    or "点击查看评审结论和改进意见"
+                                )
+                            ).classes("muted")
+                        ui.button(
+                            "查看评审结论",
+                            on_click=scroll_to_review_result,
+                        ).props(
+                            "outline color=indigo-7 no-caps icon=rate_review"
+                        )
+
+        def render_review_result(review: dict[str, Any] | None) -> None:
+            result_host.clear()
+            if not review:
+                return
+            result = dict(review.get("result") or {})
+            issues = [dict(item) for item in result.get("issues") or []]
+            known_issue_ids = {str(item.get("id") or "") for item in issues}
+            runtime["selected_issue_ids"].intersection_update(known_issue_ids)
+            with result_host:
+                ui.separator()
+                review_status = str(review.get("status") or "")
+                status_labels = {
+                    "running": "评审中",
+                    "rewriting": "正在生成修改稿",
+                    "completed": "评审完成",
+                    "candidate_ready": "候选稿待确认",
+                    "applied": "修改稿已应用",
+                    "failed": "评审失败",
+                    "stale": "评审已过期",
+                }
+                status_colors = {
+                    "running": "blue-7",
+                    "rewriting": "blue-7",
+                    "completed": "teal-7",
+                    "candidate_ready": "indigo-7",
+                    "applied": "green-7",
+                    "failed": "red-7",
+                    "stale": "orange-8",
+                }
+                with ui.row().classes("w-full items-center justify-between"):
+                    with ui.column().classes("gap-0"):
+                        ui.label(
+                            f'评审结果 · {review.get("profile_name") or "AI 评审团"}'
+                        ).classes("text-h6 text-weight-bold")
+                        ui.label(
+                            f'模型：{review.get("model_name") or "公众号绑定模型"}'
+                        ).classes("muted")
+                    with ui.row().classes("items-center"):
+                        if result and review_status not in {
+                            "running",
+                            "rewriting",
+                            "failed",
+                            "stale",
+                        }:
+                            ui.badge(
+                                f'总分 {int(result.get("overall_score") or 0)}'
+                            ).props("color=teal-7")
+                        ui.badge(
+                            status_labels.get(review_status, review_status or "未知状态")
+                        ).props(
+                            f'color={status_colors.get(review_status, "grey-7")}'
+                        )
+                        blockers = int(review.get("blocking_count") or 0)
+                        if blockers:
+                            ui.badge(f"{blockers} 条阻断项待核实").props(
+                                "color=red-7"
+                            )
+                if review_status in {"running", "rewriting"}:
+                    ui.label(
+                        "该评审仍在处理中，请稍后关闭并重新打开审核工作台查看结果。"
+                    ).classes("text-info")
+                    return
+                if review_status in {"failed", "stale"}:
+                    error = str(review.get("error") or "")
+                    message = (
+                        "文章已在评审后发生修改，请重新启动 AI 评审。"
+                        if review_status == "stale"
+                        else "上一次 AI 评审没有成功，请检查模型配置后重试。"
+                    )
+                    ui.label(message).classes("text-negative")
+                    if error:
+                        ui.label(f"原因：{error}").classes(
+                            "text-negative text-caption"
+                        )
+                    return
+                ui.label("评审结论").classes(
+                    "text-subtitle1 text-weight-bold q-mt-sm"
+                )
+                if result.get("summary"):
+                    ui.label(str(result["summary"])).classes("text-weight-medium")
+                if result.get("conclusion"):
+                    ui.label(f'发布建议：{result["conclusion"]}').classes(
+                        "text-weight-medium text-indigo-9"
+                    )
+                strengths = list(result.get("strengths") or [])
+                if strengths:
+                    ui.label("优点：" + "；".join(str(item) for item in strengths)).classes(
+                        "text-positive text-caption"
+                    )
+                dimensions = list(result.get("dimensions") or [])
+                if dimensions:
+                    engagement_dimension_ids = {
+                        "title_click",
+                        "opening_retention",
+                        "completion_potential",
+                        "like_potential",
+                        "share_potential",
+                    }
+                    returned_dimension_ids = {
+                        str(item.get("id") or "") for item in dimensions
+                    }
+                    if engagement_dimension_ids.issubset(
+                        returned_dimension_ids
+                    ):
+                        ui.label(
+                            "以下为 AI 预估的运营潜力分，不是真实公众号后台数据。"
+                        ).classes("muted text-caption")
+                    else:
+                        ui.label(
+                            "这是旧版评审维度；重新点击“开始 AI 评审”后，"
+                            "将改为标题、开头、完读、点赞和转发五项运营潜力。"
+                        ).classes("muted text-caption")
+                    with ui.grid(columns=5).classes("w-full gap-2"):
+                        for dimension in dimensions:
+                            with ui.card().classes("q-pa-sm").style(
+                                "border:1px solid #dfe8e5;box-shadow:none"
+                            ):
+                                ui.label(
+                                    str(dimension.get("name") or "运营潜力")
+                                ).classes("text-caption text-weight-bold")
+                                ui.label(
+                                    str(int(dimension.get("score") or 0))
+                                ).classes("text-h6 text-indigo-8")
+                                if dimension.get("summary"):
+                                    ui.label(
+                                        str(dimension.get("summary") or "")
+                                    ).classes("muted text-caption")
+                if not issues:
+                    ui.label("评审未发现需要处理的整体问题。").classes(
+                        "text-positive q-mt-sm"
+                    )
+                issue_group = ""
+                for issue in issues:
+                    issue_id = str(issue.get("id") or "")
+                    can_auto_apply = bool(issue.get("can_auto_apply"))
+                    resolution = str(issue.get("resolution") or "open")
+                    next_group = "editorial" if can_auto_apply else "safety"
+                    if next_group != issue_group:
+                        ui.label(
+                            "整体改进方向（可选择）"
+                            if next_group == "editorial"
+                            else "发布风险（需人工核实）"
+                        ).classes("text-subtitle1 text-weight-bold q-mt-sm")
+                        issue_group = next_group
+                    with ui.card().classes("w-full q-pa-md").style(
+                        "border:1px solid #e3e9e7;box-shadow:none"
+                    ):
+                        with ui.row().classes(
+                            "w-full items-center justify-between"
+                        ):
+                            with ui.row().classes("items-center q-gutter-xs"):
+                                ui.badge(
+                                    str(issue.get("role_name") or "评审角色")
+                                ).props("color=blue-grey-7")
+                                severity = str(issue.get("severity") or "medium")
+                                ui.badge(
+                                    SEVERITY_LABELS.get(severity, severity)
+                                ).props(
+                                    f'color={SEVERITY_COLORS.get(severity, "grey-7")}'
+                                )
+                                if issue.get("blocks_draft") and resolution == "open":
+                                    ui.badge("阻止写入草稿").props("color=red-7")
+                                if resolution != "open":
+                                    ui.badge(
+                                        RESOLUTION_LABELS.get(resolution, resolution)
+                                    ).props("color=green-7")
+                            if can_auto_apply:
+                                selected = ui.checkbox(
+                                    "接受这条改进意见",
+                                    value=issue_id
+                                    in runtime["selected_issue_ids"],
+                                )
+                                selected.on_value_change(
+                                    lambda event, iid=issue_id: _update_selection(
+                                        runtime["selected_issue_ids"],
+                                        iid,
+                                        bool(event.value),
+                                    )
+                                )
+                            else:
+                                ui.badge("需人工核实").props(
+                                    "outline color=deep-orange-7"
+                                ).tooltip(
+                                    "事实或合规提醒不能交给 AI 猜测或自动改写"
+                                )
+                        location = (
+                            str(issue.get("location") or "")
+                            if not can_auto_apply
+                            else ""
+                        )
+                        category = str(issue.get("category") or "")
+                        if location or category:
+                            ui.label(
+                                " · ".join(item for item in (location, category) if item)
+                            ).classes("muted text-caption")
+                        if issue.get("excerpt") and not can_auto_apply:
+                            ui.label(f'原文：{issue["excerpt"]}').classes(
+                                "text-caption text-blue-grey-8"
+                            )
+                        ui.label(
+                            f'评审判断：{issue.get("problem") or "未说明"}'
+                        ).classes(
+                            "text-weight-medium"
+                        )
+                        ui.label(
+                            f'整体改进方向：{issue.get("suggestion") or "请人工判断"}'
+                        )
+                        if not can_auto_apply:
+                            ui.label(
+                                "这类提醒不会交给 AI 猜测或改写。您无需填写意见，"
+                                "只需选择核实结果。"
+                            ).classes("muted text-caption")
+                            with ui.row().classes("items-center"):
+                                verified_btn = ui.button(
+                                    "我已核实",
+                                ).props(
+                                    "outline dense color=teal-8 no-caps icon=fact_check"
+                                )
+                                waive_btn = ui.button(
+                                    "保留原文并接受风险",
+                                ).props(
+                                    "outline dense color=deep-orange-7 no-caps icon=warning"
+                                )
+                                reopen_btn = ui.button(
+                                    "恢复待核实",
+                                ).props(
+                                    "flat dense color=blue-grey-7 no-caps icon=undo"
+                                )
+
+                            async def resolve_issue(
+                                resolution_value: str,
+                                button: Any,
+                                *,
+                                iid: str = issue_id,
+                            ) -> None:
+                                note = {
+                                    "resolved": (
+                                        "用户在桌面端 AI 评审结论中确认已人工核实"
+                                    ),
+                                    "waived": (
+                                        "用户在桌面端 AI 评审结论中选择保留原文并接受风险"
+                                    ),
+                                }.get(resolution_value, "")
+                                set_button_loading(
+                                    button,
+                                    True,
+                                    "正在保存该事实/合规项的人工处理结果…",
+                                )
+                                updated_review: dict[str, Any] | None = None
+                                try:
+                                    updated_review = await run.io_bound(
+                                        lambda: service.resolve_editorial_review_issue(
+                                            str(review["id"]),
+                                            iid,
+                                            resolution=resolution_value,
+                                            note=note,
+                                            resolved_by="桌面端运营人员",
+                                        )
+                                    )
+                                    ui.notify("核实结果已保存", type="positive")
+                                except Exception as exc:  # noqa: BLE001
+                                    ui.notify(
+                                        f"保存核实结果失败：{exc}",
+                                        type="negative",
+                                        timeout=10000,
+                                    )
+                                finally:
+                                    set_button_loading(button, False)
+                                if updated_review is not None:
+                                    runtime["review"] = updated_review
+                                    render_review_result(updated_review)
+                                    render_review_summary(updated_review)
+
+                            verified_btn.on_click(
+                                lambda _=None, button=verified_btn, handler=resolve_issue: handler(
+                                    "resolved", button
+                                )
+                            )
+                            def open_waive_confirmation(
+                                *,
+                                button: Any = waive_btn,
+                                handler: Any = resolve_issue,
+                            ) -> None:
+                                with ui.dialog() as confirm, ui.card():
+                                    ui.label("确认保留原文并接受这条风险？").classes(
+                                        "text-subtitle1 text-weight-bold"
+                                    )
+                                    ui.label(
+                                        "确认后该风险不再阻止写入草稿，系统会保留审计记录。"
+                                    ).classes("muted")
+
+                                    async def confirm_waive() -> None:
+                                        confirm.close()
+                                        await handler("waived", button)
+
+                                    with ui.row().classes("w-full justify-end"):
+                                        ui.button(
+                                            "取消",
+                                            on_click=confirm.close,
+                                        ).props("flat no-caps")
+                                        ui.button(
+                                            "确认接受风险",
+                                            on_click=confirm_waive,
+                                        ).props(
+                                            "unelevated color=deep-orange-7 no-caps"
+                                        )
+                                confirm.open()
+
+                            waive_btn.on_click(open_waive_confirmation)
+                            reopen_btn.on_click(
+                                lambda _=None, button=reopen_btn, handler=resolve_issue: handler(
+                                    "open", button
+                                )
+                            )
+                render_rewrite_controls(review)
+
+        async def start_review() -> None:
+            if not require_saved_editor():
+                return
+            if not list(roles_in.value or []):
+                ui.notify("请至少选择一个评审角色", type="warning")
+                return
+            if not list(styles_in.value or []):
+                ui.notify("请至少选择一种目标风格", type="warning")
+                return
+            set_button_loading(
+                start_btn,
+                True,
+                "AI 正在评估标题、开头、完读、点赞和转发潜力…",
+            )
+            completed_review: dict[str, Any] | None = None
+            try:
+                review = await run.io_bound(
+                    lambda: service.run_editorial_review(
+                        batch_id,
+                        job_id,
+                        profile_id=str(profile_in.value or "") or None,
+                        config=collect_config(),
+                    )
+                )
+                if not ui_alive():
+                    return
+                runtime["review"] = review
+                runtime["application"] = None
+                runtime["selected_issue_ids"].clear()
+                render_review_result(review)
+                render_review_summary(review)
+                completed_review = review
+                ui.notify(
+                    f'AI 评审完成，共发现 {len((review.get("result") or {}).get("issues") or [])} 条建议',
+                    type="positive",
+                    timeout=10000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if ui_alive():
+                    ui.notify(f"AI 评审失败：{exc}", type="negative", timeout=12000)
+            finally:
+                if ui_alive():
+                    set_button_loading(start_btn, False)
+            if completed_review is not None:
+                if ui_alive():
+                    await scroll_to_review_result()
+
+        start_btn = ui.button(
+            "开始 AI 评审",
+            on_click=start_review,
+        ).props("unelevated color=indigo-7 no-caps icon=rate_review")
+        ui.label(
+            "评审和生成修改稿会调用该公众号绑定的文本模型，可能产生模型费用。"
+        ).classes("muted text-caption")
+
+        if runtime["review"]:
+            applications = service.list_editorial_review_applications(
+                str(runtime["review"]["id"]), limit=1
+            )
+            runtime["application"] = applications[0] if applications else None
+            render_review_result(runtime["review"])
+            render_review_summary(runtime["review"])
+
+
+def build_editorial_review_profiles_panel(
+    _state: Any,
+    *,
+    on_profiles_change: Callable[[], None] | None = None,
+) -> None:
+    """Manage reusable custom editorial review profiles."""
+
+    service = BatchService(load_config())
+    options = service.get_editorial_review_options()
+    role_options = {
+        str(item["id"]): str(item["name"]) for item in options.get("roles") or []
+    }
+    style_options = {
+        str(item["id"]): str(item["name"]) for item in options.get("styles") or []
+    }
+    strictness_options = {
+        str(item["id"]): str(item["name"])
+        for item in options.get("strictness_levels") or []
+    }
+    host = ui.column().classes("w-full gap-3")
+
+    def open_editor(
+        record: dict[str, Any] | None = None,
+        *,
+        copy_record: bool = False,
+    ) -> None:
+        editing_id = (
+            str(record["id"])
+            if record and not copy_record and not bool(record.get("builtin"))
+            else None
+        )
+        config = dict((record or {}).get("config") or {})
+        with ui.dialog() as dialog, ui.card().classes("w-full").style(
+            "max-width:860px;max-height:92vh;overflow-y:auto"
+        ):
+            ui.label(
+                "编辑自定义评审方案" if editing_id else "新建自定义评审方案"
+            ).classes("text-h6 text-weight-bold")
+            ui.label(
+                "这里只定义业务评审规则；JSON、评分字段、事实与合规底线由系统控制。"
+            ).classes("muted")
+            name_in = ui.input(
+                "方案名称",
+                value=(
+                    f'{record.get("name")}（副本）'
+                    if record and copy_record
+                    else str((record or {}).get("name") or "")
+                ),
+            ).classes("w-full").props("outlined stack-label maxlength=80")
+            description_in = ui.input(
+                "方案说明",
+                value=str((record or {}).get("description") or ""),
+            ).classes("w-full").props("outlined stack-label maxlength=500")
+            with ui.grid(columns=2).classes("w-full gap-3"):
+                roles_in = ui.select(
+                    role_options,
+                    value=list(config.get("role_ids") or []),
+                    label="评审角色",
+                    multiple=True,
+                ).classes("w-full").props(
+                    "outlined stack-label options-dense use-chips"
+                )
+                styles_in = ui.select(
+                    style_options,
+                    value=list(config.get("style_ids") or []),
+                    label="目标风格",
+                    multiple=True,
+                ).classes("w-full").props(
+                    "outlined stack-label options-dense use-chips"
+                )
+            strictness_in = ui.toggle(
+                strictness_options,
+                value=str(config.get("strictness") or "standard"),
+            )
+            focus_in = ui.textarea(
+                "评审重点",
+                value=str(config.get("focus") or ""),
+            ).classes("w-full").props(
+                "outlined rows=3 stack-label maxlength=4000 counter"
+            )
+            audience_in = ui.input(
+                "目标读者",
+                value=str(config.get("target_audience") or ""),
+            ).classes("w-full").props("outlined stack-label")
+            with ui.grid(columns=2).classes("w-full gap-3"):
+                required_in = ui.textarea(
+                    "必须检查项（每行一项）",
+                    value=_join_lines(config.get("required_checks")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+                ignored_in = ui.textarea(
+                    "忽略项（每行一项）",
+                    value=_join_lines(config.get("ignored_items")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+                banned_in = ui.textarea(
+                    "禁用表达（每行一项）",
+                    value=_join_lines(config.get("banned_expressions")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+                must_keep_in = ui.textarea(
+                    "必须保留内容（每行一项）",
+                    value=_join_lines(config.get("must_keep")),
+                ).classes("w-full").props("outlined rows=4 stack-label")
+            advanced_in = ui.textarea(
+                "高级业务规则",
+                value=str(config.get("advanced_rules") or ""),
+            ).classes("w-full").props(
+                "outlined rows=5 stack-label maxlength=8000 counter"
+            )
+            with ui.grid(columns=2).classes("w-full gap-3"):
+                good_example_in = ui.textarea(
+                    "示例好文章（可选）",
+                    value=str(config.get("good_example") or ""),
+                    placeholder="粘贴一段能代表期望质量和风格的文章示例",
+                ).classes("w-full").props(
+                    "outlined rows=6 stack-label maxlength=6000 counter"
+                )
+                bad_example_in = ui.textarea(
+                    "示例坏文章（可选）",
+                    value=str(config.get("bad_example") or ""),
+                    placeholder="粘贴需要避免的文章示例",
+                ).classes("w-full").props(
+                    "outlined rows=6 stack-label maxlength=6000 counter"
+                )
+            score_weights_in = ui.textarea(
+                "评分权重（每行“维度=权重”，0–100）",
+                value=_format_weights(config.get("score_weights")),
+                placeholder="例如：\n标题点击力=25\n开头留存力=25\n完读潜力=20\n点赞潜力=15\n转发潜力=15",
+            ).classes("w-full").props("outlined rows=4 stack-label")
+            permissions = dict(config.get("permissions") or {})
+            with ui.row().classes("items-center q-gutter-md"):
+                allow_rewrite_in = ui.switch(
+                    "允许生成修改稿",
+                    value=bool(permissions.get("allow_rewrite", True)),
+                )
+                allow_title_in = ui.switch(
+                    "允许修改标题",
+                    value=bool(permissions.get("allow_title_changes", True)),
+                )
+                allow_body_in = ui.switch(
+                    "允许修改正文",
+                    value=bool(permissions.get("allow_body_changes", True)),
+                )
+                enabled_in = ui.switch(
+                    "启用方案",
+                    value=bool((record or {}).get("enabled", True)),
+                )
+
+            async def submit() -> None:
+                if not str(name_in.value or "").strip():
+                    ui.notify("请填写评审方案名称", type="warning")
+                    return
+                if not list(roles_in.value or []):
+                    ui.notify("请至少选择一个评审角色", type="warning")
+                    return
+                if not list(styles_in.value or []):
+                    ui.notify("请至少选择一种目标风格", type="warning")
+                    return
+                set_button_loading(save_btn, True, "正在保存评审方案…")
+                try:
+                    await run.io_bound(
+                        lambda: service.save_editorial_review_profile(
+                            profile_id=editing_id,
+                            name=str(name_in.value or ""),
+                            description=str(description_in.value or ""),
+                            enabled=bool(enabled_in.value),
+                            config={
+                                **config,
+                                "role_ids": list(roles_in.value or []),
+                                "style_ids": list(styles_in.value or []),
+                                "strictness": str(
+                                    strictness_in.value or "standard"
+                                ),
+                                "focus": str(focus_in.value or ""),
+                                "target_audience": str(audience_in.value or ""),
+                                "required_checks": _split_lines(required_in.value),
+                                "ignored_items": _split_lines(ignored_in.value),
+                                "banned_expressions": _split_lines(banned_in.value),
+                                "must_keep": _split_lines(must_keep_in.value),
+                                "advanced_rules": str(advanced_in.value or ""),
+                                "good_example": str(good_example_in.value or ""),
+                                "bad_example": str(bad_example_in.value or ""),
+                                "score_weights": _parse_weights(
+                                    score_weights_in.value
+                                ),
+                                "permissions": {
+                                    "allow_rewrite": bool(allow_rewrite_in.value),
+                                    "allow_title_changes": bool(allow_title_in.value),
+                                    "allow_body_changes": bool(allow_body_in.value),
+                                },
+                            },
+                        )
+                    )
+                    dialog.close()
+                    render()
+                    if on_profiles_change:
+                        on_profiles_change()
+                    ui.notify("评审方案已保存", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(
+                        f"保存评审方案失败：{exc}",
+                        type="negative",
+                        timeout=10000,
+                    )
+                finally:
+                    set_button_loading(save_btn, False)
+
+            with ui.row().classes("w-full justify-end"):
+                ui.button("取消", on_click=dialog.close).props("flat no-caps")
+                save_btn = ui.button("保存方案", on_click=submit).props(
+                    "unelevated color=teal-9 no-caps icon=save"
+                )
+        dialog.open()
+
+    def confirm_delete(profile: dict[str, Any]) -> None:
+        with ui.dialog() as dialog, ui.card():
+            ui.label(f'确定删除评审方案“{profile["name"]}”吗？').classes(
+                "text-weight-medium"
+            )
+
+            async def remove() -> None:
+                set_button_loading(delete_btn, True, "正在删除评审方案…")
+                try:
+                    await run.io_bound(
+                        lambda: service.delete_editorial_review_profile(
+                            str(profile["id"])
+                        )
+                    )
+                    dialog.close()
+                    render()
+                    if on_profiles_change:
+                        on_profiles_change()
+                    ui.notify("评审方案已删除", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"删除失败：{exc}", type="negative")
+                finally:
+                    set_button_loading(delete_btn, False)
+
+            with ui.row().classes("w-full justify-end"):
+                ui.button("取消", on_click=dialog.close).props("flat no-caps")
+                delete_btn = ui.button("删除", on_click=remove).props(
+                    "unelevated color=red-7 no-caps"
+                )
+        dialog.open()
+
+    def render() -> None:
+        host.clear()
+        profiles = service.list_editorial_review_profiles(include_builtin=True)
+        with host:
+            with ui.element("div").classes("card w-full"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("AI 评审方案管理").classes(
+                            "text-h6 text-weight-bold"
+                        )
+                        ui.label(
+                            "内置方案可以复制修改；自定义方案可绑定为不同公众号的默认评审团。"
+                        ).classes("muted")
+                    ui.button(
+                        "新建自定义方案",
+                        on_click=lambda: open_editor(),
+                    ).props("unelevated color=teal-9 no-caps icon=add")
+            for profile in profiles:
+                with ui.element("div").classes("card w-full"):
+                    with ui.row().classes("w-full items-start justify-between"):
+                        with ui.column().classes("gap-0").style(
+                            "min-width:0;flex:1"
+                        ):
+                            with ui.row().classes("items-center"):
+                                ui.label(str(profile["name"])).classes(
+                                    "text-weight-bold"
+                                )
+                                ui.badge(
+                                    "内置" if profile.get("builtin") else "自定义"
+                                ).props(
+                                    "color=blue-grey-7"
+                                    if profile.get("builtin")
+                                    else "color=teal-7"
+                                )
+                                if not profile.get("enabled"):
+                                    ui.badge("已停用").props("color=grey-7")
+                            ui.label(
+                                str(profile.get("description") or "")
+                            ).classes("muted")
+                            profile_config = dict(profile.get("config") or {})
+                            ui.label(
+                                "角色："
+                                + "、".join(
+                                    role_options.get(str(item), str(item))
+                                    for item in profile_config.get("role_ids") or []
+                                )
+                                + "；风格："
+                                + "、".join(
+                                    style_options.get(str(item), str(item))
+                                    for item in profile_config.get("style_ids") or []
+                                )
+                            ).classes("text-caption")
+                        with ui.row().classes("items-center"):
+                            if profile.get("builtin"):
+                                ui.button(
+                                    "复制修改",
+                                    on_click=lambda _=None, item=dict(profile): open_editor(
+                                        item, copy_record=True
+                                    ),
+                                ).props("flat dense color=teal-9 no-caps")
+                            else:
+                                ui.button(
+                                    "编辑",
+                                    on_click=lambda _=None, item=dict(profile): open_editor(
+                                        item
+                                    ),
+                                ).props("flat dense color=teal-9 no-caps")
+                                ui.button(
+                                    "删除",
+                                    on_click=lambda _=None, item=dict(profile): confirm_delete(
+                                        item
+                                    ),
+                                ).props("flat dense color=red-7 no-caps")
+
+    render()
+
+
+def enabled_profile_options(service: BatchService) -> dict[str, str]:
+    """Return profile options for per-account default selectors."""
+
+    return {
+        str(item["id"]): (
+            f'{item["name"]}（内置）' if item.get("builtin") else str(item["name"])
+        )
+        for item in service.list_editorial_review_profiles(include_builtin=True)
+        if bool(item.get("builtin")) or bool(item.get("enabled"))
+    }
+
+
+def _join_lines(value: Any) -> str:
+    if not isinstance(value, (list, tuple, set)):
+        return str(value or "")
+    return "\n".join(str(item) for item in value if str(item).strip())
+
+
+def _split_lines(value: Any) -> list[str]:
+    return list(
+        dict.fromkeys(
+            item.strip()
+            for item in str(value or "").replace("\r\n", "\n").split("\n")
+            if item.strip()
+        )
+    )
+
+
+def _format_weights(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return "\n".join(
+        f"{key}={weight}"
+        for key, weight in value.items()
+        if str(key).strip()
+    )
+
+
+def _parse_weights(value: Any) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for line in str(value or "").replace("\r\n", "\n").split("\n"):
+        if "=" not in line:
+            continue
+        name, raw_weight = line.split("=", 1)
+        name = name.strip()
+        try:
+            weight = int(raw_weight.strip())
+        except ValueError:
+            continue
+        if name:
+            result[name] = max(0, min(100, weight))
+    return result
+
+
+def _update_selection(selected: set[str], issue_id: str, checked: bool) -> None:
+    if checked:
+        selected.add(issue_id)
+    else:
+        selected.discard(issue_id)

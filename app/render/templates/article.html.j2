@@ -1,0 +1,69 @@
+<section class="article-preview" style="margin:0;padding:0;font-family:{{ body_font_family }};box-sizing:border-box;">
+  {% if show_byline %}
+  <section style="margin:4px 0 28px;text-align:center;font-size:12px;color:#888888;line-height:1.9;letter-spacing:0.45px;">
+    <p style="margin:0;"><span style="color:{{ accent_color }};font-weight:600;">作者</span>&nbsp; | &nbsp;{{ byline_author }}</p>
+    <p style="margin:0;"><span style="color:{{ accent_color }};font-weight:600;">来源</span>&nbsp; | &nbsp;{{ byline_source }}</p>
+    {% if byline_contact %}
+    <p style="margin:0;"><span style="color:{{ accent_color }};font-weight:600;">城市合伙人招募</span>&nbsp; | &nbsp;{{ byline_contact }}</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if subtitle %}
+  <p style="margin:0 0 {{ paragraph_spacing }};text-align:left;font-size:{{ body_font_size }};color:{{ body_color }};line-height:{{ body_line_height }};padding-right:{{ body_horizontal_padding }};padding-left:{{ body_horizontal_padding }};font-family:{{ body_font_family }};">
+    <span style="color:{{ h2_color }};font-weight:bold;">{{ subtitle | inline_markdown }}</span>
+  </p>
+  {% endif %}
+
+  {% for p in paragraphs %}
+    {% if p.startswith('# ') %}
+  <p style="margin:{{ title_spacing_before }} 0 {{ title_spacing_after }};text-align:{{ title_alignment }};font-size:{{ title_font_size }};color:{{ title_color }};line-height:{{ title_line_height }};padding-right:{{ body_horizontal_padding }};padding-left:{{ body_horizontal_padding }};font-family:{{ body_font_family }};font-weight:{{ title_weight }};">
+    {{ p[2:] | inline_markdown }}
+  </p>
+    {% elif p.startswith('## ') %}
+  <p style="margin:{{ argument_spacing_before }} 0 {{ argument_spacing_after }};text-align:{{ argument_alignment }};font-size:{{ argument_font_size }};color:{{ argument_color }};font-weight:{{ argument_weight }};line-height:{{ argument_line_height }};padding:4px {{ body_horizontal_padding }};font-family:{{ body_font_family }};background:{{ argument_background }};border-left:4px solid {{ argument_border_color }};">
+    {{ p[3:] | inline_markdown }}
+  </p>
+    {% elif p.startswith('### ') %}
+  <p style="margin:{{ argument_spacing_before }} 0 {{ argument_spacing_after }};text-align:{{ argument_alignment }};font-size:{{ body_font_size }};color:{{ argument_color }};font-weight:{{ argument_weight }};line-height:{{ argument_line_height }};padding:2px {{ body_horizontal_padding }};font-family:{{ body_font_family }};">
+    {{ p[4:] | inline_markdown }}
+  </p>
+    {% elif p.startswith('> ') %}
+  <blockquote style="margin:{{ quote_spacing_before }} 0 {{ quote_spacing_after }};padding:14px 16px;background:{{ quote_background }};border-left:4px solid {{ quote_border_color }};border-radius:0 8px 8px 0;color:{{ quote_color }};font-size:{{ quote_font_size }};font-style:normal;line-height:{{ quote_line_height }};box-sizing:border-box;">
+    {{ p[2:] | inline_markdown }}
+  </blockquote>
+    {% elif p == '__HR__' %}
+  <section style="height:1px;margin:24px {{ body_horizontal_padding }};background:#eeeeee;line-height:1px;"></section>
+    {% elif p.startswith('__TABLE__') %}
+  {{ p[9:] | markdown_table }}
+    {% elif p.startswith('__BULLET__') %}
+  <p style="margin:0 0 {{ list_spacing_after }};padding-left:{{ list_indent }};text-indent:-1em;font-size:{{ list_font_size }};color:{{ list_color }};line-height:{{ list_line_height }};font-family:{{ body_font_family }};"><span style="color:{{ list_marker_color }};font-weight:bold;">•</span>&nbsp;{{ p[10:] | inline_markdown }}</p>
+    {% elif p.startswith('__ORDERED__') %}
+  {% set ordered = p[11:].split('|', 1) %}
+  <p style="margin:0 0 {{ list_spacing_after }};padding-left:{{ list_indent }};text-indent:-1.2em;font-size:{{ list_font_size }};color:{{ list_color }};line-height:{{ list_line_height }};font-family:{{ body_font_family }};"><span style="color:{{ list_marker_color }};font-weight:bold;">{{ ordered[0] }}.</span>&nbsp;{{ ordered[1] | inline_markdown }}</p>
+    {% else %}
+  <p style="margin:0 0 {{ paragraph_spacing }};text-align:{{ body_alignment }};text-indent:{{ body_first_line_indent }};font-size:{{ body_font_size }};color:{{ body_color }};line-height:{{ body_line_height }};padding-right:{{ body_horizontal_padding }};padding-left:{{ body_horizontal_padding }};font-family:{{ body_font_family }};word-break:break-word;">
+    {{ p | inline_markdown }}
+  </p>
+    {% endif %}
+  {% endfor %}
+
+  {% if show_inline_ad and ad_html %}
+  <section style="margin:28px 0 8px 0;padding:16px 14px;border-top:1px solid #e8e8e8;">
+    {{ ad_html | safe }}
+  </section>
+  {% endif %}
+
+  {% if show_footer_follow %}
+  <section style="margin:36px 0 8px;padding-top:20px;border-top:1px solid #eeeeee;text-align:center;">
+    <p style="margin:0 0 12px 0;font-size:14px;color:#666666;line-height:1.6;">
+      {{ footer_follow_text }}
+    </p>
+    {% if footer_qr_url %}
+    <p style="margin:0;text-align:center;">
+      <img src="{{ footer_qr_url }}" alt="qrcode" style="width:140px;height:140px;display:inline-block;" />
+    </p>
+    {% endif %}
+  </section>
+  {% endif %}
+</section>
