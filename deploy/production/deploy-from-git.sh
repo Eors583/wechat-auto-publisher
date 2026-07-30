@@ -9,6 +9,8 @@ MIRROR="${DEPLOY_ROOT}/repository.git"
 RELEASES="${DEPLOY_ROOT}/releases"
 CURRENT="${DEPLOY_ROOT}/current"
 LOCK_FILE="${DEPLOY_ROOT}/shared/deploy.lock"
+GIT_FETCH_TIMEOUT="${GIT_FETCH_TIMEOUT:-120}"
+SKIP_GIT_FETCH="${SKIP_GIT_FETCH:-false}"
 
 mkdir -p "${DEPLOY_ROOT}/shared" "${RELEASES}"
 test -s "${SHARED_ENV}" || {
@@ -23,10 +25,15 @@ flock -n 9 || {
 }
 
 if [[ ! -d "${MIRROR}" ]]; then
-  git clone --mirror "${REPO_URL}" "${MIRROR}"
-else
+  timeout "${GIT_FETCH_TIMEOUT}" \
+    git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 \
+    clone --mirror "${REPO_URL}" "${MIRROR}"
+elif [[ "${SKIP_GIT_FETCH}" != "true" ]]; then
   git --git-dir="${MIRROR}" remote set-url origin "${REPO_URL}"
-  git --git-dir="${MIRROR}" fetch origin --prune
+  timeout "${GIT_FETCH_TIMEOUT}" \
+    git --git-dir="${MIRROR}" \
+    -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 \
+    fetch origin --prune
 fi
 
 ref="refs/heads/${DEPLOY_BRANCH}"
