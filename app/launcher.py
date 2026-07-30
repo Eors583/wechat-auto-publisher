@@ -245,6 +245,7 @@ def _run_ui_smoke_server(port: int) -> None:
         reload=False,
         show=False,
         port=int(port),
+        storage_secret=f"package-smoke-{uuid.uuid4().hex}",
     )
 
 
