@@ -9,9 +9,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 from app.config import database_target, load_config, project_root
+
+
+def _open_local_url(url: str, *, timeout: float = 2.0) -> Any:
+    """Open a loopback smoke-test URL without inheriting system proxies."""
+
+    return build_opener(ProxyHandler({})).open(url, timeout=timeout)
 
 
 def _api_route_paths(application: Any) -> set[str]:
@@ -224,7 +230,7 @@ def run_packaging_self_test() -> dict[str, Any]:
                         f"桌面验证进程提前退出：{process.returncode}"
                     )
                 try:
-                    with urlopen(
+                    with _open_local_url(
                         f"http://127.0.0.1:{port}/",
                         timeout=2.0,
                     ) as response:
