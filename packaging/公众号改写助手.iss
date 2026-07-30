@@ -2,13 +2,13 @@
 #define MyAppPublisher "蓝血研究"
 #define MyAppExeName "公众号改写助手.exe"
 #define MyAppVersion "1.3.0"
-#define MyRemoteUrl "http://47.99.126.8:18775"
+#define MyRemoteUrl "http://47.99.126.8/"
 #define BuildDir "..\dist\公众号改写助手"
 #ifndef MyAppId
   #define MyAppId "{{B5B0F085-6C6D-44F5-9D53-3895929B36EE}"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename MyAppName + "-安装包-" + MyAppVersion + "-20260728"
+  #define MyOutputBaseFilename MyAppName + "-生产环境安装包-" + MyAppVersion + "-20260730"
 #endif
 
 [Setup]

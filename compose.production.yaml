@@ -92,7 +92,9 @@ services:
       - python
       - -m
       - app.admin.server
-    environment: *app_environment
+    environment:
+      <<: *app_environment
+      WECHAT_PUBLISHER_ADMIN_ROOT_PATH: /admin
     volumes:
       - app_data:/app/data
     ports:

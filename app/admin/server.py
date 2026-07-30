@@ -324,6 +324,9 @@ def main() -> None:
         show=False,
         reload=False,
         reconnect_timeout=30.0,
+        root_path=str(
+            os.getenv("WECHAT_PUBLISHER_ADMIN_ROOT_PATH") or ""
+        ).rstrip("/"),
         storage_secret=str(
             os.getenv("AUTH_STORAGE_SECRET")
             or "wechat-auto-publisher-local-storage-v1"

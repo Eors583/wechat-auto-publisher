@@ -55,7 +55,7 @@ def test_installer_shortcuts_open_the_hosted_application() -> None:
         / "公众号改写助手.iss"
     ).read_text(encoding="utf-8")
 
-    assert '#define MyRemoteUrl "http://47.99.126.8:18775"' in installer
+    assert '#define MyRemoteUrl "http://47.99.126.8/"' in installer
     assert installer.count(
         'Parameters: "--remote-url {#MyRemoteUrl}"'
     ) == 3
