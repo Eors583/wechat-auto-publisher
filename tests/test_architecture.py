@@ -57,3 +57,20 @@ def test_batch_contract_projection_is_independent_from_service() -> None:
         "review_total": 1,
         "reviewed": 0,
     }
+
+
+def test_all_wechat_api_callsites_use_the_shared_factory() -> None:
+    callsite_paths = (
+        ROOT / "app" / "workflows" / "context.py",
+        ROOT / "app" / "services" / "followed_content.py",
+        ROOT / "app" / "benchmark.py",
+        ROOT / "app" / "ui" / "desktop.py",
+    )
+    for path in callsite_paths:
+        source = path.read_text(encoding="utf-8")
+        assert "build_wechat_client(" in source
+        assert "WeChatClient(" not in source
+        assert "WeChatAuth(" not in source
+
+    desktop_source = callsite_paths[-1].read_text(encoding="utf-8")
+    assert "build_wechat_auth(" in desktop_source

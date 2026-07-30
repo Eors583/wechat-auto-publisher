@@ -7,8 +7,12 @@ from typing import Any, Callable
 
 import httpx
 
+from .errors import WeChatHTTPError
+
 
 logger = logging.getLogger(__name__)
+
+WECHAT_API_BASE_URL = "https://api.weixin.qq.com"
 
 _RETRY_SAFE_POST_PATHS = {
     "/cgi-bin/material/batchget_material",
@@ -35,11 +39,15 @@ class WeChatClient:
         *,
         retry_attempts: int = 3,
         retry_backoff_seconds: float = 0.5,
+        base_url: str = WECHAT_API_BASE_URL,
+        basic_auth: httpx.BasicAuth | None = None,
     ) -> None:
         self._get_token = get_token
         self._refresh_token = refresh_token
         self._retry_attempts = max(1, int(retry_attempts))
         self._retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        self._base_url = str(base_url or WECHAT_API_BASE_URL).rstrip("/")
+        self._basic_auth = basic_auth
 
     def request(
         self,
@@ -74,8 +82,8 @@ class WeChatClient:
                 query = {"access_token": token}
                 if params:
                     query.update(params)
-                url = f"https://api.weixin.qq.com{path}"
-                with httpx.Client(timeout=60.0) as client:
+                url = f"{self._base_url}/{path.lstrip('/')}"
+                with httpx.Client(timeout=60.0, auth=self._basic_auth) as client:
                     resp = client.request(
                         method,
                         url,
@@ -91,6 +99,28 @@ class WeChatClient:
                     except json.JSONDecodeError:
                         payload = {"raw": resp.text}
                 break
+            except httpx.HTTPStatusError as exc:
+                status_code = int(exc.response.status_code)
+                if (
+                    retry_safe
+                    and status_code in {502, 503, 504}
+                    and attempt < attempts
+                ):
+                    delay = self._retry_backoff_seconds * (2 ** (attempt - 1))
+                    logger.warning(
+                        "WeChat gateway HTTP %s, retrying %s %s "
+                        "(%s/%s) in %.1fs",
+                        status_code,
+                        method,
+                        path,
+                        attempt + 1,
+                        attempts,
+                        delay,
+                    )
+                    if delay:
+                        time.sleep(delay)
+                    continue
+                raise WeChatHTTPError(status_code) from None
             except (httpx.TransportError, ConnectionError, OSError) as exc:
                 if attempt >= attempts:
                     raise

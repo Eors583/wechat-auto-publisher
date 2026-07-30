@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -8,13 +9,13 @@ from app.ai.openai_compat import is_junk_title_or_subtitle
 from app.cover import generate_article_cover, pick_random_image_media_id, resolve_cover
 from app.inline_images import insert_inline_images, resolve_inline_images
 from app.render import finalize_article_html, make_digest
+from app.services.failures import sanitize_failure_text
 from app.wechat.template_snapshot import (
     capture_template_snapshot,
     load_template_snapshot,
 )
 
 from .context import WorkflowContext
-
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,15 @@ class RenderingStep:
             )
         if snapshot:
             meta["editor_template_snapshot"] = str(snapshot.path)
+            meta["editor_template_sha256"] = hashlib.sha256(
+                snapshot.content.encode("utf-8")
+            ).hexdigest()
             if snapshot.source_media_id:
                 meta["editor_template_source_media_id"] = snapshot.source_media_id
+        else:
+            meta.pop("editor_template_snapshot", None)
+            meta.pop("editor_template_sha256", None)
+            meta.pop("editor_template_source_media_id", None)
 
         db.update_job(
             job_id,
@@ -183,8 +191,15 @@ class RenderingStep:
                     self.context.db.set_setting(cache_key, media_id)
                 return media_id, generated, ""
             except Exception as exc:  # noqa: BLE001
-                logger.exception("AI cover generation failed; falling back to material library")
-                cover_warning = f"AI 封面生成失败，已改用公众号素材：{exc}"
+                safe_error = sanitize_failure_text(exc)
+                logger.error(
+                    "AI cover generation failed; falling back to material "
+                    "library: %s",
+                    safe_error,
+                )
+                cover_warning = (
+                    f"AI 封面生成失败，已改用公众号素材：{safe_error}"
+                )
         else:
             cover_warning = ""
 

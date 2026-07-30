@@ -1,28 +1,26 @@
-"""Headless browser entry point for local development and verification."""
+from __future__ import annotations
 
 import os
 
 from nicegui import ui
 
 from app.ui.desktop import create_desktop_app
-from app.ui import styles
 
 
 def main() -> None:
-    port = int(str(os.getenv("WECHAT_PUBLISHER_UI_PORT") or "18765"))
-    print(
-        f"UI source: {styles.__file__} | "
-        f"layout={'float-v2' if 'float: left' in styles.APP_CSS else 'legacy-grid'} | "
-        f"port={port}",
-        flush=True,
-    )
     ui.run(
         root=create_desktop_app,
-        title="Wechat Publisher",
+        host="0.0.0.0",
+        port=int(os.getenv("WECHAT_PUBLISHER_UI_PORT") or "18765"),
+        title="公众号智能运营助手",
+        native=False,
+        show=False,
         reload=False,
         reconnect_timeout=30.0,
-        port=port,
-        show=False,
+        storage_secret=str(
+            os.getenv("AUTH_STORAGE_SECRET")
+            or "wechat-auto-publisher-local-storage-v1"
+        ),
     )
 
 

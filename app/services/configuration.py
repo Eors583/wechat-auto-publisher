@@ -44,6 +44,9 @@ _SENSITIVE_KEYS = {
     "refresh_token",
     "authorization",
     "cookie",
+    "password",
+    "proxy_password",
+    "relay_password",
 }
 
 
@@ -56,6 +59,7 @@ def _is_sensitive_key(key: str) -> bool:
         or normalized.endswith("_secret")
         or normalized.endswith("_token")
         or normalized.endswith("_cookie")
+        or normalized.endswith("_password")
     )
 
 
@@ -113,11 +117,13 @@ class ConfigurationService:
         name: str,
         app_id: str,
         app_secret: str | None,
-        model_id: str,
+        model_id: str = "",
         enabled: bool = True,
         account_id: str | None = None,
     ) -> dict[str, Any]:
-        self._require_text_model(model_id)
+        model_id = str(model_id or "").strip()
+        if model_id:
+            self._require_text_model(model_id)
         saved_id = persist_account(
             self.db,
             account_id=account_id,

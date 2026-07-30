@@ -40,13 +40,18 @@ def _text_values() -> list[str]:
 def test_settings_exposes_five_clear_product_entries(
     monkeypatch: Any,
 ) -> None:
+    monkeypatch.setattr(
+        desktop,
+        "should_show_onboarding",
+        lambda *_args, **_kwargs: False,
+    )
     monkeypatch.setattr(desktop, "_build_wizard", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(desktop, "build_topic_center", lambda *_args: None)
     monkeypatch.setattr(desktop, "build_tasks_panel", lambda *_args: None)
     monkeypatch.setattr(
         desktop,
         "_build_accounts_panel",
-        lambda *_args, **_kwargs: (lambda: None),
+        lambda *_args, **_kwargs: lambda: None,
     )
     monkeypatch.setattr(
         desktop,
@@ -71,6 +76,7 @@ def test_settings_exposes_five_clear_product_entries(
         assert label in texts
     for obsolete in ("文本模型", "提示词模板", "评审方案"):
         assert obsolete not in texts
+    assert "微信公众号云中转" not in texts
 
 
 def test_model_management_contains_all_text_and_image_sections(
@@ -105,7 +111,9 @@ def test_creation_plans_contains_writing_image_rules_and_ai_review(
 ) -> None:
     state = _SettingsState(tmp_path)
     rendered: list[tuple[str, Any]] = []
-    on_change = lambda: None
+
+    def on_change() -> None:
+        pass
 
     def fake_prompts(
         _state: Any,

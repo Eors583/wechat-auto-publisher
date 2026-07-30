@@ -1,0 +1,112 @@
+name: wechat-publisher
+
+x-app-build: &app_build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    PYTHON_IMAGE: docker.m.daocloud.io/library/python:3.12-slim
+    DEBIAN_MIRROR: http://mirrors.aliyun.com/debian
+    DEBIAN_SECURITY_MIRROR: http://mirrors.aliyun.com/debian-security
+    PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    networks:
+      - internal
+
+  api:
+    build: *app_build
+    image: wechat-auto-publisher:${APP_VERSION:-production}
+    command:
+      - uvicorn
+      - app.api.server:create_api_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18766"
+    environment: &app_environment
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AUTH_REQUIRED: "true"
+      AUTH_STORAGE_SECRET: ${AUTH_STORAGE_SECRET}
+      FEISHU_ENABLED: ${FEISHU_ENABLED:-false}
+      WECHAT_RELAY_ENABLED: "false"
+      WECHAT_PUBLISHER_PUBLIC_UI_URL: http://47.99.126.8:18775
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - app_data:/app/data
+    ports:
+      - "18776:18766"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:18766/health || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - internal
+
+  web:
+    build: *app_build
+    image: wechat-auto-publisher:${APP_VERSION:-production}
+    command:
+      - python
+      - -m
+      - app.ui.server
+    environment: *app_environment
+    volumes:
+      - app_data:/app/data
+    ports:
+      - "18775:18765"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+  admin:
+    build: *app_build
+    image: wechat-auto-publisher:${APP_VERSION:-production}
+    command:
+      - python
+      - -m
+      - app.admin.server
+    environment: *app_environment
+    volumes:
+      - app_data:/app/data
+    ports:
+      - "18777:18767"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  app_data:
+
+networks:
+  internal:

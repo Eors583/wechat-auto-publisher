@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from app.db_backend import (
+    connect_postgres,
+    is_postgres_url,
+    postgres_integrity_errors,
+)
 
 
 JOB_STATUSES = (
@@ -31,22 +39,43 @@ STEPS = (
     "publish",
 )
 
+_PROCESS_OWNER_SESSION_ID = f"process-{uuid.uuid4().hex}"
+_INTEGRITY_ERRORS = (sqlite3.IntegrityError, *postgres_integrity_errors())
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 class Database:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        owner_session_id: str | None = None,
+    ) -> None:
         self.path = str(path)
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.backend = "postgresql" if is_postgres_url(self.path) else "sqlite"
+        self.database_url = self.path if self.backend == "postgresql" else ""
+        self.owner_session_id = (
+            str(owner_session_id or "").strip()
+            or str(
+                os.getenv("WECHAT_PUBLISHER_LAUNCH_SESSION_ID") or ""
+            ).strip()
+            or _PROCESS_OWNER_SESSION_ID
+        )
+        if self.backend == "sqlite":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+    def connect(self) -> Iterator[Any]:
+        if self.backend == "postgresql":
+            conn = connect_postgres(self.database_url)
+        else:
+            conn = sqlite3.connect(self.path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
@@ -58,6 +87,14 @@ class Database:
 
     def _init_schema(self) -> None:
         with self.connect() as conn:
+            if self.backend == "postgresql":
+                # Web, API and the standalone admin console can initialize at
+                # the same time. Serialize DDL/migrations per database to avoid
+                # PostgreSQL relation-lock deadlocks during concurrent starts.
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    (8_104_721_907_351,),
+                )
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -142,6 +179,7 @@ class Database:
                     app_secret_encrypted TEXT NOT NULL,
                     model_id TEXT NOT NULL,
                     layout_json TEXT,
+                    review_priority INTEGER NOT NULL DEFAULT 0,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -197,6 +235,25 @@ class Database:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS job_versions (
@@ -386,6 +443,60 @@ class Database:
                     FOREIGN KEY (followed_account_id) REFERENCES followed_accounts(id) ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS job_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT NOT NULL,
+                    job_id INTEGER NOT NULL,
+                    stage TEXT NOT NULL,
+                    attempt_no INTEGER NOT NULL,
+                    model_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    error_code TEXT,
+                    error TEXT,
+                    started_at TEXT NOT NULL,
+                    owner_session_id TEXT NOT NULL DEFAULT '',
+                    heartbeat_at TEXT,
+                    completed_at TEXT,
+                    next_retry_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS draft_deliveries (
+                    idempotency_key TEXT PRIMARY KEY,
+                    job_id INTEGER NOT NULL,
+                    account_id TEXT NOT NULL,
+                    content_fingerprint TEXT NOT NULL,
+                    content_revision INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    draft_media_id TEXT,
+                    last_error_code TEXT,
+                    error TEXT,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    reconciled_at TEXT,
+                    next_retry_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(job_id, account_id, content_revision, content_fingerprint),
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS wechat_connection_health (
+                    account_id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL DEFAULT 'direct',
+                    status TEXT NOT NULL,
+                    checked_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    latency_ms INTEGER,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    last_error_code TEXT,
+                    error TEXT,
+                    last_successful_write_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_topic_items_published
                     ON topic_items(published_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_followed_articles_account
@@ -407,6 +518,19 @@ class Database:
                     ON account_creation_plan_defaults(creation_plan_id);
                 CREATE INDEX IF NOT EXISTS idx_creation_plan_account_templates_account
                     ON creation_plan_account_templates(account_id);
+                CREATE INDEX IF NOT EXISTS idx_jobs_review_inbox
+                    ON jobs(status, step, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_job_attempts_job
+                    ON job_attempts(job_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_job_attempts_status
+                    ON job_attempts(status, started_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_job_attempts_running
+                    ON job_attempts(job_id)
+                    WHERE status = 'running';
+                CREATE INDEX IF NOT EXISTS idx_draft_deliveries_status
+                    ON draft_deliveries(status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_user_sessions_user
+                    ON user_sessions(user_id, expires_at);
                 """
             )
             # Lightweight migration for databases created before per-account layouts.
@@ -416,6 +540,88 @@ class Database:
             }
             if "layout_json" not in account_columns:
                 conn.execute("ALTER TABLE official_accounts ADD COLUMN layout_json TEXT")
+            if "review_priority" not in account_columns:
+                conn.execute(
+                    """
+                    ALTER TABLE official_accounts
+                    ADD COLUMN review_priority INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_official_accounts_review_priority
+                ON official_accounts(review_priority DESC)
+                """
+            )
+            attempt_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(job_attempts)"
+                ).fetchall()
+            }
+            if "owner_session_id" not in attempt_columns:
+                conn.execute(
+                    """
+                    ALTER TABLE job_attempts
+                    ADD COLUMN owner_session_id TEXT NOT NULL DEFAULT ''
+                    """
+                )
+            if "heartbeat_at" not in attempt_columns:
+                conn.execute(
+                    "ALTER TABLE job_attempts ADD COLUMN heartbeat_at TEXT"
+                )
+            conn.execute(
+                """
+                UPDATE job_attempts
+                SET heartbeat_at = started_at
+                WHERE heartbeat_at IS NULL OR heartbeat_at = ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_job_attempts_owner_lease
+                ON job_attempts(status, owner_session_id, heartbeat_at)
+                """
+            )
+            delivery_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(draft_deliveries)"
+                ).fetchall()
+            }
+            for name, declaration in {
+                "content_revision": "INTEGER NOT NULL DEFAULT 0",
+                "last_error_code": "TEXT",
+                "next_retry_at": "TEXT",
+            }.items():
+                if name not in delivery_columns:
+                    conn.execute(
+                        f"ALTER TABLE draft_deliveries ADD COLUMN {name} {declaration}"
+                    )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_deliveries_revision
+                ON draft_deliveries(
+                    job_id, account_id, content_revision, content_fingerprint
+                )
+                """
+            )
+            health_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(wechat_connection_health)"
+                ).fetchall()
+            }
+            for name, declaration in {
+                "mode": "TEXT NOT NULL DEFAULT 'direct'",
+                "latency_ms": "INTEGER",
+                "last_error_code": "TEXT",
+            }.items():
+                if name not in health_columns:
+                    conn.execute(
+                        "ALTER TABLE wechat_connection_health "
+                        f"ADD COLUMN {name} {declaration}"
+                    )
             job_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
@@ -427,6 +633,14 @@ class Database:
                     ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 0
                     """
                 )
+            if "scheduled_at" not in job_columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN scheduled_at TEXT")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_jobs_scheduled_at
+                ON jobs(scheduled_at)
+                """
+            )
             review_columns = {
                 str(row["name"])
                 for row in conn.execute(
@@ -467,6 +681,12 @@ class Database:
             }.items():
                 if name not in batch_job_columns:
                     conn.execute(f"ALTER TABLE batch_jobs ADD COLUMN {name} {declaration}")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_batch_jobs_review_status
+                ON batch_jobs(review_status, job_id)
+                """
+            )
             followed_account_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(followed_accounts)").fetchall()
@@ -708,26 +928,209 @@ class Database:
             ).fetchall()
             return [self._row_to_job(r) for r in rows]
 
-    def recover_stale_jobs(self, *, older_than_minutes: int = 30) -> int:
-        """Mark orphaned in-progress jobs left behind by a previous process."""
+    def recover_stale_jobs(
+        self,
+        *,
+        older_than_minutes: int = 30,
+        owner_session_id: str | None = None,
+    ) -> int:
+        """Recover orphaned work using persisted launch-session leases.
+
+        Attempts owned by a different launcher session are interrupted
+        immediately. Attempts from the current session are left alone until
+        their heartbeat lease expires. Legacy active jobs without a running
+        attempt retain the previous timestamp-based recovery behavior.
+        """
+
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(minutes=max(1, older_than_minutes))
+            datetime.now(timezone.utc)
+            - timedelta(minutes=max(1, older_than_minutes))
         ).replace(microsecond=0).isoformat()
-        active = ("pending", "ingesting", "rewriting", "title_optimizing", "rendering", "injecting")
-        placeholders = ",".join("?" for _ in active)
+        active = (
+            "pending",
+            "ingesting",
+            "rewriting",
+            "title_optimizing",
+            "rendering",
+            "injecting",
+        )
+        active_placeholders = ",".join("?" for _ in active)
+        current_owner = (
+            str(owner_session_id or "").strip() or self.owner_session_id
+        )
         now = _utc_now()
+        recovered_job_ids: set[int] = set()
         with self.connect() as conn:
-            cursor = conn.execute(
-                f"""
-                UPDATE jobs
-                SET status = 'cancelled',
-                    error = '应用重启后检测到历史任务已中断，请重新发起改写',
-                    updated_at = ?
-                WHERE status IN ({placeholders}) AND updated_at < ?
+            stale_attempts = conn.execute(
+                """
+                SELECT id, job_id
+                FROM job_attempts
+                WHERE status = 'running'
+                  AND (
+                      COALESCE(owner_session_id, '') <> ?
+                      OR COALESCE(heartbeat_at, started_at) < ?
+                  )
                 """,
-                (now, *active, cutoff),
+                (current_owner, cutoff),
+            ).fetchall()
+            for row in stale_attempts:
+                cursor = conn.execute(
+                    """
+                    UPDATE job_attempts
+                    SET status = 'cancelled',
+                        error_code = 'job.interrupted',
+                        error = '应用重启后检测到历史执行已中断',
+                        completed_at = ?
+                    WHERE id = ? AND status = 'running'
+                      AND (
+                          COALESCE(owner_session_id, '') <> ?
+                          OR COALESCE(heartbeat_at, started_at) < ?
+                      )
+                    """,
+                    (
+                        now,
+                        int(row["id"]),
+                        current_owner,
+                        cutoff,
+                    ),
+                )
+                if cursor.rowcount:
+                    recovered_job_ids.add(int(row["job_id"]))
+            if recovered_job_ids:
+                job_placeholders = ",".join(
+                    "?" for _ in recovered_job_ids
+                )
+                conn.execute(
+                    f"""
+                    UPDATE jobs
+                    SET status = 'cancelled',
+                        error = '应用重启后检测到历史任务已中断，请重新发起改写',
+                        updated_at = ?
+                    WHERE id IN ({job_placeholders})
+                      AND status IN ({active_placeholders})
+                    """,
+                    (now, *recovered_job_ids, *active),
+                )
+
+            orphaned_rows = conn.execute(
+                f"""
+                SELECT j.id
+                FROM jobs j
+                WHERE j.status IN ({active_placeholders})
+                  AND j.updated_at < ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM job_attempts a
+                      WHERE a.job_id = j.id AND a.status = 'running'
+                  )
+                """,
+                (*active, cutoff),
+            ).fetchall()
+            orphaned_job_ids = [
+                int(row["id"]) for row in orphaned_rows
+            ]
+            if orphaned_job_ids:
+                recovered_orphans: list[int] = []
+                for orphaned_job_id in orphaned_job_ids:
+                    cursor = conn.execute(
+                        f"""
+                    UPDATE jobs
+                    SET status = 'cancelled',
+                        error = '应用重启后检测到历史任务已中断，请重新发起改写',
+                        updated_at = ?
+                    WHERE id = ?
+                      AND status IN ({active_placeholders})
+                      AND updated_at < ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM job_attempts a
+                          WHERE a.job_id = jobs.id
+                            AND a.status = 'running'
+                      )
+                    """,
+                        (
+                            now,
+                            orphaned_job_id,
+                            *active,
+                            cutoff,
+                        ),
+                    )
+                    if cursor.rowcount:
+                        recovered_orphans.append(orphaned_job_id)
+                recovered_job_ids.update(recovered_orphans)
+
+            affected_batch_ids: list[str] = []
+            if recovered_job_ids:
+                recovered_placeholders = ",".join(
+                    "?" for _ in recovered_job_ids
+                )
+                affected_batch_ids = [
+                    str(row["batch_id"])
+                    for row in conn.execute(
+                        f"""
+                        SELECT DISTINCT batch_id
+                        FROM batch_jobs
+                        WHERE job_id IN ({recovered_placeholders})
+                        """,
+                        tuple(recovered_job_ids),
+                    ).fetchall()
+                ]
+            self._recompute_batch_statuses_locked(
+                conn, affected_batch_ids, updated_at=now
             )
-            return int(cursor.rowcount or 0)
+        return len(recovered_job_ids)
+
+    @staticmethod
+    def _recompute_batch_statuses_locked(
+        conn: sqlite3.Connection,
+        batch_ids: list[str],
+        *,
+        updated_at: str,
+    ) -> None:
+        for batch_id in batch_ids:
+            statuses = {
+                str(row["status"] or "")
+                for row in conn.execute(
+                    """
+                    SELECT j.status
+                    FROM batch_jobs bj
+                    JOIN jobs j ON j.id = bj.job_id
+                    WHERE bj.batch_id = ?
+                    """,
+                    (batch_id,),
+                ).fetchall()
+            }
+            if not statuses:
+                continue
+            active = {
+                "pending",
+                "ingesting",
+                "rewriting",
+                "title_optimizing",
+                "rendering",
+            }
+            if statuses & active:
+                status = "processing"
+            elif "injecting" in statuses:
+                status = "injecting"
+            elif statuses <= {"drafted", "published"}:
+                status = "drafted"
+            elif statuses == {"ready_for_review"}:
+                status = "ready_for_review"
+            elif statuses == {"cancelled"}:
+                status = "cancelled"
+            elif statuses == {"failed"}:
+                status = "failed"
+            else:
+                status = "partial_failed"
+            conn.execute(
+                """
+                UPDATE batches
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, updated_at, batch_id),
+            )
 
     def update_job(self, job_id: int, **fields: Any) -> None:
         if not fields:
@@ -777,10 +1180,18 @@ class Database:
             }:
                 content_compare.append((key, value))
         if content_compare:
+            # SQLite accepts ``column IS NOT ?`` as a null-safe inequality,
+            # while PostgreSQL rejects the translated ``IS NOT $n`` syntax.
+            # Use PostgreSQL's null-safe comparison without changing the
+            # existing SQLite behavior.
+            difference_operator = (
+                "IS DISTINCT FROM" if self.backend == "postgresql" else "IS NOT"
+            )
             updates.append(
                 "content_revision = content_revision + CASE WHEN ("
                 + " OR ".join(
-                    f"{key} IS NOT ?" for key, _value in content_compare
+                    f"{key} {difference_operator} ?"
+                    for key, _value in content_compare
                 )
                 + ") THEN 1 ELSE 0 END"
             )
@@ -820,6 +1231,56 @@ class Database:
                     max(0, int(expected_content_revision or 0)),
                 ),
             )
+            return int(cursor.rowcount or 0) == 1
+
+    def claim_job_for_retry(
+        self,
+        job_id: int,
+        *,
+        expected_status: str,
+        target_status: str,
+        target_step: str,
+        expected_updated_at: str | None = None,
+    ) -> bool:
+        """Atomically reserve a job for retry across processes.
+
+        ``expected_updated_at`` prevents an ABA race where another process
+        claims a failed job, finishes quickly, and changes it back to
+        ``failed`` before this caller reaches the compare-and-set.
+        """
+
+        with self.connect() as conn:
+            if expected_updated_at is None:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, step = ?, error = NULL, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        str(target_status),
+                        str(target_step),
+                        _utc_now(),
+                        int(job_id),
+                        str(expected_status),
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, step = ?, error = NULL, updated_at = ?
+                    WHERE id = ? AND status = ? AND updated_at = ?
+                    """,
+                    (
+                        str(target_status),
+                        str(target_step),
+                        _utc_now(),
+                        int(job_id),
+                        str(expected_status),
+                        str(expected_updated_at),
+                    ),
+                )
             return int(cursor.rowcount or 0) == 1
 
     def save_job_version(self, job_id: int, *, reason: str) -> int:
@@ -885,9 +1346,13 @@ class Database:
             day = now[:10].replace("-", "")
             count = int(
                 conn.execute(
-                    "SELECT COUNT(*) FROM batches WHERE substr(created_at, 1, 10) = ?",
+                    """
+                    SELECT COUNT(*) AS value
+                    FROM batches
+                    WHERE substr(created_at, 1, 10) = ?
+                    """,
                     (now[:10],),
-                ).fetchone()[0]
+                ).fetchone()["value"]
                 or 0
             )
             display_id = f"{day}-{count + 1:02d}"
@@ -1015,6 +1480,689 @@ class Database:
             if not cursor.rowcount:
                 raise KeyError(f"任务不属于该批次：{job_id}")
 
+    def review_inbox_counts(
+        self,
+        *,
+        account_id: str | None = None,
+        requested_by: str | None = None,
+        chat_id: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, int]:
+        """Return queue counters without loading every batch into memory."""
+
+        local_now = datetime.now().astimezone()
+        local_start = local_now.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        day_start = local_start.astimezone(timezone.utc).isoformat(
+            timespec="microseconds"
+        )
+        day_end = (local_start + timedelta(days=1)).astimezone(
+            timezone.utc
+        ).isoformat(timespec="microseconds")
+        account_clause = " AND bj.account_id = ?" if account_id else ""
+        account_params: list[Any] = [str(account_id)] if account_id else []
+        search_clause = ""
+        search_params: list[Any] = []
+        search_value = str(search or "").strip()
+        if search_value:
+            search_clause = """
+                AND (
+                    COALESCE(j.selected_title, '') LIKE ?
+                    OR COALESCE(j.raw_title, '') LIKE ?
+                    OR COALESCE(j.topic, '') LIKE ?
+                    OR COALESCE(j.source, '') LIKE ?
+                    OR COALESCE(j.source_url, '') LIKE ?
+                    OR COALESCE(b.topic, '') LIKE ?
+                    OR COALESCE(b.source_url, '') LIKE ?
+                    OR COALESCE(bj.account_name, '') LIKE ?
+                )
+            """
+            pattern = f"%{search_value}%"
+            search_params = [pattern] * 8
+        scope_parts: list[str] = []
+        scope_params: list[Any] = []
+        if requested_by:
+            scope_parts.append("b.requested_by = ?")
+            scope_params.append(str(requested_by))
+        if chat_id:
+            scope_parts.append("b.chat_id = ?")
+            scope_params.append(str(chat_id))
+        scope_clause = (
+            " AND (" + " OR ".join(scope_parts) + ")"
+            if scope_parts
+            else ""
+        )
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    SUM(CASE
+                        WHEN j.status = 'ready_for_review'
+                         AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'
+                        THEN 1 ELSE 0 END
+                    ) AS review,
+                    SUM(CASE
+                        WHEN j.status = 'failed' AND j.step = 'inject'
+                        THEN 1 ELSE 0 END
+                    ) AS write_failed,
+                    SUM(CASE
+                        WHEN j.status = 'failed' AND j.step != 'inject'
+                        THEN 1 ELSE 0 END
+                    ) AS generation_failed,
+                    SUM(CASE
+                        WHEN j.status IN ('drafted', 'published')
+                         AND j.updated_at >= ? AND j.updated_at < ?
+                        THEN 1 ELSE 0 END
+                    ) AS today_completed
+                FROM batch_jobs bj
+                JOIN jobs j ON j.id = bj.job_id
+                JOIN batches b ON b.id = bj.batch_id
+                WHERE b.archived_at IS NULL
+                {account_clause}
+                {search_clause}
+                {scope_clause}
+                """,
+                (
+                    day_start,
+                    day_end,
+                    *account_params,
+                    *search_params,
+                    *scope_params,
+                ),
+            ).fetchone()
+        values = dict(row) if row else {}
+        return {
+            key: int(values.get(key) or 0)
+            for key in (
+                "review",
+                "write_failed",
+                "generation_failed",
+                "today_completed",
+            )
+        }
+
+    def list_review_inbox_rows(
+        self,
+        *,
+        bucket: str = "review",
+        account_id: str | None = None,
+        requested_by: str | None = None,
+        chat_id: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return one article-level page ordered by operator urgency."""
+
+        normalized_bucket = str(bucket or "review").strip().lower()
+        local_now = datetime.now().astimezone()
+        local_start = local_now.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        day_start = local_start.astimezone(timezone.utc).isoformat(
+            timespec="microseconds"
+        )
+        day_end = (local_start + timedelta(days=1)).astimezone(
+            timezone.utc
+        ).isoformat(timespec="microseconds")
+        overdue = (
+            datetime.now(timezone.utc) - timedelta(hours=24)
+        ).isoformat(timespec="microseconds")
+        scheduled_day = local_start.date().isoformat()
+        clauses = {
+            "review": (
+                "j.status = 'ready_for_review' "
+                "AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'"
+            ),
+            "write_failed": "j.status = 'failed' AND j.step = 'inject'",
+            "generation_failed": "j.status = 'failed' AND j.step != 'inject'",
+            "today_completed": (
+                "j.status IN ('drafted', 'published') "
+                "AND j.updated_at >= ? AND j.updated_at < ?"
+            ),
+        }
+        if normalized_bucket not in clauses:
+            raise ValueError(f"Unsupported review inbox bucket: {bucket}")
+        filter_params: list[Any] = []
+        if normalized_bucket == "today_completed":
+            filter_params.extend((day_start, day_end))
+        account_clause = ""
+        if account_id:
+            account_clause = " AND bj.account_id = ?"
+            filter_params.append(str(account_id))
+        search_clause = ""
+        search_value = str(search or "").strip()
+        if search_value:
+            search_clause = """
+                AND (
+                    COALESCE(j.selected_title, '') LIKE ?
+                    OR COALESCE(j.raw_title, '') LIKE ?
+                    OR COALESCE(j.topic, '') LIKE ?
+                    OR COALESCE(j.source, '') LIKE ?
+                    OR COALESCE(j.source_url, '') LIKE ?
+                    OR COALESCE(b.topic, '') LIKE ?
+                    OR COALESCE(b.source_url, '') LIKE ?
+                    OR COALESCE(bj.account_name, '') LIKE ?
+                )
+            """
+            pattern = f"%{search_value}%"
+            filter_params.extend([pattern] * 8)
+        scope_parts: list[str] = []
+        if requested_by:
+            scope_parts.append("b.requested_by = ?")
+            filter_params.append(str(requested_by))
+        if chat_id:
+            scope_parts.append("b.chat_id = ?")
+            filter_params.append(str(chat_id))
+        scope_clause = (
+            " AND (" + " OR ".join(scope_parts) + ")"
+            if scope_parts
+            else ""
+        )
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    b.id AS batch_id,
+                    b.display_id AS batch_display_id,
+                    b.topic AS batch_topic,
+                    b.source_url AS batch_source_url,
+                    b.source_mode AS batch_source_mode,
+                    bj.account_id,
+                    bj.account_name,
+                    bj.review_status,
+                    bj.viewed_at,
+                    bj.confirmed_at,
+                    COALESCE(oa.review_priority, 0) AS review_priority,
+                    er.id AS latest_review_id,
+                    er.status AS latest_review_status,
+                    er.result_json AS latest_review_result_json,
+                    er.blocking_count AS latest_review_blocking_count,
+                    j.*,
+                    CASE
+                        WHEN j.created_at >= ? AND j.created_at < ? THEN 1
+                        WHEN j.status = 'ready_for_review'
+                         AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'
+                         AND j.created_at < ? THEN 2
+                        WHEN substr(COALESCE(j.scheduled_at, ''), 1, 10) = ? THEN 3
+                        WHEN COALESCE(oa.review_priority, 0) > 0 THEN 4
+                        ELSE 5
+                    END AS priority_bucket
+                FROM batch_jobs bj
+                JOIN jobs j ON j.id = bj.job_id
+                JOIN batches b ON b.id = bj.batch_id
+                LEFT JOIN official_accounts oa ON oa.id = bj.account_id
+                LEFT JOIN editorial_reviews er ON er.id = (
+                    SELECT er2.id
+                    FROM editorial_reviews er2
+                    WHERE er2.job_id = j.id
+                    ORDER BY er2.created_at DESC, er2.id DESC
+                    LIMIT 1
+                )
+                WHERE b.archived_at IS NULL
+                  AND {clauses[normalized_bucket]}
+                  {account_clause}
+                  {search_clause}
+                  {scope_clause}
+                ORDER BY
+                    priority_bucket ASC,
+                    COALESCE(oa.review_priority, 0) DESC,
+                    CASE
+                        WHEN j.status = 'ready_for_review'
+                         AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'
+                         AND j.created_at < ?
+                        THEN j.created_at
+                    END ASC,
+                    j.created_at DESC,
+                    j.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (
+                    day_start,
+                    day_end,
+                    overdue,
+                    scheduled_day,
+                    *filter_params,
+                    overdue,
+                    max(1, min(int(limit), 200)),
+                    max(0, int(offset)),
+                ),
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
+
+    def has_active_batches(self) -> bool:
+        """Return whether any non-archived batch still has active article work."""
+
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM batch_jobs bj
+                JOIN jobs j ON j.id = bj.job_id
+                JOIN batches b ON b.id = bj.batch_id
+                WHERE b.archived_at IS NULL
+                  AND j.status IN (
+                      'pending',
+                      'ingesting',
+                      'rewriting',
+                      'title_optimizing',
+                      'rendering',
+                      'injecting'
+                  )
+                LIMIT 1
+                """
+            ).fetchone()
+        return row is not None
+
+    def create_job_attempt(
+        self,
+        *,
+        batch_id: str,
+        job_id: int,
+        stage: str,
+        model_id: str | None = None,
+        next_retry_at: str | None = None,
+        owner_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically create the only active execution attempt for a job."""
+
+        now = _utc_now()
+        owner = (
+            str(owner_session_id or "").strip() or self.owner_session_id
+        )
+        try:
+            with self.connect() as conn:
+                attempt_no = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) + 1 AS value
+                        FROM job_attempts
+                        WHERE job_id = ? AND stage = ?
+                        """,
+                        (int(job_id), str(stage)),
+                    ).fetchone()["value"]
+                    or 1
+                )
+                cursor = conn.execute(
+                    """
+                    INSERT INTO job_attempts (
+                        batch_id, job_id, stage, attempt_no, model_id,
+                        status, started_at, owner_session_id, heartbeat_at,
+                        next_retry_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(batch_id),
+                        int(job_id),
+                        str(stage),
+                        attempt_no,
+                        model_id or None,
+                        now,
+                        owner,
+                        now,
+                        next_retry_at,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE jobs SET updated_at = ? WHERE id = ?",
+                    (now, int(job_id)),
+                )
+                row = conn.execute(
+                    "SELECT * FROM job_attempts WHERE id = ?",
+                    (int(cursor.lastrowid),),
+                ).fetchone()
+        except _INTEGRITY_ERRORS as exc:
+            raise ValueError("该文章已有操作正在执行，请勿重复提交。") from exc
+        if not row:
+            raise RuntimeError("Unable to create job attempt")
+        return dict(row)
+
+    def heartbeat_job_attempt(
+        self,
+        attempt_id: int,
+        *,
+        owner_session_id: str | None = None,
+    ) -> bool:
+        """Renew a running attempt lease owned by this launcher session."""
+
+        owner = (
+            str(owner_session_id or "").strip() or self.owner_session_id
+        )
+        now = _utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT job_id
+                FROM job_attempts
+                WHERE id = ? AND status = 'running'
+                  AND owner_session_id = ?
+                """,
+                (int(attempt_id), owner),
+            ).fetchone()
+            if not row:
+                return False
+            cursor = conn.execute(
+                """
+                UPDATE job_attempts
+                SET heartbeat_at = ?
+                WHERE id = ? AND status = 'running'
+                  AND owner_session_id = ?
+                """,
+                (now, int(attempt_id), owner),
+            )
+            if not cursor.rowcount:
+                return False
+            conn.execute(
+                """
+                UPDATE jobs
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (now, int(row["job_id"])),
+            )
+        return True
+
+    def finish_job_attempt(
+        self,
+        attempt_id: int,
+        *,
+        status: str,
+        error_code: str | None = None,
+        error: str | None = None,
+        next_retry_at: str | None = None,
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE job_attempts
+                SET status = ?, error_code = ?, error = ?,
+                    completed_at = ?, next_retry_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (
+                    str(status),
+                    error_code or None,
+                    error or None,
+                    now,
+                    next_retry_at,
+                    int(attempt_id),
+                ),
+            )
+            if not cursor.rowcount:
+                raise KeyError(f"Job attempt is not running: {attempt_id}")
+            row = conn.execute(
+                "SELECT * FROM job_attempts WHERE id = ?", (int(attempt_id),)
+            ).fetchone()
+        return dict(row)
+
+    def list_job_attempts(
+        self, job_id: int, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM job_attempts
+                WHERE job_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(job_id), max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_wechat_connection_health(
+        self, account_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM wechat_connection_health
+                WHERE account_id = ?
+                """,
+                (str(account_id),),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["details"] = _loads_json(result.get("details_json"), {})
+        return result
+
+    def upsert_wechat_connection_health(
+        self,
+        account_id: str,
+        *,
+        status: str,
+        checked_at: str,
+        expires_at: str,
+        details: dict[str, Any] | None = None,
+        error: str | None = None,
+        mode: str = "direct",
+        latency_ms: int | None = None,
+        last_error_code: str | None = None,
+        last_successful_write_at: str | None = None,
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO wechat_connection_health (
+                    account_id, mode, status, checked_at, expires_at,
+                    latency_ms, details_json, last_error_code, error,
+                    last_successful_write_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    mode=excluded.mode,
+                    status=excluded.status,
+                    checked_at=excluded.checked_at,
+                    expires_at=excluded.expires_at,
+                    latency_ms=excluded.latency_ms,
+                    details_json=excluded.details_json,
+                    last_error_code=excluded.last_error_code,
+                    error=excluded.error,
+                    last_successful_write_at=COALESCE(
+                        excluded.last_successful_write_at,
+                        wechat_connection_health.last_successful_write_at
+                    ),
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    str(account_id),
+                    str(mode or "direct"),
+                    str(status),
+                    str(checked_at),
+                    str(expires_at),
+                    latency_ms,
+                    json.dumps(details or {}, ensure_ascii=False),
+                    last_error_code or None,
+                    error or None,
+                    last_successful_write_at or None,
+                    now,
+                ),
+            )
+        result = self.get_wechat_connection_health(account_id)
+        if not result:
+            raise RuntimeError("Unable to save WeChat connection health")
+        return result
+
+    def invalidate_wechat_connection_health(self, account_id: str) -> None:
+        """Expire a cached probe while preserving last successful write data."""
+
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE wechat_connection_health
+                SET status = 'stale', expires_at = '', updated_at = ?
+                WHERE account_id = ?
+                """,
+                (_utc_now(), str(account_id)),
+            )
+
+    def invalidate_all_wechat_connection_health(self) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE wechat_connection_health
+                SET status = 'stale', expires_at = '', updated_at = ?
+                """,
+                (_utc_now(),),
+            )
+
+    def mark_wechat_connection_write_success(
+        self,
+        account_id: str,
+        *,
+        written_at: str | None = None,
+    ) -> None:
+        now = written_at or _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO wechat_connection_health (
+                    account_id, mode, status, checked_at, expires_at,
+                    details_json, last_successful_write_at, updated_at
+                ) VALUES (?, 'direct', 'unknown', ?, ?, '{}', ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    last_successful_write_at=excluded.last_successful_write_at,
+                    updated_at=excluded.updated_at
+                """,
+                (str(account_id), now, now, now, now),
+            )
+
+    def claim_draft_delivery(
+        self,
+        *,
+        idempotency_key: str,
+        job_id: int,
+        account_id: str,
+        content_fingerprint: str,
+        content_revision: int = 0,
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO draft_deliveries (
+                    idempotency_key, job_id, account_id, content_fingerprint,
+                    content_revision, status, attempts, details_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', 0, '{}', ?, ?)
+                """,
+                (
+                    str(idempotency_key),
+                    int(job_id),
+                    str(account_id),
+                    str(content_fingerprint),
+                    max(0, int(content_revision or 0)),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM draft_deliveries
+                WHERE job_id = ? AND account_id = ?
+                  AND content_revision = ? AND content_fingerprint = ?
+                """,
+                (
+                    int(job_id),
+                    str(account_id),
+                    max(0, int(content_revision or 0)),
+                    str(content_fingerprint),
+                ),
+            ).fetchone()
+        if not row:
+            raise RuntimeError("Unable to claim draft delivery")
+        result = self._draft_delivery_row(row)
+        result["claimed_new"] = bool(cursor.rowcount)
+        return result
+
+    def get_draft_delivery(
+        self, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM draft_deliveries
+                WHERE idempotency_key = ?
+                """,
+                (str(idempotency_key),),
+            ).fetchone()
+        return self._draft_delivery_row(row) if row else None
+
+    def transition_draft_delivery(
+        self,
+        idempotency_key: str,
+        *,
+        from_statuses: list[str] | tuple[str, ...] | set[str],
+        status: str,
+        draft_media_id: str | None = None,
+        error: str | None = None,
+        details: dict[str, Any] | None = None,
+        reconciled_at: str | None = None,
+        next_retry_at: str | None = None,
+        last_error_code: str | None = None,
+    ) -> dict[str, Any] | None:
+        allowed = tuple(str(item) for item in from_statuses if str(item))
+        if not allowed:
+            return None
+        placeholders = ", ".join("?" for _ in allowed)
+        now = _utc_now()
+        attempts_sql = (
+            "attempts + 1" if str(status) == "running" else "attempts"
+        )
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE draft_deliveries
+                SET status = ?,
+                    attempts = {attempts_sql},
+                    draft_media_id = COALESCE(?, draft_media_id),
+                    last_error_code = ?,
+                    error = ?,
+                    details_json = COALESCE(?, details_json),
+                    reconciled_at = COALESCE(?, reconciled_at),
+                    next_retry_at = ?,
+                    updated_at = ?
+                WHERE idempotency_key = ?
+                  AND status IN ({placeholders})
+                """,
+                (
+                    str(status),
+                    draft_media_id or None,
+                    last_error_code or None,
+                    error or None,
+                    (
+                        json.dumps(details, ensure_ascii=False)
+                        if details is not None
+                        else None
+                    ),
+                    reconciled_at or None,
+                    next_retry_at or None,
+                    now,
+                    str(idempotency_key),
+                    *allowed,
+                ),
+            )
+            if not cursor.rowcount:
+                return None
+            row = conn.execute(
+                """
+                SELECT * FROM draft_deliveries
+                WHERE idempotency_key = ?
+                """,
+                (str(idempotency_key),),
+            ).fetchone()
+        return self._draft_delivery_row(row) if row else None
+
+    @staticmethod
+    def _draft_delivery_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["details"] = _loads_json(result.get("details_json"), {})
+        return result
+
     def archive_batch(self, batch_id: str, *, archived: bool = True) -> None:
         with self.connect() as conn:
             cursor = conn.execute(
@@ -1080,7 +2228,7 @@ class Database:
                     (event_id, _utc_now()),
                 )
             return True
-        except sqlite3.IntegrityError:
+        except _INTEGRITY_ERRORS:
             return False
 
     def get_setting(self, key: str) -> str | None:
@@ -1102,6 +2250,158 @@ class Database:
                 """,
                 (key, value, _utc_now()),
             )
+
+    # ------------------------------------------------------------------
+    # Users and login sessions
+    # ------------------------------------------------------------------
+    def create_user(
+        self,
+        *,
+        username: str,
+        password_hash: str,
+        role: str = "user",
+        enabled: bool = True,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        new_id = str(user_id or f"user_{uuid.uuid4().hex}")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (
+                    id, username, password_hash, role, enabled,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id,
+                    str(username),
+                    str(password_hash),
+                    str(role),
+                    int(bool(enabled)),
+                    now,
+                    now,
+                ),
+            )
+        user = self.get_user(new_id)
+        if not user:
+            raise RuntimeError("Unable to create user")
+        return user
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ?",
+                (str(user_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM users
+                WHERE lower(username) = lower(?)
+                """,
+                (str(username),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_users(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM users"
+        params: tuple[Any, ...] = ()
+        if enabled_only:
+            sql += " WHERE enabled = ?"
+            params = (1,)
+        sql += " ORDER BY created_at ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_user_enabled(self, user_id: str, enabled: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (int(bool(enabled)), _utc_now(), str(user_id)),
+            )
+
+    def create_user_session(
+        self,
+        *,
+        token_hash: str,
+        user_id: str,
+        expires_at: str,
+    ) -> None:
+        now = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_sessions (
+                    token_hash, user_id, expires_at, created_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(token_hash) DO UPDATE SET
+                    user_id=excluded.user_id,
+                    expires_at=excluded.expires_at,
+                    last_seen_at=excluded.last_seen_at
+                """,
+                (str(token_hash), str(user_id), str(expires_at), now, now),
+            )
+
+    def get_user_session(self, token_hash: str) -> dict[str, Any] | None:
+        now = _utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    s.token_hash,
+                    s.expires_at,
+                    s.created_at AS session_created_at,
+                    s.last_seen_at,
+                    u.id,
+                    u.username,
+                    u.password_hash,
+                    u.role,
+                    u.enabled,
+                    u.created_at,
+                    u.updated_at
+                FROM user_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.token_hash = ?
+                  AND s.expires_at > ?
+                  AND u.enabled = 1
+                """,
+                (str(token_hash), now),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    """
+                    UPDATE user_sessions
+                    SET last_seen_at = ?
+                    WHERE token_hash = ?
+                    """,
+                    (now, str(token_hash)),
+                )
+        return dict(row) if row else None
+
+    def delete_user_session(self, token_hash: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM user_sessions WHERE token_hash = ?",
+                (str(token_hash),),
+            )
+
+    def purge_expired_user_sessions(self) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM user_sessions WHERE expires_at <= ?",
+                (_utc_now(),),
+            )
+        return int(cursor.rowcount or 0)
 
     def upsert_ad(self, ad: dict[str, Any]) -> None:
         now = _utc_now()
@@ -1507,25 +2807,34 @@ class Database:
 
     def upsert_official_account(self, account: dict[str, Any]) -> None:
         now = _utc_now()
+        previous = self.get_official_account(str(account["id"]))
         layout = account.get("layout")
         if layout is None:
             try:
                 layout = json.loads(str(account.get("layout_json") or "{}"))
             except json.JSONDecodeError:
                 layout = {}
+        review_priority = int(
+            account.get(
+                "review_priority",
+                (previous or {}).get("review_priority") or 0,
+            )
+            or 0
+        )
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO official_accounts (
                     id, name, app_id, app_secret_encrypted, model_id, layout_json,
-                    enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    review_priority, enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     app_id=excluded.app_id,
                     app_secret_encrypted=excluded.app_secret_encrypted,
                     model_id=excluded.model_id,
                     layout_json=excluded.layout_json,
+                    review_priority=excluded.review_priority,
                     enabled=excluded.enabled,
                     updated_at=excluded.updated_at
                 """,
@@ -1536,14 +2845,33 @@ class Database:
                     account["app_secret_encrypted"],
                     account["model_id"],
                     json.dumps(layout or {}, ensure_ascii=False),
+                    review_priority,
                     1 if account.get("enabled", True) else 0,
                     account.get("created_at") or now,
                     now,
                 ),
             )
+        connection_changed = not previous or any(
+            (
+                bool((previous or {}).get("enabled"))
+                != bool(account.get("enabled", (previous or {}).get("enabled")))
+            )
+            if key == "enabled"
+            else (
+                str((previous or {}).get(key) or "")
+                != str(account.get(key, (previous or {}).get(key)) or "")
+            )
+            for key in ("app_id", "app_secret_encrypted", "enabled")
+        )
+        if connection_changed:
+            self.invalidate_wechat_connection_health(str(account["id"]))
 
     def delete_official_account(self, account_id: str) -> None:
         with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM wechat_connection_health WHERE account_id = ?",
+                (account_id,),
+            )
             conn.execute("DELETE FROM official_accounts WHERE id = ?", (account_id,))
 
     def list_editorial_review_profiles(
@@ -1791,7 +3119,7 @@ class Database:
         sql = "SELECT * FROM editorial_reviews"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         values.append(max(1, int(limit)))
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, values).fetchall()]

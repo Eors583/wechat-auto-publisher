@@ -9,6 +9,7 @@ from app.ai.failover import FailoverRewriter, TitleScorer
 from app.db import Database
 from app.notify import Notifier
 from app.render import TemplateRenderer
+from app.services.failures import sanitize_failure_text
 from app.wechat import WeChatClient
 from app.workflows import (
     DeliverySteps,
@@ -38,7 +39,9 @@ class Pipeline:
         cancel_event: threading.Event | None = None,
     ) -> None:
         self.config = config
-        self.db = db or Database(config["_db_path"])
+        self.db = db or Database(
+            str(config.get("_db_target") or config["_db_path"])
+        )
         self.notifier = Notifier((config.get("notify") or {}).get("webhook_url"))
         self.rewriter = FailoverRewriter(config)
         self.renderer = TemplateRenderer(config)
@@ -97,35 +100,65 @@ class Pipeline:
         selected_title_index: int | None = None,
         from_step: str = "ingest",
         publish_now: bool = False,
+        attempt_stage_overrides: dict[str, str] | None = None,
+        attempt_model_ids: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         job = self._require_job(job_id)
         start_index = STEP_ORDER.index(from_step) if from_step in STEP_ORDER else 0
+        stage_overrides = dict(attempt_stage_overrides or {})
+        stage_model_ids = dict(attempt_model_ids or {})
+
+        def tracked(stage: str, operation: Any) -> Any:
+            return self.context.run_tracked_stage(
+                job_id,
+                job,
+                stage,
+                operation,
+                stage_overrides=stage_overrides,
+                stage_model_ids=stage_model_ids,
+            )
+
         try:
             self._check_cancelled(job_id)
             if start_index <= 0:
-                job = self._step_ingest(job)
+                job = tracked("ingest", lambda: self._step_ingest(job))
                 self._check_cancelled(job_id)
             if start_index <= 1:
-                job = self._step_rewrite(job)
+                job = tracked("rewrite", lambda: self._step_rewrite(job))
                 self._check_cancelled(job_id)
             if start_index <= 2:
-                job = self._step_title_optimize(job)
+                job = tracked(
+                    "title_optimize",
+                    lambda: self._step_title_optimize(job),
+                )
                 self._check_cancelled(job_id)
             if start_index <= 3:
-                job = self._step_render(job, cover_media_id=cover_media_id)
+                job = tracked(
+                    "render",
+                    lambda: self._step_render(
+                        job, cover_media_id=cover_media_id
+                    ),
+                )
                 self._check_cancelled(job_id)
             if review and not publish_now:
+                # Publish the reviewable state only after ``tracked`` has
+                # persisted a terminal attempt. Inbox polling must never see a
+                # ready article whose stage attempt is still running.
                 self.db.update_job(
                     job_id, status="ready_for_review", step="inject", error=None
                 )
                 return self._require_job(job_id)
             if start_index <= 4:
                 self._check_cancelled(job_id)
-                self._step_inject(
-                    job,
-                    selected_title_index=selected_title_index,
-                    cover_media_id=cover_media_id,
-                    publish_now=publish_now or job.get("mode") == "publish",
+                tracked(
+                    "inject",
+                    lambda: self._step_inject(
+                        job,
+                        selected_title_index=selected_title_index,
+                        cover_media_id=cover_media_id,
+                        publish_now=publish_now
+                        or job.get("mode") == "publish",
+                    ),
                 )
             return self._require_job(job_id)
         except JobCancelled:
@@ -135,9 +168,12 @@ class Pipeline:
             if self.cancel_event.is_set():
                 self.db.update_job(job_id, status="cancelled", error="用户已终止改写")
                 return self._require_job(job_id)
-            logger.exception("Job %s failed", job_id)
-            self.db.update_job(job_id, status="failed", error=str(exc))
-            self.notifier.send(f"Job #{job_id} failed", str(exc), level="error")
+            safe_error = sanitize_failure_text(exc)
+            logger.error("Job %s failed: %s", job_id, safe_error)
+            self.db.update_job(job_id, status="failed", error=safe_error)
+            self.notifier.send(
+                f"Job #{job_id} failed", safe_error, level="error"
+            )
             raise
 
     def review_and_inject(

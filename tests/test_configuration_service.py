@@ -112,6 +112,31 @@ def test_account_and_model_configuration_is_safe_and_shared(tmp_path) -> None:
     assert service.delete_model(str(second_model["id"]))["deleted"] is True
 
 
+def test_account_can_be_saved_without_model_and_bound_later(tmp_path) -> None:
+    db = Database(tmp_path / "configuration-optional-model.db")
+    service = ConfigurationService(db, {"ai": {}})
+
+    account = service.save_account(
+        name="待配置模型公众号",
+        app_id="wx-no-model-yet",
+        app_secret="wechat-private-secret",
+        model_id="",
+    )
+
+    assert account["model_id"] == ""
+    assert account["model_name"] == "暂未绑定模型"
+    assert account["has_model"] is False
+
+    model = _save_text_model(service, name="后续绑定模型")
+    rebound = service.bind_account_model(
+        str(account["id"]),
+        str(model["id"]),
+    )
+    assert rebound["model_id"] == model["id"]
+    assert rebound["model_name"] == "后续绑定模型"
+    assert rebound["has_model"] is True
+
+
 def test_prompt_bindings_layout_and_image_settings_reuse_domain_validation(
     tmp_path,
 ) -> None:

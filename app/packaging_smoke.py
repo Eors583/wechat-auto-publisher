@@ -11,7 +11,17 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-from app.config import load_config, project_root
+from app.config import database_target, load_config, project_root
+
+
+def _api_route_paths(application: Any) -> set[str]:
+    """Return public route paths while ignoring framework-internal entries."""
+
+    return {
+        str(path)
+        for route in application.routes
+        if (path := getattr(route, "path", None))
+    }
 
 
 def run_packaging_self_test() -> dict[str, Any]:
@@ -49,8 +59,34 @@ def run_packaging_self_test() -> dict[str, Any]:
     def database_schema() -> str:
         from app.db import Database
 
-        database = Database(config_holder["_db_path"])
-        return f"accounts={len(database.list_official_accounts())}"
+        database = Database(database_target(config_holder))
+        with database.connect() as connection:
+            tables = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            account_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(official_accounts)"
+                ).fetchall()
+            }
+        required_tables = {
+            "job_attempts",
+            "draft_deliveries",
+            "wechat_connection_health",
+        }
+        missing = sorted(required_tables - tables)
+        if missing:
+            raise RuntimeError(f"P0 数据表缺失：{missing}")
+        if "review_priority" not in account_columns:
+            raise RuntimeError("公众号审核优先级字段缺失")
+        return (
+            f"accounts={len(database.list_official_accounts())} "
+            f"p0_tables={len(required_tables)}"
+        )
 
     check("database_schema", database_schema)
 
@@ -74,11 +110,19 @@ def run_packaging_self_test() -> dict[str, Any]:
         from app.api.server import create_api_app
 
         application = create_api_app(config_holder, start_feishu=False)
-        paths = {str(route.path) for route in application.routes}
+        # NiceGUI/FastAPI can add internal router sentinels without a ``path``
+        # attribute. They are not HTTP endpoints and must not fail the frozen
+        # installation self-test.
+        paths = _api_route_paths(application)
         required = {
             "/health",
             "/api/v1/accounts",
             "/api/v1/batches",
+            "/api/v1/review-inbox",
+            "/api/v1/onboarding/status",
+            "/api/v1/batches/{batch_id}/jobs/{job_id}/retry",
+            "/api/v1/batches/{batch_id}/jobs/{job_id}/attempts",
+            "/api/v1/wechat/connection-health",
             "/api/v1/topics/hot",
         }
         missing = sorted(required - paths)
@@ -134,6 +178,29 @@ def run_packaging_self_test() -> dict[str, Any]:
         return f"providers={len(IMAGE_PROVIDER_PRESETS)}"
 
     check("image_provider_presets", image_providers)
+
+    def wechat_relay_runtime() -> str:
+        from app.services.wechat_relay_settings import (
+            validate_wechat_relay_settings,
+        )
+        from app.ui.panels.wechat_relay import build_wechat_relay_panel
+        from app.wechat.factory import build_wechat_auth, build_wechat_client
+
+        disabled = validate_wechat_relay_settings({"enabled": False})
+        if disabled["enabled"]:
+            raise RuntimeError("离线自检不应启用微信云中转")
+        if not all(
+            callable(item)
+            for item in (
+                build_wechat_auth,
+                build_wechat_client,
+                build_wechat_relay_panel,
+            )
+        ):
+            raise RuntimeError("微信云中转运行组件不完整")
+        return "settings+factory+ui"
+
+    check("wechat_relay_runtime", wechat_relay_runtime)
 
     def frozen_ui_home() -> str:
         if not bool(getattr(sys, "frozen", False)):

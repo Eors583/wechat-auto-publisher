@@ -261,7 +261,6 @@ class TopicSourceService:
                     days=days,
                     timeout=timeout,
                 )
-                items = [item for item in items if _is_recent_search_item(item, days)]
                 normalized_items: list[dict[str, Any]] = []
                 for item in items:
                     normalized = self._normalize_item(source, item)
@@ -820,7 +819,14 @@ def _is_recent_search_item(item: dict[str, Any], days: int) -> bool:
     if published is None:
         return True
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=max(1, min(int(days), 365)))
+    # “近 N 天”按自然日筛选；若使用滚动的 N×24 小时，同一日期的
+    # 较早文章会在当天中途被意外排除，列表结果也会随刷新时刻变化。
+    cutoff = (now - timedelta(days=max(1, min(int(days), 365)))).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
     return cutoff <= published <= now + timedelta(hours=6)
 
 

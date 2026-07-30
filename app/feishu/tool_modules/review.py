@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.feishu.presenter import format_article_preview, format_status
+from app.feishu.presenter import format_article_preview
 from app.feishu.media import download_wechat_image
 from app.feishu.tool_modules.common import (
     batch_id_from,
@@ -12,6 +12,7 @@ from app.feishu.tool_modules.common import (
     optional_int,
     require_job_id,
 )
+from app.services.failures import sanitize_failure_text
 
 
 class ReviewToolMixin:
@@ -104,6 +105,165 @@ class ReviewToolMixin:
             )
         self.reply_text(message_id, "\n".join(lines))
 
+    def _tool_list_review_inbox(
+        self,
+        args: dict[str, Any],
+        *,
+        message_id: str,
+        chat_id: str,
+        open_id: str,
+        **_: Any,
+    ) -> None:
+        bucket = str(args.get("bucket") or "review").strip().lower()
+        if bucket not in {
+            "review",
+            "write_failed",
+            "generation_failed",
+            "today_completed",
+        }:
+            raise ValueError(
+                "bucket 只支持 review、write_failed、generation_failed、today_completed"
+            )
+        limit = max(1, min(optional_int(args.get("limit")) or 20, 100))
+        is_admin = self.admin_open_ids is None or open_id in self.admin_open_ids
+        filters: dict[str, Any] = {
+            "bucket": bucket,
+            "account_id": str(args.get("account_id") or "").strip() or None,
+            "limit": limit,
+            "cursor": str(args.get("cursor") or "").strip() or None,
+        }
+        if not is_admin:
+            filters.update(requested_by=open_id, chat_id=chat_id)
+        result = self.service.list_review_inbox(**filters)
+        items = list(result.get("items") or [])
+        labels = {
+            "review": "待我审核",
+            "write_failed": "写入失败",
+            "generation_failed": "生成失败",
+            "today_completed": "今日完成",
+        }
+        counts = dict(result.get("counts") or {})
+        count_text = "｜".join(
+            (
+                f"待审核 {int(counts.get('review') or 0)}",
+                f"写入失败 {int(counts.get('write_failed') or 0)}",
+                f"生成失败 {int(counts.get('generation_failed') or 0)}",
+                f"今日完成 {int(counts.get('today_completed') or 0)}",
+            )
+        )
+        lines = [f"{labels[bucket]}收件箱（{len(items)} 篇）", count_text]
+        for index, item in enumerate(items, 1):
+            failure = dict(item.get("failure") or {})
+            blockers = [
+                str(value).strip()
+                for value in list(item.get("blockers") or [])
+                if str(value).strip()
+            ]
+            lines.append(
+                f"\n{index}. {item.get('account_name') or '公众号'}｜"
+                f"{item.get('title') or item.get('batch_topic') or '尚未选择标题'}\n"
+                f"   批次 {item.get('batch_display_id') or item.get('batch_id')}｜"
+                f"任务 #{item.get('job_id')}｜{item.get('body_chars') or 0} 字｜"
+                f"{item.get('priority_reason') or '普通待办'}"
+            )
+            if failure:
+                lines.append(
+                    f"   {failure.get('title') or '处理失败'}："
+                    f"{failure.get('reason') or ''}\n"
+                    f"   建议：{failure.get('recommendation') or '按提示重试'}"
+                )
+            elif blockers:
+                lines.append(f"   阻断项：{'；'.join(blockers)}")
+            lines.append(
+                "   AI 评审："
+                f"{item.get('latest_review_summary') or '尚未评审'}"
+            )
+            if item.get("recommended_action"):
+                lines.append(f"   推荐下一步：{item['recommended_action']}")
+            review_url = str(item.get("review_url") or "").strip()
+            if review_url:
+                lines.append(f"   审核链接：{review_url}")
+        if result.get("next_cursor"):
+            lines.append(f"\n还有更多结果，cursor={result['next_cursor']}")
+        if not items:
+            lines.append("\n当前没有符合条件的文章。")
+        self.reply_text(message_id, "\n".join(lines))
+
+    def _tool_get_article_attempts(
+        self,
+        args: dict[str, Any],
+        *,
+        message_id: str,
+        chat_id: str,
+        current_batch_id: str | None,
+        **_: Any,
+    ) -> None:
+        batch_id, job_id = self._job_context(args, chat_id, current_batch_id)
+        attempts = self.service.list_job_attempts(batch_id, job_id)
+        if not attempts:
+            self.reply_text(message_id, f"任务 #{job_id} 暂无分步骤执行记录。")
+            return
+        lines = [f"任务 #{job_id} 执行记录："]
+        for item in attempts[:30]:
+            lines.append(
+                f"\n• {item.get('stage') or '-'}｜第 {item.get('attempt_no') or 1} 次｜"
+                f"{item.get('status') or '-'}"
+            )
+            if item.get("error_code"):
+                lines.append(f"  错误代码：{item['error_code']}")
+            if item.get("started_at"):
+                lines.append(
+                    f"  {item.get('started_at')} → {item.get('completed_at') or '进行中'}"
+                )
+        self.reply_text(message_id, "\n".join(lines))
+
+    def _tool_retry_article_step(
+        self,
+        args: dict[str, Any],
+        *,
+        message_id: str,
+        chat_id: str,
+        current_batch_id: str | None,
+        **_: Any,
+    ) -> None:
+        batch_id, job_id = self._job_context(args, chat_id, current_batch_id)
+        step = str(args.get("step") or "auto").strip().lower()
+        self.reply_text(
+            message_id,
+            f"正在从 {step} 步骤恢复任务 #{job_id}，已完成的上游内容会保留……",
+        )
+        result = self.service.retry_job(
+            batch_id,
+            job_id,
+            step=step,
+            model_id=str(args.get("model_id") or "").strip() or None,
+            source_url=str(args.get("source_url") or "").strip() or None,
+            raw_content=(
+                str(args.get("raw_content"))
+                if args.get("raw_content") is not None
+                else None
+            ),
+        )
+        job = dict(result.get("job") or result)
+        current_status = str(job.get("status") or result.get("status") or "处理中")
+        if current_status == "ready_for_review":
+            self.sessions.reopen_review(
+                chat_id,
+                job_id,
+                account_name=str(job.get("account_name") or ""),
+            )
+        self.reply_text(
+            message_id,
+            (
+                f"任务 #{job_id} 已恢复到待审核状态。"
+                if current_status == "ready_for_review"
+                else (
+                    f"任务 #{job_id} 的恢复请求已提交，当前状态：{current_status}。"
+                    "完成后可查询执行记录或待审核收件箱。"
+                )
+            ),
+        )
+
     def _tool_retry_failed_batch(
         self,
         args: dict[str, Any],
@@ -115,9 +275,36 @@ class ReviewToolMixin:
         **_: Any,
     ) -> None:
         batch_id = self._required_batch(args, current_batch_id)
-        batch = self.service.retry_failed(batch_id)
-        self.sessions.bind_batch(chat_id, str(batch["id"]))
-        self.reply_text(message_id, f'失败任务已创建重试批次：{batch["id"]}')
+        batch = self.service.get_batch(batch_id, include_content=False)
+        failed_jobs = [
+            dict(job)
+            for job in list(batch.get("jobs") or [])
+            if str(job.get("status") or "") == "failed"
+        ]
+        if not failed_jobs:
+            self.reply_text(message_id, "当前批次没有可重试的失败公众号文章。")
+            return
+        accepted: list[str] = []
+        rejected: list[str] = []
+        for job in failed_jobs:
+            job_id = int(job["id"])
+            account_name = str(job.get("account_name") or f"任务 #{job_id}")
+            try:
+                self.service.retry_job(batch_id, job_id, step="auto")
+                accepted.append(account_name)
+            except Exception as exc:  # noqa: BLE001
+                rejected.append(
+                    f"{account_name}：{sanitize_failure_text(exc, limit=240)}"
+                )
+        self.sessions.bind_batch(chat_id, batch_id)
+        lines = [
+            f"已在原批次 {batch_id} 中提交 {len(accepted)}/{len(failed_jobs)} 篇失败文章恢复。"
+        ]
+        if accepted:
+            lines.append("已提交：" + "、".join(accepted))
+        if rejected:
+            lines.append("暂未提交：\n" + "\n".join(rejected))
+        self.reply_text(message_id, "\n".join(lines))
 
     def _tool_copy_batch(
         self,
@@ -183,7 +370,7 @@ class ReviewToolMixin:
         **_: Any,
     ) -> None:
         batch_id, job_id = self._job_context(args, chat_id, current_batch_id)
-        job = self.service.confirm_job(batch_id, job_id)
+        self.service.confirm_job(batch_id, job_id)
         review = self.sessions.mark_reviewed(chat_id, job_id)
         if review.get("all_completed"):
             self.reply_text(

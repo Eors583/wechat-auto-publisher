@@ -6,6 +6,7 @@ import pytest
 
 from app.config import load_config
 from app.services.batches import BatchService
+from app.services.model_readiness import active_model_auth_failure_ids
 
 
 def _service_with_ready_job(tmp_path) -> tuple[BatchService, str, int]:
@@ -284,6 +285,55 @@ def test_paragraph_revision_uses_context_saves_version_and_keeps_images(
     assert versions[0]["has_visual_snapshot"] is True
 
 
+def test_paragraph_model_auth_failure_invalidates_current_model_readiness(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service, batch_id, job_id = _service_with_ready_job(tmp_path)
+    model_id = "text-model-auth-failure"
+    service.db.upsert_ai_model(
+        {
+            "id": model_id,
+            "name": "失效文本模型",
+            "provider_type": "openai_compatible",
+            "api_base": "https://model.example.test/v1",
+            "model": "chat",
+            "api_key_encrypted": "encrypted-key-fingerprint",
+            "enabled": True,
+        }
+    )
+    cfg = {
+        "_db_path": str(service.db.path),
+        "ai": {"rewrite_prompt": "公众号规则"},
+    }
+
+    class UnauthorizedClient:
+        def complete(self, _prompt: str) -> str:
+            raise RuntimeError("HTTP 401 unauthorized")
+
+    monkeypatch.setattr(
+        "app.services.batches.apply_account_selection",
+        lambda *_args, **_kwargs: (cfg, {"model_id": model_id}),
+    )
+    monkeypatch.setattr(
+        "app.services.batches.build_text_client",
+        lambda *_args, **_kwargs: UnauthorizedClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="401"):
+        service.regenerate_paragraph(
+            batch_id,
+            job_id,
+            0,
+            instruction="让表达更简洁",
+        )
+
+    assert active_model_auth_failure_ids(
+        service.db,
+        cfg,
+    ) == {model_id}
+
+
 def test_single_image_revision_only_replaces_selected_asset(tmp_path, monkeypatch) -> None:
     service, batch_id, job_id = _service_with_ready_job(tmp_path)
     old_assets = [
@@ -344,6 +394,7 @@ def test_single_image_revision_only_replaces_selected_asset(tmp_path, monkeypatc
     monkeypatch.setattr(
         "app.services.batches.regenerate_inline_image_asset", fake_regenerate
     )
+    render_options: list[dict] = []
 
     class FakePipeline:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -352,7 +403,8 @@ def test_single_image_revision_only_replaces_selected_asset(tmp_path, monkeypatc
         def _wechat_client(self):
             return object()
 
-        def run_job(self, selected_job_id: int, **_kwargs) -> None:
+        def run_job(self, selected_job_id: int, **kwargs) -> None:
+            render_options.append(kwargs)
             service.db.update_job(
                 selected_job_id,
                 status="ready_for_review",
@@ -376,6 +428,12 @@ def test_single_image_revision_only_replaces_selected_asset(tmp_path, monkeypatc
     assert assets[1]["url"].endswith("two-revised.jpg")
     assert assets[1]["anchor"] == "论点二收束段"
     assert updated["review_status"] == "viewed"
+    assert render_options[0]["attempt_stage_overrides"] == {
+        "render": "images"
+    }
+    assert render_options[0]["attempt_model_ids"] == {
+        "images": "image-model"
+    }
     version = service.db.get_job_version(job_id, service.list_job_versions(batch_id, job_id)[0]["id"])
     assert "two.jpg" in str(version["meta_json"])
 

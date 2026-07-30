@@ -11,10 +11,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from app.accounts import apply_account_selection
+from app.accounts import apply_account_selection, require_bound_text_model
 from app.ai.model_registry import build_text_client
-from app.config import load_config
+from app.config import database_target, load_config
 from app.db import Database
+from app.db_backend import postgres_integrity_errors
 from app.editorial_review import (
     BUILTIN_REVIEW_SCHEMES,
     DEFAULT_REVIEW_SCHEME_ID,
@@ -25,6 +26,11 @@ from app.editorial_review import (
     normalize_review_config,
     review_options,
 )
+from app.services.failures import sanitize_failure_text
+from app.services.model_readiness import record_model_auth_failure_for_error
+
+
+_INTEGRITY_ERRORS = (sqlite3.IntegrityError, *postgres_integrity_errors())
 
 
 _ENGAGEMENT_DIMENSION_ALIASES = {
@@ -63,7 +69,7 @@ class EditorialReviewService:
         db: Database | None = None,
     ) -> None:
         self.config = config or load_config()
-        self.db = db or Database(self.config["_db_path"])
+        self.db = db or Database(database_target(self.config))
 
     def get_options(self) -> dict[str, Any]:
         return review_options()
@@ -235,7 +241,7 @@ class EditorialReviewService:
             review_config["account_article_instruction"] = str(
                 (cfg.get("ai") or {}).get("rewrite_prompt") or ""
             )[:8000]
-            model_id = str(account.get("model_id") or "")
+            model_id = require_bound_text_model(account)
             model_name = self._model_name(model_id)
             client = build_text_client(self.db, cfg, model_id)
             prompt = build_review_prompt(
@@ -261,7 +267,7 @@ class EditorialReviewService:
                         "source_snapshot": snapshot,
                     }
                 )
-            except sqlite3.IntegrityError as exc:
+            except _INTEGRITY_ERRORS as exc:
                 raise EditorialReviewConflict(
                     "该文章已有正在执行的 AI 评审"
                 ) from exc
@@ -283,10 +289,17 @@ class EditorialReviewService:
                     result=result,
                 )
             except Exception as exc:
+                record_model_auth_failure_for_error(
+                    self.db,
+                    cfg,
+                    model_id,
+                    exc,
+                )
+                safe_error = sanitize_failure_text(exc)
                 self.db.update_editorial_review(
                     review_id,
                     status="failed",
-                    error=str(exc),
+                    error=safe_error,
                     completed_at=_utc_now(),
                 )
                 self.db.update_batch_job_review(
@@ -405,9 +418,8 @@ class EditorialReviewService:
             cfg, account = apply_account_selection(
                 deepcopy(self.config), self.db, account_id
             )
-            client = build_text_client(
-                self.db, cfg, str(account.get("model_id") or "")
-            )
+            model_id = require_bound_text_model(account)
+            client = build_text_client(self.db, cfg, model_id)
             application_id = f"review-application-{uuid.uuid4().hex[:16]}"
             source_hash = str(
                 (review.get("source_snapshot") or {}).get("content_hash") or ""
@@ -432,7 +444,7 @@ class EditorialReviewService:
                     rewrite_mode=rewrite_mode,
                     error="",
                 )
-            except sqlite3.IntegrityError as exc:
+            except _INTEGRITY_ERRORS as exc:
                 self.db.update_editorial_review_application(
                     application_id,
                     status="failed",
@@ -464,15 +476,22 @@ class EditorialReviewService:
                         rewrite_mode=rewrite_mode,
                     )
             except Exception as exc:
+                record_model_auth_failure_for_error(
+                    self.db,
+                    cfg,
+                    model_id,
+                    exc,
+                )
+                safe_error = sanitize_failure_text(exc)
                 self.db.update_editorial_review_application(
                     application_id,
                     status="failed",
-                    error=str(exc),
+                    error=safe_error,
                 )
                 self.db.update_editorial_review(
                     review_id,
                     status="completed",
-                    error=str(exc),
+                    error=safe_error,
                 )
                 raise
             candidate["content_hash"] = snapshot_fingerprint(candidate)
@@ -994,7 +1013,7 @@ class EditorialReviewService:
             ),
             "blocking_count": max(0, int(row.get("blocking_count") or 0)),
             "revision": max(0, int(row.get("revision") or 0)),
-            "error": str(row.get("error") or ""),
+            "error": sanitize_failure_text(row.get("error")),
             "completed_at": row.get("completed_at"),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
@@ -1018,7 +1037,7 @@ class EditorialReviewService:
             "candidate_snapshot": _loads_json(
                 row.get("candidate_snapshot_json"), {}
             ),
-            "error": str(row.get("error") or ""),
+            "error": sanitize_failure_text(row.get("error")),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
             "applied_at": row.get("applied_at"),

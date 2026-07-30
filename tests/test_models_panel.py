@@ -50,6 +50,21 @@ def _rendered_texts() -> list[str]:
     ]
 
 
+def _click_button(label: str) -> None:
+    button = next(
+        element
+        for element in ui.context.client.elements.values()
+        if type(element).__name__ == "Button"
+        and getattr(element, "text", None) == label
+    )
+    listener = next(
+        item
+        for item in button._event_listeners.values()
+        if item.type == "click"
+    )
+    listener.handler(None)
+
+
 def test_text_provider_options_include_guided_vendors_and_advanced_custom() -> None:
     options = text_provider_options()
 
@@ -193,3 +208,29 @@ def test_image_model_panel_requires_real_test_image_in_existing_page(
         for text in texts
     )
     assert "添加图片模型" in texts
+
+
+def test_model_editor_uses_free_text_model_name_instead_of_select(
+    tmp_path,
+) -> None:
+    state = _PanelState(tmp_path)
+
+    try:
+        build_models_panel(state, purpose="text")
+        _click_button("添加文本模型")
+        elements = list(ui.context.client.elements.values())
+    finally:
+        ui.context.client.remove_all_elements()
+
+    assert any(
+        type(element).__name__ == "Input"
+        and str(getattr(element, "_props", {}).get("label") or "")
+        == "模型名称（可直接输入）"
+        for element in elements
+    )
+    assert not any(
+        type(element).__name__ == "Select"
+        and str(getattr(element, "_props", {}).get("label") or "")
+        == "推荐模型"
+        for element in elements
+    )

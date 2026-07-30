@@ -13,8 +13,8 @@ import httpx
 from PIL import Image
 
 from app.db import Database
-from app.wechat.auth import WeChatAuth
 from app.wechat.client import WeChatClient
+from app.wechat.factory import build_wechat_client
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +64,11 @@ def fetch_latest_benchmark_record(
     app_secret = str(cfg.get("app_secret") or "").strip()
     if app_id and app_secret:
         try:
-            auth = WeChatAuth(app_id, app_secret, db)
-            client = WeChatClient(
-                get_token=auth.get_access_token,
-                refresh_token=lambda: auth.get_access_token(force_refresh=True),
+            client = build_wechat_client(
+                config,
+                db,
+                app_id,
+                app_secret,
             )
             record = fetch_official_publish_record(client)
             max_age = int(cfg.get("official_max_age_hours") or 36)

@@ -1,11 +1,18 @@
 #define MyAppName "公众号改写助手"
 #define MyAppPublisher "蓝血研究"
 #define MyAppExeName "公众号改写助手.exe"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.3.0"
+#define MyRemoteUrl "http://47.99.126.8:18775"
 #define BuildDir "..\dist\公众号改写助手"
+#ifndef MyAppId
+  #define MyAppId "{{B5B0F085-6C6D-44F5-9D53-3895929B36EE}"
+#endif
+#ifndef MyOutputBaseFilename
+  #define MyOutputBaseFilename MyAppName + "-安装包-" + MyAppVersion + "-20260728"
+#endif
 
 [Setup]
-AppId={{B5B0F085-6C6D-44F5-9D53-3895929B36EE}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -13,7 +20,7 @@ DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installers
-OutputBaseFilename={#MyAppName}-安装包-{#MyAppVersion}-20260723
+OutputBaseFilename={#MyOutputBaseFilename}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -36,6 +43,11 @@ Name: "{app}\data\templates"; Flags: uninsneveruninstall
 Name: "{app}\data\generated_images"; Flags: uninsneveruninstall
 Name: "{app}\data\model_tests"; Flags: uninsneveruninstall
 
+[InstallDelete]
+; 原地升级前仅清理旧程序依赖，避免已删除的模块与新版本混装。
+; 用户数据、config.yaml 和登录凭据均不在此目录，不会被删除。
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "{#BuildDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -51,11 +63,11 @@ Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--remote-url {#MyRemoteUrl}"; WorkingDir: "{app}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--remote-url {#MyRemoteUrl}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "启动{#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--remote-url {#MyRemoteUrl}"; Description: "启动{#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);

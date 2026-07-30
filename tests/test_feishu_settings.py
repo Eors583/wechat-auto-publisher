@@ -93,6 +93,25 @@ def test_enabled_feishu_requires_app_credentials(tmp_path) -> None:
         raise AssertionError("missing App ID should fail")
 
 
+def test_legacy_config_moonshot_default_is_not_treated_as_user_selection(
+    tmp_path,
+) -> None:
+    db = Database(tmp_path / "app.db")
+
+    effective = effective_feishu_settings(
+        db,
+        {
+            "enabled": True,
+            "app_id": "cli_legacy",
+            "app_secret": "legacy-secret",
+            "agent_model_id": "config:moonshot",
+        },
+    )
+
+    assert effective["enabled"] is False
+    assert effective["agent_model_id"] == ""
+
+
 def test_bot_context_round_trip(tmp_path) -> None:
     db = Database(tmp_path / "app.db")
     context = {

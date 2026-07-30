@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import re
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,7 @@ from app.ai.image_providers import (
 from app.ai.model_registry import GEMINI, MANUS, OPENAI_COMPATIBLE
 from app.services.configuration import ConfigurationService
 from app.services.onboarding import OnboardingService, TEXT_MODEL_PRESETS
+from app.services.onboarding_errors import friendly_model_error
 from app.ui.state import AppState, set_button_loading
 
 
@@ -92,75 +92,6 @@ def infer_text_provider_preset(record: dict[str, Any] | None) -> str:
         if configured_model and configured_model in tuple(preset.get("models") or ()):
             return preset_id
     return "custom"
-
-
-def friendly_model_error(error: Exception | str, *, image: bool = False) -> str:
-    """Translate common provider failures without echoing possible credentials."""
-
-    detail = str(error or "").strip()
-    safe_detail = re.sub(
-        r"(?i)\b(?:sk-|key-|ak-)[a-z0-9._-]{6,}",
-        "••••••••",
-        detail,
-    )
-    normalized = safe_detail.casefold()
-    subject = "图片模型" if image else "文本模型"
-    if any(
-        marker in normalized
-        for marker in (
-            "401",
-            "unauthorized",
-            "invalid api key",
-            "invalid_api_key",
-            "authentication",
-            "鉴权失败",
-            "密钥无效",
-        )
-    ):
-        return f"{subject}的 API Key 无效或已失效，请从厂商控制台重新复制后再试。"
-    if any(
-        marker in normalized
-        for marker in (
-            "402",
-            "insufficient balance",
-            "insufficient quota",
-            "quota exceeded",
-            "余额不足",
-            "额度不足",
-        )
-    ):
-        return f"{subject}账号余额或调用额度不足，请到厂商控制台充值或开通模型。"
-    if "403" in normalized or "permission denied" in normalized or "forbidden" in normalized:
-        return f"{subject}的 API Key 没有所选模型权限，请在厂商控制台开通后再试。"
-    if any(
-        marker in normalized
-        for marker in (
-            "model not found",
-            "unknown model",
-            "does not exist",
-            "模型不存在",
-            "模型不可用",
-        )
-    ):
-        return f"{subject}名称不可用，请重新选择该厂商的推荐模型。"
-    if "429" in normalized or "rate limit" in normalized or "请求过于频繁" in normalized:
-        return f"{subject}请求过于频繁，系统稍后可重试；如持续发生，请检查厂商并发额度。"
-    if "timeout" in normalized or "timed out" in normalized or "超时" in normalized:
-        return f"{subject}连接超时，请检查网络后重试。"
-    if any(
-        marker in normalized
-        for marker in (
-            "connection",
-            "network",
-            "name resolution",
-            "dns",
-            "无法连接",
-            "网络",
-        )
-    ):
-        return f"无法连接{subject}服务，请检查网络、代理或防火墙后重试。"
-    fallback = safe_detail[:240] or "未知错误"
-    return f"{subject}验证失败：{fallback}"
 
 
 def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
@@ -235,6 +166,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
         preview_dialog.open()
 
     def open_editor(model_id: str | None = None) -> None:
+        owner_client = ui.context.client
         current_model_id = model_id
         record = state.db.get_ai_model(model_id) if model_id else None
         initial_image_provider = (
@@ -285,19 +217,16 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
             official_help = ui.column().classes(
                 "w-full q-pa-md rounded-borders bg-blue-1 gap-1"
             )
-            model_select = ui.select(
-                options={},
-                label="推荐模型",
-            ).classes("w-full").props("outlined stack-label")
-            custom_model_in = ui.input(
-                "自定义模型名称",
+            model_in = ui.input(
+                "模型名称（可直接输入）",
                 value=str((record or {}).get("model") or ""),
                 placeholder=(
-                    "例如：gpt-image-1"
+                    "请输入厂商接口文档中的准确图片模型名称"
                     if image_panel
-                    else "例如：公司网关提供的模型名称"
+                    else "请输入厂商接口文档中的准确文本模型名称"
                 ),
             ).classes("w-full").props("outlined stack-label")
+            model_note = ui.label("").classes("muted")
             base_in = ui.input(
                 "API Base URL",
                 value=str((record or {}).get("api_base") or ""),
@@ -325,8 +254,6 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                     guide = IMAGE_PROVIDER_GUIDES[provider_id]
                     is_custom = provider_id == IMAGE_CUSTOM
                     base_in.set_visibility(is_custom)
-                    custom_model_in.set_visibility(is_custom)
-                    model_select.set_visibility(not is_custom)
                     endpoint_note.text = (
                         f"接口地址已由系统锁定：{preset.endpoint}"
                         if not is_custom
@@ -335,34 +262,34 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                     key_in.props(f'placeholder="{preset.key_placeholder}"')
                     render_official_help(official_help, **guide)
                     if is_custom:
+                        model_note.text = "请按服务商接口文档填写模型名称。"
                         if reset_model:
                             base_in.value = ""
-                            custom_model_in.value = ""
+                            model_in.value = ""
                         return
                     base_in.value = preset.endpoint
                     current = (
                         preset.default_model
                         if reset_model
                         else str(
-                            model_select.value
+                            model_in.value
                             or (record or {}).get("model")
                             or preset.default_model
                         )
                     )
-                    options = {item: item for item in preset.models}
-                    if current and current not in options:
-                        options[current] = f"{current}（已有配置）"
-                    model_select.options = options
-                    model_select.value = current
-                    model_select.update()
+                    model_in.value = current
+                    model_note.text = (
+                        "厂商常用模型："
+                        + "、".join(str(item) for item in preset.models)
+                        + "。也可以输入厂商新发布的模型名称。"
+                    )
+                    model_in.update()
                     return
 
                 preset_id = str(type_in.value or "custom")
                 preset = text_presets[preset_id]
                 is_custom = preset_id == "custom"
                 base_in.set_visibility(is_custom)
-                custom_model_in.set_visibility(is_custom)
-                model_select.set_visibility(not is_custom)
                 endpoint = str(preset.get("api_base") or "")
                 endpoint_note.text = (
                     f"接口地址已由系统锁定：{endpoint}"
@@ -379,15 +306,16 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                     docs_url=str(preset.get("docs_url") or ""),
                     key_hint=str(preset.get("key_hint") or ""),
                     fields=(
-                        "只需选择推荐模型并填写 API Key；接口地址由系统管理。"
+                        "只需输入模型名称并填写 API Key；接口地址由系统管理。"
                         if not is_custom
                         else "需要自行填写 API Base URL、模型名称和 API Key。"
                     ),
                 )
                 if is_custom:
+                    model_note.text = "请按服务商接口文档填写模型名称。"
                     if reset_model:
                         base_in.value = ""
-                        custom_model_in.value = ""
+                        model_in.value = ""
                     return
                 base_in.value = endpoint
                 recommended = tuple(preset.get("models") or ())
@@ -395,18 +323,19 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                     str(preset.get("default_model") or "")
                     if reset_model
                     else str(
-                        model_select.value
+                        model_in.value
                         or (record or {}).get("model")
                         or preset.get("default_model")
                         or ""
                     )
                 )
-                options = {item: item for item in recommended}
-                if current and current not in options:
-                    options[current] = f"{current}（已有配置）"
-                model_select.options = options
-                model_select.value = current
-                model_select.update()
+                model_in.value = current
+                model_note.text = (
+                    "厂商常用模型："
+                    + "、".join(str(item) for item in recommended)
+                    + "。也可以输入厂商新发布的模型名称。"
+                )
+                model_in.update()
 
             type_in.on_value_change(lambda _: sync_type(reset_model=True))
             sync_type()
@@ -423,9 +352,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                         if is_custom
                         else image_preset.endpoint
                     )
-                    selected_model = str(
-                        custom_model_in.value if is_custom else model_select.value
-                    )
+                    selected_model = str(model_in.value or "")
                     provider_label = image_preset.label
                 else:
                     text_preset = text_presets[selected_provider]
@@ -436,9 +363,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                         if is_custom
                         else str(text_preset.get("api_base") or "")
                     )
-                    selected_model = str(
-                        custom_model_in.value if is_custom else model_select.value
-                    )
+                    selected_model = str(model_in.value or "")
                     provider_label = str(text_preset["label"]).split("（", 1)[0]
 
                 display_name = str(name_in.value or "").strip()
@@ -462,7 +387,6 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                         missing_ok=True
                     )
                 state.refresh_model_selects()
-                render_models()
                 return saved
 
             async def submit(*, test_after_save: bool, button: Any) -> None:
@@ -481,8 +405,12 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                 )
                 try:
                     saved = persist_form()
+                    ui.notify(
+                        "模型已同步到所有模型选择器",
+                        type="positive",
+                        timeout=3500,
+                    )
                     if not test_after_save:
-                        dialog.close()
                         ui.notify(
                             (
                                 "图片模型已保存，但还未验证。请继续点击“生成测试图”。"
@@ -492,6 +420,8 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                             type="warning",
                             timeout=7000,
                         )
+                        dialog.close()
+                        render_models()
                         return
 
                     if image_panel:
@@ -500,26 +430,42 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                                 str(saved["id"])
                             )
                         )
-                        render_models()
+                        if bool(getattr(owner_client, "is_deleted", False)):
+                            return
                         dialog.close()
-                        show_image_preview(str(result["path"]))
                         ui.notify("真实测试图生成成功，图片模型接入完成", type="positive")
+                        render_models()
+                        with owner_client:
+                            show_image_preview(str(result["path"]))
                     else:
                         result = await run.io_bound(
                             lambda: onboarding.test_text_model(str(saved["id"]))
                         )
+                        if bool(getattr(owner_client, "is_deleted", False)):
+                            return
                         dialog.close()
                         ui.notify(
                             str(result.get("message") or "连接成功")
                             + "，文本模型接入完成",
                             type="positive",
                         )
+                        render_models()
                 except Exception as exc:  # noqa: BLE001
-                    ui.notify(
-                        friendly_model_error(exc, image=image_panel),
-                        type="negative",
-                        timeout=12000,
-                    )
+                    if not bool(getattr(owner_client, "is_deleted", False)):
+                        try:
+                            with owner_client:
+                                ui.notify(
+                                    friendly_model_error(
+                                        exc,
+                                        image=image_panel,
+                                    ),
+                                    type="negative",
+                                    timeout=12000,
+                                )
+                        except RuntimeError:
+                            # The page or dialog can be gone after a slow
+                            # provider probe. Never update a deleted UI slot.
+                            pass
                 finally:
                     set_button_loading(button, False)
 
@@ -559,6 +505,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                 result = await run.io_bound(
                     lambda: onboarding.test_text_model(model_id)
                 )
+            state.refresh_model_selects()
             ui.notify(str(result.get("message") or "连接成功"), type="positive")
         except Exception as exc:  # noqa: BLE001
             ui.notify(
@@ -579,6 +526,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
             result = await run.io_bound(
                 lambda: configuration.generate_model_test_image(model_id)
             )
+            state.refresh_model_selects()
             render_models()
             show_image_preview(str(result["path"]))
             ui.notify("真实测试图生成成功，图片模型接入完成", type="positive")
@@ -601,6 +549,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                     confirm.close()
                     render_models()
                     state.refresh_model_selects()
+                    ui.notify("模型已同步到所有模型选择器", type="positive")
                     ui.notify("模型配置已删除", type="positive")
                 except Exception as exc:  # noqa: BLE001
                     ui.notify(str(exc), type="warning")
@@ -615,12 +564,17 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
     def set_enabled(model_id: str, enabled: bool) -> None:
         configuration.set_model_enabled(model_id, enabled)
         state.refresh_model_selects()
+        ui.notify(
+            "模型启用状态已同步到选择器",
+            type="positive",
+            timeout=1800,
+        )
 
     def render_models() -> None:
         host.clear()
         listed = configuration.list_models(
             purpose="image" if image_panel else "text",
-            include_config=not image_panel,
+            include_config=False,
         )
         models = [
             item for item in listed if not bool(item.get("is_config_model"))
@@ -635,7 +589,12 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                     if image_panel
                     else "大模型接入：照着 3 步做"
                 ).classes("text-h6 text-weight-bold")
-                with ui.row().classes("w-full items-stretch q-col-gutter-md"):
+                with ui.element("div").classes("w-full q-mt-md").style(
+                    "display:grid;"
+                    "grid-template-columns:repeat(auto-fit,minmax(220px,1fr));"
+                    "gap:12px;"
+                    "align-items:stretch"
+                ):
                     steps = (
                         (
                             "1. 选择厂商",
@@ -656,7 +615,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                         ),
                         (
                             "2. 获取并粘贴 Key",
-                            "点表单里的官方入口创建 API Key；接口地址和推荐模型自动填写。",
+                            "点表单里的官方入口创建 API Key；接口地址和常用模型名称会自动填写，也可手动修改。",
                         ),
                         (
                             "3. 测试并绑定公众号",
@@ -665,14 +624,14 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                     )
                     for title, description in steps:
                         with ui.column().classes(
-                            "col q-pa-md rounded-borders bg-grey-1 gap-1"
-                        ).style("min-width:190px"):
+                            "w-full q-pa-md rounded-borders bg-grey-1 gap-1"
+                        ):
                             ui.label(title).classes(
                                 "text-weight-bold text-teal-9"
                             )
                             ui.label(description).classes("muted")
                 ui.label(
-                    "API Key 只会使用 Windows 当前用户加密保存；界面、日志和任务记录不会显示明文。"
+                    "API Key 只会在系统中加密保存；界面、日志和任务记录不会显示明文。"
                 ).classes("text-positive q-mt-sm")
 
             with ui.element("div").classes("card w-full"):
@@ -735,7 +694,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                         "还没有图片模型" if image_panel else "还没有文本模型"
                     ).classes("text-weight-medium")
                     ui.label(
-                        "点击上方“添加图片模型”，厂商、接口和推荐模型都已替你准备好。"
+                        "点击上方“添加图片模型”，厂商、接口和常用模型名称都已替你准备好，模型名称也可直接输入。"
                         if image_panel
                         else "点击上方“添加文本模型”，选择厂商后只需去官方页面复制 API Key。"
                     ).classes("muted")

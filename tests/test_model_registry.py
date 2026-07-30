@@ -12,6 +12,7 @@ from app.ai.model_registry import (
     decrypt_api_key,
     public_models,
     save_model,
+    test_model_connection as probe_model_connection,
 )
 from app.ai.image_providers import IMAGE_MINIMAX
 from app.db import Database
@@ -93,7 +94,7 @@ def test_selected_custom_model_is_available_to_failover(tmp_path) -> None:
 
     rewriter = FailoverRewriter(config)
     assert rewriter.primary == model_id
-    assert rewriter.fallback == model_id
+    assert rewriter.fallback == ""
     client = rewriter._clients[model_id]
     assert client.api_base == "https://llm.example.test/v1"
     assert client.model == "company-model"
@@ -127,6 +128,36 @@ def test_manus_can_be_saved_and_selected_without_env_file(tmp_path) -> None:
     assert assistant_client.api_base == "https://api.manus.ai"
 
 
+def test_manus_connection_probe_allows_async_task_completion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db = Database(tmp_path / "manus-probe.db")
+    model_id = save_model(
+        db,
+        name="Manus probe",
+        provider_type=MANUS,
+        api_base="https://api.manus.ai",
+        model="manus-1.6",
+        api_key="manus-private-key",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeManusClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def complete(self, prompt: str) -> str:
+            captured["prompt"] = prompt
+            return "OK"
+
+    monkeypatch.setattr("app.ai.manus.ManusClient", FakeManusClient)
+
+    assert probe_model_connection(db, model_id) == "连接成功"
+    assert captured["timeout"] == 180
+    assert captured["prompt"] == "只回复 OK"
+
+
 def test_account_has_one_model_and_injects_its_own_credentials(tmp_path) -> None:
     db = Database(tmp_path / "app.db")
     model_id = save_model(
@@ -158,7 +189,7 @@ def test_account_has_one_model_and_injects_its_own_credentials(tmp_path) -> None
     assert config["wechat"]["app_secret"] == "wechat-secret"
     assert config["wechat"]["author"] == "运营"
     assert config["ai"]["primary"] == model_id
-    assert config["ai"]["fallback"] == model_id
+    assert config["ai"]["fallback"] == ""
 
     save_account(
         db,
@@ -262,7 +293,9 @@ def test_cannot_delete_model_bound_to_account(tmp_path) -> None:
         raise AssertionError("bound model deletion should fail")
 
 
-def test_env_configured_primary_appears_and_can_bind_to_account(tmp_path, monkeypatch) -> None:
+def test_env_configured_primary_remains_available_only_for_legacy_runtime(
+    tmp_path,
+) -> None:
     db = Database(tmp_path / "app.db")
     config = {
         "ai": {
@@ -284,20 +317,20 @@ def test_env_configured_primary_appears_and_can_bind_to_account(tmp_path, monkey
     assert selected["ai"]["primary"] == "manus"
     assert "custom_models" not in selected["ai"]
 
-    monkeypatch.setattr("app.accounts.load_config", lambda: config)
-    account_id = save_account(
-        db,
-        name="使用默认 Manus 的公众号",
-        app_id="wx-manus",
-        app_secret="wechat-secret",
-        model_id="config:manus",
-    )
-    account_config, _ = apply_account_selection(config, db, account_id)
-    assert account_config["ai"]["primary"] == "manus"
+    assert public_models(db, purpose="text") == []
 
 
 def test_existing_env_wechat_account_is_imported_only_once(tmp_path) -> None:
     db = Database(tmp_path / "app.db")
+    merchant_model_id = save_model(
+        db,
+        name="后台 Manus",
+        provider_type=MANUS,
+        api_base="https://api.manus.ai",
+        model="manus-1.6",
+        api_key="merchant-manus-key",
+    )
+    db.set_setting("merchant.default_text_model_id", merchant_model_id)
     config = {
         "ai": {
             "primary": "manus",
@@ -313,7 +346,7 @@ def test_existing_env_wechat_account_is_imported_only_once(tmp_path) -> None:
     accounts = db.list_official_accounts()
     assert len(accounts) == 1
     assert accounts[0]["name"] == "默认公众号"
-    assert accounts[0]["model_id"] == "config:manus"
+    assert accounts[0]["model_id"] == merchant_model_id
 
 
 def test_publish_and_benchmark_accounts_are_both_imported_with_names(tmp_path) -> None:

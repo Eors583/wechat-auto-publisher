@@ -6,9 +6,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from app.ai.image_providers import is_image_provider
 from app.ai.model_registry import (
     apply_model_selection,
-    configured_models,
     decrypt_api_key,
     encrypt_api_key,
 )
@@ -52,10 +52,10 @@ def save_account(
     if not name or not app_id:
         raise ValueError("公众号名称和 AppID 不能为空")
     config = load_config()
-    model = db.get_ai_model(model_id)
-    config_model_ids = {item["id"] for item in configured_models(config)}
-    if not model and model_id not in config_model_ids:
-        raise ValueError("请先选择一个已添加的大模型")
+    if model_id:
+        model = db.get_ai_model(model_id)
+        if not model or not bool(model.get("enabled")):
+            raise ValueError("所选大模型不存在或已停用")
     existing = db.get_official_account(account_id) if account_id else None
     encrypted = encrypt_api_key(app_secret.strip()) if app_secret and app_secret.strip() else ""
     if not encrypted and existing:
@@ -80,7 +80,10 @@ def save_account(
         }
     )
     configured_db = Path(str(config.get("_db_path") or "")).resolve()
-    if Path(db.path).resolve() == configured_db:
+    if (
+        db.backend == "sqlite"
+        and Path(db.path).resolve() == configured_db
+    ):
         _copy_shared_template_snapshot(config, account_id)
     return account_id
 
@@ -119,11 +122,16 @@ def _import_config_account(
                 account["name"] = desired_name
                 db.upsert_official_account(account)
             return str(account["id"])
-    primary = str((config.get("ai") or {}).get("primary") or "").strip()
-    model_id = f"config:{primary}" if primary else ""
-    valid_models = {str(item["id"]) for item in configured_models(config)}
-    if model_id not in valid_models:
-        return None
+    model_id = str(
+        db.get_setting("merchant.default_text_model_id") or ""
+    ).strip()
+    model = db.get_ai_model(model_id) if model_id else None
+    if (
+        not model
+        or not bool(model.get("enabled"))
+        or is_image_provider(str(model.get("provider_type") or ""))
+    ):
+        model_id = ""
     db.upsert_official_account(
         {
             "id": account_id,
@@ -158,14 +166,51 @@ def ensure_config_accounts_imported(
     return imported
 
 
+def require_bound_text_model(account: dict[str, Any]) -> str:
+    """Return the account model id or raise a clear generation-time error."""
+
+    model_id = str(
+        account.get("_effective_model_id")
+        or account.get("model_id")
+        or ""
+    ).strip()
+    if not model_id:
+        name = str(account.get("name") or account.get("id") or "该公众号")
+        raise ValueError(
+            f"公众号“{name}”尚未绑定文章模型，请先到公众号管理中选择模型后再生成"
+        )
+    return model_id
+
+
+def resolve_account_text_model_id(
+    db: Database,
+    config: dict[str, Any],
+    account: dict[str, Any],
+) -> str:
+    """Resolve an account against the merchant-managed text-model pool."""
+
+    stored_models = {
+        str(item["id"]): item
+        for item in db.list_ai_models(enabled_only=True)
+        if not is_image_provider(str(item.get("provider_type") or ""))
+    }
+    requested = str(account.get("model_id") or "").strip()
+    if requested in stored_models:
+        return requested
+    merchant_default = str(
+        db.get_setting("merchant.default_text_model_id") or ""
+    ).strip()
+    if merchant_default in stored_models:
+        return merchant_default
+    return ""
+
+
 def public_accounts(db: Database, enabled_only: bool = False) -> list[dict[str, Any]]:
+    config = load_config()
     model_names = {
         str(model["id"]): str(model["name"])
         for model in db.list_ai_models()
     }
-    model_names.update(
-        {str(item["id"]): str(item["name"]) for item in configured_models(load_config())}
-    )
     accounts = db.list_official_accounts(enabled_only=enabled_only)
     for item in accounts:
         try:
@@ -177,7 +222,18 @@ def public_accounts(db: Database, enabled_only: bool = False) -> list[dict[str, 
         item.pop("app_secret_encrypted", None)
         item.pop("layout_json", None)
         item["enabled"] = bool(item.get("enabled"))
-        item["model_name"] = model_names.get(str(item.get("model_id")), "模型已删除")
+        explicitly_bound = bool(str(item.get("model_id") or "").strip())
+        model_id = resolve_account_text_model_id(db, config, item)
+        item["model_name"] = (
+            model_names.get(model_id, "模型已删除")
+            if model_id
+            else "暂未绑定模型"
+        )
+        item["has_model"] = bool(model_id and model_id in model_names)
+        item["effective_model_id"] = model_id
+        item["uses_platform_default_model"] = bool(
+            model_id and not explicitly_bound
+        )
         item["has_app_secret"] = True
     return accounts
 
@@ -307,7 +363,14 @@ def apply_account_selection(
     record = db.get_official_account(account_id)
     if not record or (not allow_disabled and not bool(record.get("enabled"))):
         raise ValueError(f"公众号不可用或已停用：{account_id}")
-    config = apply_model_selection(config, db, str(record["model_id"]), str(record["model_id"]))
+    model_id = resolve_account_text_model_id(db, config, record)
+    if not model_id:
+        require_bound_text_model(record)
+    # One account binds one primary model.  Repeating the same model in the
+    # fallback slot does not provide failover and used to produce misleading
+    # "primary and fallback both failed" diagnostics.
+    config = apply_model_selection(config, db, model_id)
+    record["_effective_model_id"] = model_id
     result = dict(config)
     wechat = dict(result.get("wechat") or {})
     wechat["app_id"] = str(record["app_id"])

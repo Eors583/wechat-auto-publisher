@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import threading
@@ -9,9 +10,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import __version__
 from app.api.editorial_reviews import create_editorial_review_router
 from app.config import load_config
 from app.services import (
@@ -20,9 +25,87 @@ from app.services import (
     TopicSourceService,
     get_batch_service,
 )
-
+from app.services.failures import (
+    classify_job_failure,
+    public_failure,
+    sanitize_failure_payload,
+    sanitize_failure_text,
+)
+from app.services.auth import AuthService
+from app.services.configuration import ConfigurationService
+from app.services.onboarding import OnboardingService
 
 logger = logging.getLogger(__name__)
+
+
+class StructuredHTTPException(HTTPException):
+    """HTTP error carrying an explicit workflow stage for failure projection."""
+
+    def __init__(
+        self,
+        status_code: int,
+        detail: Any,
+        *,
+        stage: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.failure_stage = str(stage or "").strip()
+
+
+def _structured_http_error(
+    status_code: int,
+    error: Any,
+    *,
+    stage: str = "",
+) -> StructuredHTTPException:
+    return StructuredHTTPException(
+        status_code,
+        sanitize_failure_text(error),
+        stage=stage,
+    )
+
+
+def _request_failure_stage(request: Request) -> str:
+    path = str(request.url.path or "").casefold()
+    if "/retry" in path:
+        return "retry"
+    if path.endswith("/drafts") or "draft" in path:
+        return "inject"
+    if "/preflight" in path or "connection-health" in path:
+        return "preflight"
+    if "/paragraph" in path:
+        return "rewrite"
+    if "/cover" in path or "/inline-images" in path or "/rerender" in path:
+        return "render"
+    if "/selection" in path:
+        return "title_optimize"
+    if "/confirm" in path or "/view" in path or "/needs-changes" in path:
+        return "review"
+    if "/batches" in path:
+        return "batch"
+    if "/accounts" in path:
+        return "account"
+    return "api"
+
+
+def _failure_response(
+    detail: Any,
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    safe_detail = sanitize_failure_payload(detail)
+    if isinstance(safe_detail, str):
+        source = safe_detail
+    else:
+        try:
+            source = json.dumps(safe_detail, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            source = sanitize_failure_text(safe_detail)
+    failure = public_failure(
+        classify_job_failure(source, step=stage or "api", status="failed")
+    )
+    return {"detail": safe_detail, "failure": failure}
 
 
 def _run_feishu_bot(
@@ -49,9 +132,10 @@ def _run_feishu_bot(
         holder["status"] = "connecting"
         bot.start()
     except Exception as exc:  # noqa: BLE001
+        safe_error = sanitize_failure_text(exc)
         holder["status"] = "failed"
-        holder["error"] = str(exc)
-        logger.exception("Feishu long connection stopped")
+        holder["error"] = safe_error
+        logger.error("Feishu long connection stopped: %s", safe_error)
     finally:
         asyncio.set_event_loop(None)
         if not loop.is_running() and not loop.is_closed():
@@ -74,6 +158,15 @@ class CreateBatchRequest(BaseModel):
 class SelectJobRequest(BaseModel):
     title_index: int = Field(ge=0)
     subtitle_index: int | None = Field(default=None, ge=0)
+
+
+class RetryJobRequest(BaseModel):
+    step: str = "auto"
+    model_id: str | None = None
+    source_url: str | None = None
+    raw_content: str | None = None
+    image_index: int | None = Field(default=None, ge=0)
+    image_id: str | None = None
 
 
 class UpdateJobContentRequest(BaseModel):
@@ -143,12 +236,37 @@ class FollowedArticleStateRequest(BaseModel):
     rewritten_batch_id: str | None = None
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=6, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AdminModelRequest(BaseModel):
+    id: str | None = None
+    name: str = Field(min_length=1, max_length=100)
+    provider_type: str = "openai_compatible"
+    api_base: str = ""
+    model: str = Field(min_length=1, max_length=200)
+    api_key: str | None = None
+    enabled: bool = True
+
+
 def create_api_app(
     config: dict[str, Any] | None = None,
     service: BatchService | None = None,
     *,
     start_feishu: bool = True,
 ) -> FastAPI:
+    # Provider URLs can contain short-lived WeChat/Feishu credentials in query
+    # parameters. Keep transport-level request logging out of shared logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("Lark").setLevel(logging.WARNING)
     cfg = config or load_config()
     batch_service = service or get_batch_service(cfg)
     from app.feishu.settings import effective_feishu_settings
@@ -159,39 +277,252 @@ def create_api_app(
     )
     api_cfg = dict(cfg.get("api") or {})
     expected_token = str(api_cfg.get("token") or "").strip()
+    auth_cfg = dict(cfg.get("auth") or {})
+    auth_required = bool(auth_cfg.get("required", False))
     bot_holder: dict[str, Any] = {}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        if start_feishu and bool((cfg.get("feishu") or {}).get("enabled", False)):
+        from app.feishu.runtime import get_runtime, update_runtime
+
+        auth_service.ensure_default_admin()
+        onboarding_service.migrate_legacy_state()
+        feishu_enabled = bool(
+            (cfg.get("feishu") or {}).get("enabled", False)
+        )
+        if start_feishu and feishu_enabled:
             threading.Thread(
                 target=_run_feishu_bot,
                 args=(cfg, batch_service, bot_holder),
                 name="feishu-long-connection",
                 daemon=True,
             ).start()
-        yield
+        elif start_feishu:
+            update_runtime(
+                batch_service.db,
+                status="disabled",
+                started_at="",
+                last_error="",
+            )
+        try:
+            yield
+        finally:
+            if start_feishu:
+                runtime = get_runtime(batch_service.db)
+                if str(runtime.get("status") or "") in {
+                    "starting",
+                    "connecting",
+                    "running",
+                }:
+                    update_runtime(batch_service.db, status="stopped")
 
     app = FastAPI(
         title="公众号改写助手 API",
-        version="1.0.0",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.batch_service = batch_service
     app.state.config = cfg
     topic_service = TopicSourceService(batch_service.db, cfg)
     followed_service = FollowedContentService(batch_service.db, cfg)
+    onboarding_service = OnboardingService(batch_service.db, cfg)
+    auth_service = AuthService(batch_service.db)
+    configuration_service = ConfigurationService(batch_service.db, cfg)
 
-    def require_token(authorization: str | None = Header(default=None)) -> None:
-        if not expected_token:
-            return
+    @app.exception_handler(StarletteHTTPException)
+    async def sanitized_http_error(
+        request: Request,
+        exc: StarletteHTTPException,
+    ) -> JSONResponse:
+        stage = str(getattr(exc, "failure_stage", "") or "").strip()
+        content = _failure_response(
+            exc.detail,
+            stage=stage or _request_failure_stage(request),
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=content,
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def sanitized_validation_error(
+        request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        # Pydantic includes the original input by default.  Omitting it keeps
+        # ``loc/msg/type`` compatibility without reflecting credentials.
+        detail = [
+            {
+                key: value
+                for key, value in dict(item).items()
+                if key not in {"input", "ctx", "url"}
+            }
+            for item in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=_failure_response(
+                detail,
+                stage=_request_failure_stage(request),
+            ),
+        )
+
+    @app.exception_handler(Exception)
+    async def sanitized_unhandled_error(
+        request: Request,
+        exc: Exception,
+    ) -> JSONResponse:
+        safe_error = sanitize_failure_text(exc)
+        logger.error(
+            "Unhandled API error on %s: %s",
+            request.url.path,
+            safe_error,
+        )
+        content = _failure_response(
+            safe_error or "服务器内部错误",
+            stage=_request_failure_stage(request),
+        )
+        # Do not expose the provider's raw message through the compatibility
+        # detail field on unexpected failures.
+        content["detail"] = "服务器内部错误"
+        return JSONResponse(status_code=500, content=content)
+
+    def _bearer_token(authorization: str | None) -> str:
         prefix = "Bearer "
-        supplied = authorization[len(prefix):].strip() if authorization and authorization.startswith(prefix) else ""
-        if not supplied or not hmac.compare_digest(supplied, expected_token):
+        return (
+            authorization[len(prefix):].strip()
+            if authorization and authorization.startswith(prefix)
+            else ""
+        )
+
+    def require_token(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        supplied = _bearer_token(authorization)
+        if (
+            expected_token
+            and supplied
+            and hmac.compare_digest(supplied, expected_token)
+        ):
+            return {
+                "id": "legacy-api-token",
+                "username": "api",
+                "role": "admin",
+                "enabled": True,
+            }
+        user = auth_service.authenticate(supplied)
+        if user:
+            return user
+        if not auth_required and not expected_token:
+            return {
+                "id": "local-compat",
+                "username": "local",
+                "role": "admin",
+                "enabled": True,
+            }
+        if not supplied:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="API Token 无效",
+                detail="请先登录后再操作",
             )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录已失效，请重新登录",
+        )
+
+    def require_admin(
+        principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        if str(principal.get("role") or "") != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="只有管理员可以配置模型和密钥",
+            )
+        return principal
+
+    @app.post("/api/v1/auth/register")
+    def register_user(payload: RegisterRequest) -> dict[str, Any]:
+        try:
+            auth_service.register(payload.username, payload.password)
+            return auth_service.login(payload.username, payload.password)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/v1/auth/login")
+    def login_user(payload: LoginRequest) -> dict[str, Any]:
+        try:
+            return auth_service.login(payload.username, payload.password)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=str(exc),
+            ) from exc
+
+    @app.get("/api/v1/auth/me")
+    def current_user(
+        principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        return principal
+
+    @app.post("/api/v1/auth/logout")
+    def logout_user(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
+        auth_service.logout(_bearer_token(authorization))
+        return {"ok": True}
+
+    @app.get(
+        "/api/v1/admin/users",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_users() -> list[dict[str, Any]]:
+        return auth_service.list_users()
+
+    @app.get(
+        "/api/v1/admin/models",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_models() -> list[dict[str, Any]]:
+        return configuration_service.list_models(include_config=False)
+
+    @app.post(
+        "/api/v1/admin/models",
+        dependencies=[Depends(require_admin)],
+    )
+    def save_admin_model(payload: AdminModelRequest) -> dict[str, Any]:
+        try:
+            return configuration_service.save_model(
+                model_id=payload.id,
+                name=payload.name,
+                provider_type=payload.provider_type,
+                api_base=payload.api_base,
+                model=payload.model,
+                api_key=payload.api_key,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/admin/models/{model_id}/test",
+        dependencies=[Depends(require_admin)],
+    )
+    def test_admin_model(model_id: str) -> dict[str, Any]:
+        try:
+            return configuration_service.test_model(model_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete(
+        "/api/v1/admin/models/{model_id}",
+        dependencies=[Depends(require_admin)],
+    )
+    def delete_admin_model(model_id: str) -> dict[str, Any]:
+        try:
+            return configuration_service.delete_model(model_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     app.include_router(
         create_editorial_review_router(batch_service, require_token)
@@ -212,15 +543,33 @@ def create_api_app(
         return {
             "ok": True,
             "service": "wechat-auto-publisher",
-            "version": "1.0.0",
+            "version": __version__,
             "instance_root": str(cfg.get("_root") or ""),
+            "pid": os.getpid(),
+            "launcher_session_id": str(
+                os.getenv("WECHAT_PUBLISHER_LAUNCH_SESSION_ID") or ""
+            ),
             "feishu_enabled": feishu_enabled,
             "feishu_status": str(
                 feishu_runtime.get("status") or "unknown"
             ),
+            # Keep the compatibility field but never expose the raw runtime
+            # exception from this unauthenticated endpoint.
             "feishu_error": (
-                feishu_runtime.get("last_error")
-                or bot_holder.get("error")
+                "飞书连接异常"
+                if (
+                    feishu_runtime.get("last_error")
+                    or bot_holder.get("error")
+                )
+                else None
+            ),
+            "feishu_error_code": (
+                "feishu.connection_failed"
+                if (
+                    feishu_runtime.get("last_error")
+                    or bot_holder.get("error")
+                )
+                else None
             ),
         }
 
@@ -228,14 +577,69 @@ def create_api_app(
     def accounts() -> list[dict[str, Any]]:
         return batch_service.list_accounts()
 
+    @app.get("/api/v1/models", dependencies=[Depends(require_token)])
+    def available_models(
+        purpose: str = Query(default="text", pattern="^(text|image)$"),
+    ) -> list[dict[str, Any]]:
+        """Models users may select; credentials are always removed."""
+
+        return configuration_service.list_models(
+            enabled_only=True,
+            purpose=purpose,
+            include_config=False,
+        )
+
+    @app.get(
+        "/api/v1/onboarding/status",
+        dependencies=[Depends(require_token)],
+    )
+    def onboarding_status() -> dict[str, Any]:
+        """Expose setup readiness without returning credentials or secrets."""
+
+        return onboarding_service.status()
+
     @app.post("/api/v1/accounts/preflight", dependencies=[Depends(require_token)])
     def preflight_accounts_endpoint(
         account_ids: list[str],
         deep_model_check: bool = Query(default=False),
+        force_wechat_check: bool = Query(default=False),
     ) -> list[dict[str, Any]]:
         return batch_service.preflight(
-            account_ids, deep_model_check=deep_model_check
+            account_ids,
+            deep_model_check=deep_model_check,
+            force_wechat_check=force_wechat_check,
         )
+
+    @app.get(
+        "/api/v1/wechat/connection-health",
+        dependencies=[Depends(require_token)],
+    )
+    def wechat_connection_health(
+        account_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        account_ids = (
+            [str(account_id)]
+            if account_id
+            else [str(item["id"]) for item in batch_service.list_accounts()]
+        )
+        items: list[dict[str, Any]] = []
+        for current_id in account_ids:
+            health = batch_service.db.get_wechat_connection_health(
+                current_id
+            ) or {
+                "status": "unknown",
+                "mode": "direct",
+                "checked_at": None,
+                "expires_at": None,
+                "latency_ms": None,
+                "last_error_code": None,
+                "error": None,
+                "last_successful_write_at": None,
+                "details": {},
+            }
+            health.pop("details_json", None)
+            items.append({"account_id": current_id, **health})
+        return {"items": items}
 
     @app.get("/api/v1/topics/hot", dependencies=[Depends(require_token)])
     def recent_hot_topics(
@@ -408,6 +812,73 @@ def create_api_app(
         return batch_service.list_batches(
             limit=limit, include_archived=include_archived
         )
+
+    @app.get(
+        "/api/v1/review-inbox",
+        dependencies=[Depends(require_token)],
+    )
+    def review_inbox(
+        bucket: str = Query(default="review"),
+        account_id: str | None = Query(default=None),
+        search: str = Query(default="", max_length=200),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return batch_service.list_review_inbox(
+                bucket=bucket,
+                account_id=account_id,
+                search=search,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/batches/{batch_id}/jobs/{job_id}/attempts",
+        dependencies=[Depends(require_token)],
+    )
+    def list_job_attempts(
+        batch_id: str,
+        job_id: int,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> list[dict[str, Any]]:
+        try:
+            return batch_service.list_job_attempts(
+                batch_id, job_id, limit=limit
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/batches/{batch_id}/jobs/{job_id}/retry",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_token)],
+    )
+    def retry_job(
+        batch_id: str,
+        job_id: int,
+        payload: RetryJobRequest,
+    ) -> dict[str, Any]:
+        try:
+            return batch_service.retry_job(
+                batch_id,
+                job_id,
+                **payload.model_dump(),
+            )
+        except KeyError as exc:
+            raise _structured_http_error(
+                404,
+                exc,
+                stage=payload.step if payload.step != "auto" else "retry",
+            ) from exc
+        except ValueError as exc:
+            raise _structured_http_error(
+                409,
+                exc,
+                stage=payload.step if payload.step != "auto" else "retry",
+            ) from exc
 
     @app.put(
         "/api/v1/batches/{batch_id}/jobs/{job_id}/selection",
@@ -641,9 +1112,9 @@ def create_api_app(
         try:
             return batch_service.inject_batch(batch_id)
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise _structured_http_error(404, exc, stage="inject") from exc
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise _structured_http_error(409, exc, stage="inject") from exc
 
     @app.post(
         "/api/v1/batches/{batch_id}/cancel",
@@ -664,9 +1135,9 @@ def create_api_app(
         try:
             return batch_service.retry_failed(batch_id)
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise _structured_http_error(404, exc, stage="retry") from exc
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise _structured_http_error(409, exc, stage="retry") from exc
 
     @app.post(
         "/api/v1/batches/{batch_id}/copy",

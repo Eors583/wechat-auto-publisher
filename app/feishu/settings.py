@@ -83,7 +83,16 @@ def effective_feishu_settings(
 ) -> dict[str, Any]:
     stored = _load(db)
     if not stored:
-        return dict(config_fallback or {})
+        fallback = dict(config_fallback or {})
+        # Versions before 1.1.1 shipped ``config:moonshot`` as a sample
+        # default.  An upgrader preserves the user's existing config.yaml, so
+        # treating that legacy sample as a real selection would silently bind
+        # the Feishu agent to Kimi.  Only an explicit database selection is
+        # authoritative now.
+        if str(fallback.get("agent_model_id") or "") == "config:moonshot":
+            fallback["agent_model_id"] = ""
+            fallback["enabled"] = False
+        return fallback
     result = {
         "enabled": bool(stored.get("enabled", False)),
         "app_id": str(stored.get("app_id") or ""),

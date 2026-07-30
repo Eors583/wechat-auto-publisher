@@ -379,6 +379,39 @@ body, .q-page, .nicegui-content {
   border: 0;
   background: #fff;
 }
+.review-phone-preview {
+  box-sizing: border-box;
+  width: min(100%, 423px) !important;
+  max-width: 423px;
+  max-height: 760px;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 16px;
+  border: 8px solid #17211f;
+  border-radius: 30px;
+  background: #eef2f1;
+  box-shadow: 0 18px 45px rgba(15, 43, 38, 0.16);
+}
+.review-phone-preview .article-preview,
+.review-phone-preview .wechat-preview-iframe {
+  display: block;
+  width: 375px;
+  max-width: 100%;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  border-radius: 16px;
+  background: #fff;
+}
+.review-phone-preview .wechat-preview-iframe {
+  height: 667px;
+}
+@media (max-width: 460px) {
+  .review-phone-preview {
+    padding: 8px;
+    border-width: 5px;
+    border-radius: 22px;
+  }
+}
 .request-loading-dialog .q-dialog__backdrop {
   background: rgba(9, 37, 36, 0.42);
   backdrop-filter: blur(2px);

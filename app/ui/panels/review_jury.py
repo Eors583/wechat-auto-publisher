@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from nicegui import run, ui
 
 from app.config import load_config
 from app.services.batches import BatchService
+from app.ui.lifecycle import client_timer
 from app.ui.state import set_button_loading
 
 
@@ -38,6 +38,8 @@ def build_review_jury_panel(
     job: dict[str, Any],
     require_saved_editor: Callable[[], bool],
     on_job_updated: Callable[[dict[str, Any]], None],
+    on_article_updated: Callable[[], Awaitable[None]] | None = None,
+    is_workbench_alive: Callable[[], bool] | None = None,
 ) -> None:
     """Render the manual AI editorial jury inside the shared review workbench.
 
@@ -49,7 +51,14 @@ def build_review_jury_panel(
     owner_client = ui.context.client
 
     def ui_alive() -> bool:
-        return not bool(getattr(owner_client, "is_deleted", False))
+        if bool(getattr(owner_client, "is_deleted", False)):
+            return False
+        if is_workbench_alive is None:
+            return True
+        try:
+            return bool(is_workbench_alive())
+        except RuntimeError:
+            return False
 
     options = service.get_editorial_review_options()
     profiles = [
@@ -230,27 +239,195 @@ def build_review_jury_panel(
                 "border:1px solid #cbded8;box-shadow:none"
             ):
                 result_host = ui.column().classes("w-full gap-3")
+                comparison_section = ui.column().classes(
+                    "w-full gap-3 q-mt-md"
+                )
+                with comparison_section:
+                    comparison_host = ui.column().classes("w-full gap-3")
+                comparison_section.set_visibility(False)
         result_section.set_visibility(False)
 
         async def scroll_to_review_result() -> None:
             """Reveal the inline conclusion and keep the current workbench open."""
 
-            try:
-                if not ui_alive():
-                    return
-                review_expansion.value = True
-                result_section.set_visibility(True)
-                await asyncio.sleep(0)
-                if not ui_alive():
-                    return
-                result_section.run_method(
-                    "scrollIntoView",
-                    {"behavior": "smooth", "block": "start"},
-                )
-            except RuntimeError:
-                # The operator may close the parent workbench while a model call
-                # is returning; in that case there is no live client to scroll.
+            if not ui_alive():
                 return
+            review_expansion.value = True
+            result_section.set_visibility(True)
+
+            def perform_scroll() -> None:
+                """Scroll only after the visibility update reached the browser."""
+
+                if not ui_alive():
+                    return
+                try:
+                    result_section.run_method(
+                        "scrollIntoView",
+                        {"behavior": "smooth", "block": "start"},
+                    )
+                except RuntimeError:
+                    return
+
+            # NiceGUI flushes element visibility after the current event handler
+            # returns. A one-shot client timer therefore makes the first click
+            # scroll reliably instead of requiring a second click.
+            client_timer(
+                0.08,
+                perform_scroll,
+                once=True,
+                immediate=False,
+            )
+
+        async def scroll_to_article_comparison() -> None:
+            """Reveal and scroll to the stable before/after comparison anchor."""
+
+            if not ui_alive() or not bool(comparison_section.visible):
+                return
+            review_expansion.value = True
+            result_section.set_visibility(True)
+            comparison_section.set_visibility(True)
+
+            def perform_scroll() -> None:
+                if not ui_alive():
+                    return
+                try:
+                    comparison_section.run_method(
+                        "scrollIntoView",
+                        {"behavior": "smooth", "block": "start"},
+                    )
+                except RuntimeError:
+                    return
+
+            client_timer(
+                0.08,
+                perform_scroll,
+                once=True,
+                immediate=False,
+            )
+
+        def render_article_comparison(
+            review: dict[str, Any] | None,
+            application: dict[str, Any] | None,
+        ) -> bool:
+            """Render the persisted review source and AI candidate side by side."""
+
+            comparison_host.clear()
+            comparison_section.set_visibility(False)
+            if not review or str(review.get("status") or "") not in {
+                "candidate_ready",
+                "applied",
+            }:
+                return False
+
+            before = dict(review.get("source_snapshot") or {})
+            # The review snapshot is the canonical candidate for historical
+            # reopen. The application snapshot keeps compatibility with older
+            # rows and the just-generated in-memory application.
+            after = dict(review.get("rewritten_snapshot") or {})
+            if not after:
+                after = dict((application or {}).get("candidate_snapshot") or {})
+            if not str(before.get("body") or "").strip() or not str(
+                after.get("body") or ""
+            ).strip():
+                return False
+            comparison_matches_editor = all(
+                str(job.get(job_key) or "").strip()
+                == str(after.get(snapshot_key) or "").strip()
+                for job_key, snapshot_key in (
+                    ("selected_title", "title"),
+                    ("selected_subtitle", "subtitle"),
+                    ("digest", "digest"),
+                    ("body", "body"),
+                )
+            )
+
+            def render_snapshot(
+                *,
+                label: str,
+                snapshot: dict[str, Any],
+                badge_color: str,
+            ) -> None:
+                body = str(snapshot.get("body") or "").strip()
+                with ui.column().classes("col-12 col-md-6"):
+                    with ui.card().classes("w-full q-pa-md").style(
+                        "border:1px solid #dfe8e5;box-shadow:none;height:100%"
+                    ):
+                        with ui.row().classes(
+                            "w-full items-center justify-between no-wrap"
+                        ):
+                            ui.label(label).classes(
+                                "text-subtitle1 text-weight-bold"
+                            )
+                            ui.badge(f"{len(body)} 字").props(
+                                f"outline color={badge_color}"
+                            )
+                        title = str(snapshot.get("title") or "").strip()
+                        ui.label(title or "（未设置标题）").classes(
+                            "text-h6 text-weight-bold"
+                        )
+                        subtitle = str(snapshot.get("subtitle") or "").strip()
+                        if subtitle:
+                            ui.label(f"副标题：{subtitle}").classes(
+                                "text-body2 text-blue-grey-8"
+                            )
+                        digest = str(snapshot.get("digest") or "").strip()
+                        if digest:
+                            ui.label(f"摘要：{digest}").classes(
+                                "text-caption text-blue-grey-7"
+                            )
+                        ui.separator()
+                        with ui.column().classes("w-full q-pr-sm").style(
+                            "max-height:560px;overflow-y:auto;"
+                            "overscroll-behavior:contain"
+                        ):
+                            ui.label(body).classes("text-body1").style(
+                                "white-space:pre-wrap;line-height:1.9;"
+                                "overflow-wrap:anywhere"
+                            )
+
+            with comparison_host:
+                ui.separator()
+                with ui.row().classes(
+                    "w-full items-start justify-between q-gutter-sm"
+                ):
+                    with ui.column().classes("gap-0"):
+                        ui.label("改写前后对比").classes(
+                            "text-h6 text-weight-bold"
+                        )
+                        ui.label(
+                            (
+                                "左侧为 AI 评审时的原稿，右侧为本次智能修改后"
+                                "并已应用的版本；当前正文编辑区使用右侧内容。"
+                                if comparison_matches_editor
+                                else "左侧为 AI 评审时的原稿，右侧为本次智能"
+                                "修改应用时的版本；此后正文又经过人工修改，"
+                                "右侧仅保留本次 AI 修改记录。"
+                            )
+                        ).classes("muted")
+                    ui.badge("内容对比").props("outline color=indigo-7")
+                change_summary = str(after.get("change_summary") or "").strip()
+                if change_summary:
+                    with ui.card().classes("w-full q-pa-sm bg-indigo-1").style(
+                        "border:1px solid #cfd7f6;box-shadow:none"
+                    ):
+                        ui.label(f"AI 修改摘要：{change_summary}").classes(
+                            "text-body2 text-indigo-10"
+                        )
+                with ui.row().classes(
+                    "w-full q-col-gutter-md items-stretch"
+                ).style("gap:0"):
+                    render_snapshot(
+                        label="改写前原文",
+                        snapshot=before,
+                        badge_color="blue-grey-7",
+                    )
+                    render_snapshot(
+                        label="智能修改后",
+                        snapshot=after,
+                        badge_color="indigo-7",
+                    )
+            comparison_section.set_visibility(True)
+            return True
 
         def render_rewrite_controls(review: dict[str, Any]) -> None:
             review_status = str(review.get("status") or "")
@@ -331,15 +508,27 @@ def build_review_jury_panel(
                         set_button_loading(smart_btn, False)
                 if refreshed_review is not None and ui_alive():
                     runtime["review"] = refreshed_review
-                    render_review_result(refreshed_review)
+                    render_review_result(
+                        refreshed_review,
+                        include_comparison=False,
+                    )
+                    render_article_comparison(
+                        refreshed_review,
+                        dict(runtime.get("application") or {}),
+                    )
                     render_review_summary(refreshed_review)
-                    await scroll_to_review_result()
                     ui.notify(
                         "已按所选整体方向优化标题、开头和传播效果并刷新排版；"
-                        "当前仍停留在审核页，请检查后确认文章",
+                        "下方已展示改写前后内容对比，请检查后确认文章",
                         type="positive",
                         timeout=10000,
                     )
+                    if bool(comparison_section.visible):
+                        await scroll_to_article_comparison()
+                    elif on_article_updated is not None:
+                        await on_article_updated()
+                    else:
+                        await scroll_to_review_result()
 
             with ui.row().classes("w-full justify-end q-gutter-sm q-mt-sm"):
                 ui.button(
@@ -382,8 +571,17 @@ def build_review_jury_panel(
                             "outline color=indigo-7 no-caps icon=rate_review"
                         )
 
-        def render_review_result(review: dict[str, Any] | None) -> None:
+        def render_review_result(
+            review: dict[str, Any] | None,
+            *,
+            include_comparison: bool = True,
+        ) -> None:
             result_host.clear()
+            if include_comparison:
+                render_article_comparison(
+                    review,
+                    dict(runtime.get("application") or {}),
+                )
             if not review:
                 return
             result = dict(review.get("result") or {})
@@ -641,19 +839,23 @@ def build_review_jury_panel(
                                             resolved_by="桌面端运营人员",
                                         )
                                     )
-                                    ui.notify("核实结果已保存", type="positive")
+                                    if ui_alive():
+                                        ui.notify("核实结果已保存", type="positive")
                                 except Exception as exc:  # noqa: BLE001
-                                    ui.notify(
-                                        f"保存核实结果失败：{exc}",
-                                        type="negative",
-                                        timeout=10000,
-                                    )
+                                    if ui_alive():
+                                        ui.notify(
+                                            f"保存核实结果失败：{exc}",
+                                            type="negative",
+                                            timeout=10000,
+                                        )
                                 finally:
-                                    set_button_loading(button, False)
-                                if updated_review is not None:
+                                    if ui_alive():
+                                        set_button_loading(button, False)
+                                if updated_review is not None and ui_alive():
                                     runtime["review"] = updated_review
                                     render_review_result(updated_review)
                                     render_review_summary(updated_review)
+                                    await scroll_to_review_result()
 
                             verified_btn.on_click(
                                 lambda _=None, button=verified_btn, handler=resolve_issue: handler(

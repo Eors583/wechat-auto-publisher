@@ -21,12 +21,9 @@ from app.feishu.presenter import (
 from app.feishu.progress import FeishuProgressReporter
 from app.feishu.runtime import update_runtime, utc_now
 from app.feishu.session import FeishuSessionStore
-from app.feishu.tool_executor import (
-    FeishuToolExecutor,
-    explicit_draft_confirmation as _explicit_draft_confirmation,
-    optional_int as _optional_int,
-)
+from app.feishu.tool_executor import FeishuToolExecutor
 from app.services import BatchService
+from app.services.failures import sanitize_failure_text
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -103,7 +100,11 @@ class FeishuBot:
         try:
             self.gateway.start(self._on_message_event)
         except Exception as exc:
-            update_runtime(self.service.db, status="error", last_error=str(exc))
+            update_runtime(
+                self.service.db,
+                status="error",
+                last_error=sanitize_failure_text(exc),
+            )
             raise
 
     def _on_message_event(self, data: Any) -> None:
@@ -171,8 +172,9 @@ class FeishuBot:
                 message.open_id,
             )
         except Exception as exc:  # noqa: BLE001
-            update_runtime(self.service.db, last_error=str(exc))
-            logger.exception("Feishu message handling failed")
+            safe_error = sanitize_failure_text(exc)
+            update_runtime(self.service.db, last_error=safe_error)
+            logger.error("Feishu message handling failed: %s", safe_error)
 
     def _dispatch_text(
         self, text: str, message_id: str, chat_id: str, open_id: str
@@ -212,6 +214,15 @@ class FeishuBot:
                 f'确认码不正确或已过期，请回复“确认 {pending.get("code")}”；也可以回复“取消操作”。',
             )
             return
+        planning_text, sensitive_fields = _redact_sensitive_fields(text)
+        if sensitive_fields:
+            self._reply_text(
+                message_id,
+                "为了保护密钥，本条消息中的敏感配置没有保存，也不会交给智能体。"
+                "请在本机桌面端“设置”中配置 API Key、AppSecret、"
+                "微信公众号后台登录态或微信云中转接入码。",
+            )
+            return
         if not self.agent:
             self.legacy.dispatch(text, message_id, chat_id, open_id)
             return
@@ -222,7 +233,6 @@ class FeishuBot:
                 current_batch = self.service.get_batch(batch_id)
             except KeyError:
                 pass
-        planning_text, sensitive_fields = _redact_sensitive_fields(text)
         try:
             plan = self.agent.plan(
                 planning_text,
@@ -232,23 +242,17 @@ class FeishuBot:
                 review_state=self.sessions.review_state(chat_id),
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Feishu agent planning failed")
+            safe_error = sanitize_failure_text(
+                _redact_known_values(str(exc), sensitive_fields)
+            )
+            logger.error("Feishu agent planning failed: %s", safe_error)
             self._reply_text(
                 message_id,
-                f"智能体分析失败，本次没有执行任何操作：{exc}\n\n"
+                f"智能体分析失败，本次没有执行任何操作：{safe_error}\n\n"
                 f"可以按以下固定指令重试：\n{HELP_TEXT}",
             )
             return
 
-        if plan.tool == "save_model" and sensitive_fields.get("api_key"):
-            plan.arguments["api_key"] = sensitive_fields["api_key"]
-        if plan.tool == "save_official_account" and sensitive_fields.get("app_secret"):
-            plan.arguments["app_secret"] = sensitive_fields["app_secret"]
-        if plan.tool in {"test_wechat_backend_login", "save_wechat_backend_login"}:
-            if sensitive_fields.get("token"):
-                plan.arguments["token"] = sensitive_fields["token"]
-            if sensitive_fields.get("cookie"):
-                plan.arguments["cookie"] = sensitive_fields["cookie"]
         logger.info(
             "Feishu agent plan: model=%s tool=%s intent=%s",
             self.agent_model_id,
@@ -267,8 +271,14 @@ class FeishuBot:
                 current_batch_id=batch_id,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Feishu tool execution failed: tool=%s", plan.tool)
-            safe_error = _redact_known_values(str(exc), sensitive_fields)
+            safe_error = sanitize_failure_text(
+                _redact_known_values(str(exc), sensitive_fields)
+            )
+            logger.error(
+                "Feishu tool execution failed: tool=%s error=%s",
+                plan.tool,
+                safe_error,
+            )
             self._reply_text(
                 message_id,
                 f"操作执行失败（{plan.tool}）：{safe_error}",
@@ -351,7 +361,11 @@ class FeishuBot:
             self.gateway.reply_text(message_id, text)
             update_runtime(self.service.db, last_reply_at=utc_now(), last_error="")
         except Exception as exc:
-            update_runtime(self.service.db, last_reply_error_at=utc_now(), last_error=str(exc))
+            update_runtime(
+                self.service.db,
+                last_reply_error_at=utc_now(),
+                last_error=sanitize_failure_text(exc),
+            )
             raise
 
     def _send_text(self, chat_id: str, text: str) -> None:
@@ -359,7 +373,11 @@ class FeishuBot:
             self.gateway.send_text(chat_id, text)
             update_runtime(self.service.db, last_reply_at=utc_now(), last_error="")
         except Exception as exc:
-            update_runtime(self.service.db, last_reply_error_at=utc_now(), last_error=str(exc))
+            update_runtime(
+                self.service.db,
+                last_reply_error_at=utc_now(),
+                last_error=sanitize_failure_text(exc),
+            )
             raise
 
     def _send_image(
@@ -376,7 +394,11 @@ class FeishuBot:
             update_runtime(self.service.db, last_reply_at=utc_now(), last_error="")
             return image_key
         except Exception as exc:
-            update_runtime(self.service.db, last_reply_error_at=utc_now(), last_error=str(exc))
+            update_runtime(
+                self.service.db,
+                last_reply_error_at=utc_now(),
+                last_error=sanitize_failure_text(exc),
+            )
             raise
 
     # Public callback for independently developed tool modules.

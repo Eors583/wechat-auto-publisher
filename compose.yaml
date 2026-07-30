@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: wechat_publisher
+      POSTGRES_USER: wechat_publisher
+      POSTGRES_PASSWORD: wechat_dev_password
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U wechat_publisher -d wechat_publisher
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "15432:5432"
+    volumes:
+      - wechat_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - uvicorn
+      - app.api.server:create_api_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18766"
+    environment: &app_environment
+      DATABASE_URL: postgresql://wechat_publisher:wechat_dev_password@postgres:5432/wechat_publisher
+      AUTH_REQUIRED: "true"
+      AUTH_STORAGE_SECRET: local-docker-development-secret-change-before-production
+      FEISHU_ENABLED: "false"
+      WECHAT_RELAY_ENABLED: "false"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "18776:18766"
+    volumes:
+      - ./app:/app/app:ro
+      - wechat_app_data:/app/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - python
+      - -m
+      - app.ui.server
+    environment: *app_environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    ports:
+      - "18775:18765"
+    volumes:
+      - ./app:/app/app:ro
+      - wechat_app_data:/app/data
+    restart: unless-stopped
+
+  admin:
+    image: wechat-auto-publisher-web:latest
+    command:
+      - python
+      - -m
+      - app.admin.server
+    environment: *app_environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    ports:
+      - "18777:18767"
+    volumes:
+      - ./app:/app/app:ro
+      - wechat_app_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  wechat_postgres_data:
+  wechat_app_data:

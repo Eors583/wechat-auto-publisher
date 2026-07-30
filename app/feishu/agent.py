@@ -9,7 +9,6 @@ from app.ai.model_registry import build_text_client
 from app.db import Database
 from app.feishu.tool_catalog import (
     ALLOWED_TOOLS,
-    confirmation_hint,
     render_tool_catalog,
     requires_confirmation,
 )
@@ -148,11 +147,11 @@ class FeishuToolAgent:
 - “飞书机器人运行正常吗” => get_feishu_runtime_status；“今天有多少待审核和失败文章” => get_operational_overview
 - “查看A公众号配置” => get_account_config；“把A切到模型M” => set_account_model
 - “读取A草稿箱模板” => list_draft_templates；“A选择模板 2并用‘正文’替换” => select_draft_template，并填写 template_number=2、placeholder=正文
+- “配置/更新 API Key、AppSecret、微信后台 token/cookie 或中转凭证” => chat，提示用户只能在本机桌面端设置中完成，绝不能接收、读取或调用工具保存密钥
 - “可以了/没问题” => chat，提醒必须明确确认，绝不能写入
 - “确认全部写入草稿箱” => write_all_to_drafts，并填写 confirmation=true
 - “不要写了/停止当前改写” => cancel_rewrite_batch
 - “删除热点来源/删除提示词模板/删除关注公众号”但没有“确认” => chat，返回对应的明确确认话术
-- “确认保存模型密钥，名称…API Key…” => save_model，并填写 confirmation=true，reply 和步骤不得回显密钥
 
 输出格式：
 {{"intent":"简短意图","analysis_summary":"判断依据摘要","steps":["步骤1","步骤2"],"tool":"工具名","arguments":{{}},"reply":"无需工具或需要确认时的中文回复"}}
@@ -239,16 +238,7 @@ _CONFIRMATION_ACTIONS: dict[str, tuple[str, ...]] = {
     "delete_prompt_template": ("删除提示词模板", "删除模板"),
     "remove_inline_image": ("移除正文配图", "删除正文配图", "移除图片", "删除图片"),
     "regenerate_inline_image": ("重新生成这张正文配图", "重做这张配图", "修改这张配图"),
-    "save_model": ("保存模型密钥", "保存模型", "更新模型密钥", "更新模型"),
-    "save_official_account": (
-        "保存公众号密钥",
-        "保存公众号",
-        "更新公众号密钥",
-        "更新公众号",
-    ),
     "delete_official_account": ("删除自有公众号", "删除公众号"),
-    "save_wechat_backend_login": ("保存微信公众号后台登录态", "保存后台登录态"),
-    "clear_wechat_backend_login": ("清除微信公众号后台登录态", "清除后台登录态"),
     "delete_model": ("删除模型",),
     "save_editorial_review_profile": ("保存 AI 评审方案", "保存AI评审方案"),
     "delete_editorial_review_profile": ("删除 AI 评审方案", "删除AI评审方案"),

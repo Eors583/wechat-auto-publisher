@@ -7,8 +7,12 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from .errors import WeChatHTTPError
+
 
 logger = logging.getLogger(__name__)
+
+WECHAT_API_BASE_URL = "https://api.weixin.qq.com"
 
 if TYPE_CHECKING:
     from app.db import Database
@@ -22,10 +26,14 @@ class WeChatAuth:
         db: Database,
         *,
         cache_key: str | None = None,
+        base_url: str = WECHAT_API_BASE_URL,
+        basic_auth: httpx.BasicAuth | None = None,
     ) -> None:
         self.app_id = app_id
         self.app_secret = app_secret
         self.db = db
+        self.base_url = str(base_url or WECHAT_API_BASE_URL).rstrip("/")
+        self.basic_auth = basic_auth
         # 一个项目会同时访问发布账号和对标账号，令牌绝不能共用同一个缓存键。
         self.cache_key = cache_key or f"access_token:{app_id}"
 
@@ -39,7 +47,7 @@ class WeChatAuth:
                 if _still_valid(expires_at):
                     return token
 
-        url = "https://api.weixin.qq.com/cgi-bin/token"
+        url = f"{self.base_url}/cgi-bin/token"
         params = {
             "grant_type": "client_credential",
             "appid": self.app_id,
@@ -47,11 +55,25 @@ class WeChatAuth:
         }
         for attempt in range(1, 4):
             try:
-                with httpx.Client(timeout=20.0) as client:
+                with httpx.Client(timeout=20.0, auth=self.basic_auth) as client:
                     resp = client.get(url, params=params)
                     resp.raise_for_status()
                     data = resp.json()
                 break
+            except httpx.HTTPStatusError as exc:
+                status_code = int(exc.response.status_code)
+                if status_code in {502, 503, 504} and attempt < 3:
+                    delay = 0.5 * (2 ** (attempt - 1))
+                    logger.warning(
+                        "WeChat access token gateway HTTP %s, retrying "
+                        "(%s/3) in %.1fs",
+                        status_code,
+                        attempt + 1,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise WeChatHTTPError(status_code) from None
             except (httpx.TransportError, ConnectionError, OSError) as exc:
                 if attempt >= 3:
                     raise

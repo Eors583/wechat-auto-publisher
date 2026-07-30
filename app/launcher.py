@@ -7,15 +7,67 @@ import os
 import socket
 import sys
 import time
-from pathlib import Path
+import uuid
 from typing import Any
+from urllib.parse import urlparse
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from app.config import load_config, project_root
+from dotenv import load_dotenv
+
+from app.config import database_target, load_config, project_root
+from app.runtime_control import (
+    ApiProcessControlError,
+    OwnedApiProcessController,
+    clear_api_process_controller,
+    register_api_process_controller,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _remote_ui_url(argv: list[str] | None = None) -> str:
+    """Return the hosted UI URL for a thin desktop client.
+
+    A remote desktop must never receive a PostgreSQL connection string or model
+    secret. It only renders the UI hosted by the merchant server. HTTPS is
+    recommended; plain HTTP remains supported for explicit IP-and-port
+    deployments on private or temporarily restricted environments.
+    """
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    value = ""
+    if "--remote-url" in arguments:
+        index = arguments.index("--remote-url")
+        if index + 1 >= len(arguments):
+            raise ValueError("--remote-url requires an HTTP(S) URL")
+        value = str(arguments[index + 1] or "").strip()
+    if not value:
+        load_dotenv(project_root() / ".env")
+        value = str(os.getenv("WECHAT_PUBLISHER_REMOTE_URL") or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("远程工作台必须使用完整的 HTTP 或 HTTPS 地址")
+    return value.rstrip("/")
+
+
+def _run_remote_desktop(url: str) -> int:
+    """Open the hosted NiceGUI application without starting local services."""
+
+    import webview
+
+    webview.create_window(
+        "公众号智能运营助手",
+        url,
+        width=1180,
+        height=860,
+        min_size=(980, 720),
+    )
+    webview.start()
+    return 0
 
 
 def _ensure_standard_streams() -> None:
@@ -51,6 +103,13 @@ def _configure_file_logging(name: str) -> None:
         encoding="utf-8",
         force=True,
     )
+    # httpx logs complete request URLs at INFO level. WeChat token and API
+    # requests carry AppSecret/access_token in the query string, so these
+    # transport logs must never be persisted. Lark websocket URLs likewise
+    # contain short-lived connection credentials.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("Lark").setLevel(logging.WARNING)
 
 
 def _api_port() -> int:
@@ -72,28 +131,47 @@ def _port_is_open(port: int) -> bool:
         return False
 
 
-def _api_is_healthy(port: int) -> bool:
+def _api_health_payload(port: int) -> dict[str, Any] | None:
     try:
         with urlopen(f"http://127.0.0.1:{int(port)}/health", timeout=1.5) as response:
             payload: Any = json.loads(response.read().decode("utf-8"))
         if not isinstance(payload, dict) or payload.get("ok") is not True:
-            return False
+            return None
         if str(payload.get("service") or "") != "wechat-auto-publisher":
-            return False
+            return None
         actual_root = str(payload.get("instance_root") or "")
         expected_root = str(project_root().resolve())
         if sys.platform == "win32":
             actual_root = actual_root.casefold()
             expected_root = expected_root.casefold()
-        return actual_root == expected_root
+        return payload if actual_root == expected_root else None
     except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _api_is_healthy(
+    port: int,
+    expected_session_id: str = "",
+) -> bool:
+    payload = _api_health_payload(port)
+    if payload is None:
         return False
+    expected_session_id = str(expected_session_id or "").strip()
+    if expected_session_id and str(
+        payload.get("launcher_session_id") or ""
+    ).strip() != expected_session_id:
+        return False
+    return True
 
 
-def _wait_for_api(port: int, timeout: float = 20.0) -> bool:
+def _wait_for_api(
+    port: int,
+    timeout: float = 20.0,
+    expected_session_id: str = "",
+) -> bool:
     deadline = time.monotonic() + max(1.0, float(timeout))
     while time.monotonic() < deadline:
-        if _api_is_healthy(port):
+        if _api_is_healthy(port, expected_session_id):
             return True
         time.sleep(0.25)
     return False
@@ -110,6 +188,23 @@ def _run_api_service() -> None:
     except BaseException:  # noqa: BLE001
         logger.exception("Bundled API service stopped unexpectedly")
         raise
+
+
+def _mark_feishu_restarting() -> None:
+    """Persist restart telemetry without exposing or reloading any secret."""
+
+    try:
+        from app.db import Database
+        from app.feishu.runtime import update_runtime
+
+        config = load_config()
+        update_runtime(
+            Database(database_target(config)),
+            status="restarting",
+            last_error="",
+        )
+    except Exception:  # runtime telemetry must never prevent a restart
+        logger.exception("Unable to mark Feishu runtime as restarting")
 
 
 def _show_warning(message: str) -> None:
@@ -169,26 +264,32 @@ def main() -> int:
         return 0
 
     _configure_file_logging("launcher.log")
+    try:
+        remote_url = _remote_ui_url()
+    except ValueError as exc:
+        _show_warning(str(exc))
+        return 2
+    if remote_url:
+        logger.info("Starting hosted desktop client: %s", remote_url)
+        return _run_remote_desktop(remote_url)
+
     api_port = _api_port()
-    api_process: multiprocessing.Process | None = None
-    if not _api_is_healthy(api_port):
-        if _port_is_open(api_port):
-            _show_warning(
-                f"本机端口 {api_port} 已被其他程序占用，飞书和 API 服务无法启动。"
-                "桌面端仍会继续打开。"
-            )
-        else:
-            api_process = multiprocessing.Process(
-                target=_run_api_service,
-                name="wechat-publisher-api",
-                daemon=True,
-            )
-            api_process.start()
-            if not _wait_for_api(api_port):
-                _show_warning(
-                    "API/飞书服务没有在预期时间内启动。"
-                    "请打开 data/logs/api.log 查看原因。"
-                )
+    launcher_session_id = uuid.uuid4().hex
+    os.environ["WECHAT_PUBLISHER_LAUNCH_SESSION_ID"] = launcher_session_id
+    api_controller = OwnedApiProcessController(
+        port=api_port,
+        target=_run_api_service,
+        session_id=launcher_session_id,
+        health_check=_api_is_healthy,
+        port_check=_port_is_open,
+        wait_for_health=_wait_for_api,
+        before_restart=_mark_feishu_restarting,
+    )
+    register_api_process_controller(api_controller)
+    try:
+        api_controller.ensure_started()
+    except ApiProcessControlError as exc:
+        _show_warning(str(exc))
 
     try:
         from app.ui.desktop import main as desktop_main
@@ -196,9 +297,8 @@ def main() -> int:
         desktop_main()
         return 0
     finally:
-        if api_process is not None and api_process.is_alive():
-            api_process.terminate()
-            api_process.join(timeout=5)
+        api_controller.shutdown()
+        clear_api_process_controller(api_controller)
 
 
 if __name__ == "__main__":

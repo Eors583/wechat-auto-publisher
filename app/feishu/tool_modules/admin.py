@@ -1,39 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any
 
-from app.accounts import (
-    apply_account_selection,
-    public_accounts,
-    save_account,
-    save_account_layout,
-    save_account_prompt_selection,
-)
+from app.accounts import apply_account_selection
 from app.ai.image_providers import is_image_provider
 from app.ai.model_registry import (
-    configured_models,
     public_models,
-    save_model,
-    test_model_connection,
 )
 from app.config import load_config
 from app.layout_profiles import normalize_layout, validate_layout
-from app.pipeline import Pipeline
 from app.prompt_templates import (
     ARTICLE_PROMPT_PURPOSE,
     DEFAULT_IMAGE_PROMPT_STYLE,
     IMAGE_PROMPT_PURPOSE,
     PROMPT_MODE_DEFAULT,
     PROMPT_MODE_TEMPLATE,
-    delete_prompt_template,
     public_prompt_templates,
-    save_prompt_template,
 )
 from app.wechat.template_snapshot import (
     list_template_draft_candidates,
     save_template_draft_candidate,
 )
+from app.wechat.factory import build_wechat_client
 from app.feishu.tool_modules.common import compact, optional_bool, optional_int, string_list
 
 
@@ -170,7 +158,7 @@ class AdminToolMixin:
         rows = self._config().list_models(
             enabled_only=bool(args.get("enabled_only", False)),
             purpose=purpose,
-            include_config=True,
+            include_config=False,
         )
         if not rows:
             self.reply_text(message_id, "还没有配置模型。")
@@ -274,17 +262,31 @@ class AdminToolMixin:
     def _tool_save_official_account(
         self, args: dict[str, Any], *, message_id: str, **_: Any
     ) -> None:
+        requested_model = str(
+            args.get("model_id") or args.get("model_name") or ""
+        ).strip()
+        model_id = (
+            self._resolve_any_text_model_id(args)
+            if requested_model
+            else ""
+        )
         account = self._config().save_account(
             account_id=str(args.get("account_id") or "").strip() or None,
             name=str(args.get("name") or ""),
             app_id=str(args.get("app_id") or ""),
             app_secret=str(args.get("app_secret") or "") or None,
-            model_id=self._resolve_any_text_model_id(args),
+            model_id=model_id,
             enabled=optional_bool(args.get("enabled")) is not False,
         )
         self.reply_text(
             message_id,
-            f'公众号配置已加密保存，ID：{account.get("id")}。AppSecret 不会在状态接口中回传。',
+            f'公众号配置已加密保存，ID：{account.get("id")}。'
+            + (
+                f'已绑定文本模型：{model_id}。'
+                if model_id
+                else "暂未绑定文章模型，可稍后通过“设置公众号模型”完成绑定。"
+            )
+            + "AppSecret 不会在状态接口中回传。",
         )
 
     def _tool_test_account_connection(
@@ -440,7 +442,7 @@ class AdminToolMixin:
             editor["placeholder"] = placeholder
         editor["_root"] = cfg.get("_root")
         candidates = list_template_draft_candidates(
-            Pipeline(cfg, db=self.service.db)._wechat_client(),
+            _wechat_client(cfg, self.service.db),
             editor,
             keyword=str(args.get("keyword") or "模板"),
         )
@@ -509,7 +511,7 @@ class AdminToolMixin:
         editor.update(layout.get("editor_template") or {})
         editor.update({"placeholder": placeholder, "_root": cfg.get("_root")})
         candidates = list_template_draft_candidates(
-            Pipeline(cfg, db=self.service.db)._wechat_client(), editor, keyword="模板"
+            _wechat_client(cfg, self.service.db), editor, keyword="模板"
         )
         candidate = next(
             (
@@ -653,10 +655,7 @@ class AdminToolMixin:
     def _resolve_any_text_model_id(self, args: dict[str, Any]) -> str:
         model_id = str(args.get("model_id") or "").strip()
         name = str(args.get("model_name") or "").strip()
-        rows = [
-            *configured_models(load_config()),
-            *public_models(self.service.db, purpose="text"),
-        ]
+        rows = public_models(self.service.db, purpose="text")
         if not model_id and name:
             selected = next((item for item in rows if str(item.get("name")) == name), None)
             model_id = str((selected or {}).get("id") or "")
@@ -667,7 +666,7 @@ class AdminToolMixin:
     def _resolve_any_model_id(self, args: dict[str, Any]) -> str:
         model_id = str(args.get("model_id") or "").strip()
         name = str(args.get("model_name") or "").strip()
-        rows = self._config().list_models(include_config=True)
+        rows = self._config().list_models(include_config=False)
         if not model_id and name:
             selected = next((item for item in rows if str(item.get("name")) == name), None)
             model_id = str((selected or {}).get("id") or "")
@@ -689,3 +688,13 @@ def _deep_merge(base: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]
         else:
             result[key] = value
     return result
+
+
+def _wechat_client(config: dict[str, Any], db: Any) -> Any:
+    wechat = dict(config.get("wechat") or {})
+    return build_wechat_client(
+        config,
+        db,
+        app_id=str(wechat.get("app_id") or ""),
+        app_secret=str(wechat.get("app_secret") or ""),
+    )

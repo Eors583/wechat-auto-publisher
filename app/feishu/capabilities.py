@@ -164,6 +164,24 @@ BATCH_SERVICE_CAPABILITIES: tuple[FeishuCapability, ...] = (
         ("list_batches",),
     ),
     FeishuCapability(
+        "has_active_batches",
+        "任务中心轻量轮询是否存在运行中的批次",
+        FeishuSupportStatus.NOT_APPLICABLE,
+        note="仅供桌面端决定是否继续自动刷新，不是用户可调用的业务操作。",
+    ),
+    FeishuCapability(
+        "list_review_inbox",
+        "查询文章级待审核、写入失败、生成失败和今日完成收件箱",
+        FeishuSupportStatus.SUPPORTED,
+        ("list_review_inbox",),
+    ),
+    FeishuCapability(
+        "list_job_attempts",
+        "查看文章各阶段执行与重试记录",
+        FeishuSupportStatus.SUPPORTED,
+        ("get_article_attempts",),
+    ),
+    FeishuCapability(
         "select_job",
         "选择文章标题和副标题",
         FeishuSupportStatus.SUPPORTED,
@@ -277,6 +295,12 @@ BATCH_SERVICE_CAPABILITIES: tuple[FeishuCapability, ...] = (
         "仅重试批次中的失败任务",
         FeishuSupportStatus.SUPPORTED,
         ("retry_failed_batch",),
+    ),
+    FeishuCapability(
+        "retry_job",
+        "从指定或实际失败步骤继续处理一篇文章",
+        FeishuSupportStatus.SUPPORTED,
+        ("retry_article_step",),
     ),
     FeishuCapability(
         "copy_batch",

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db import Database
+from app.services.failures import sanitize_failure_text
 
 
 SETTING_KEY = "feishu.runtime"
@@ -26,6 +27,8 @@ def get_runtime(db: Database) -> dict[str, Any]:
 
 
 def update_runtime(db: Database, **changes: Any) -> dict[str, Any]:
+    if "last_error" in changes:
+        changes["last_error"] = sanitize_failure_text(changes["last_error"])
     try:
         value = get_runtime(db)
     except Exception:  # runtime telemetry must never interrupt bot messages

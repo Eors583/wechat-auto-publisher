@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import json
+from typing import Any
 
 from nicegui import ui
 
@@ -22,11 +23,18 @@ from app.ui.state import AppState
 
 
 def build_model_management_panel(state: AppState) -> None:
-    """Expose text and image providers through one user-facing settings entry."""
+    """Administrator backend for users and merchant-managed AI providers."""
 
     config = state.reload_config()
+    if not bool(getattr(state, "is_admin", True)):
+        with ui.element("div").classes("card w-full"):
+            ui.label("无权访问后台管理").classes(
+                "text-h6 text-weight-bold text-negative"
+            )
+            ui.label("普通用户只能选择平台已经启用的模型。").classes("muted")
+        return
     service = ConfigurationService(state.db, config)
-    models = service.list_models(include_config=True)
+    models = service.list_models(include_config=False)
     text_count = sum(
         1
         for item in models
@@ -37,6 +45,98 @@ def build_model_management_panel(state: AppState) -> None:
         for item in models
         if is_image_provider(str(item.get("provider_type") or ""))
     )
+
+    if hasattr(state, "auth") and hasattr(state, "model_options"):
+        with ui.element("div").classes("card w-full"):
+            ui.label("商户后台管理").classes("text-h6 text-weight-bold")
+            ui.label(
+                "模型密钥只由管理员维护；普通用户不会看到 API Key、接口地址或协议配置。"
+            ).classes("muted")
+            users = state.auth.list_users()
+            ui.label(
+                f"注册用户 {len(users)} 个 · 管理员 "
+                f"{sum(1 for item in users if item.get('role') == 'admin')} 个"
+            ).classes("text-caption text-grey-7")
+
+        @ui.refreshable
+        def render_users() -> None:
+            with ui.element("div").classes("card w-full"):
+                ui.label("用户管理").classes("text-subtitle1 text-weight-bold")
+                for user in state.auth.list_users():
+                    with ui.row().classes(
+                        "w-full items-center justify-between q-py-xs"
+                    ):
+                        with ui.column().classes("gap-0"):
+                            ui.label(str(user["username"])).classes(
+                                "text-weight-medium"
+                            )
+                            ui.label(
+                                "管理员"
+                                if user.get("role") == "admin"
+                                else "普通用户"
+                            ).classes("text-caption text-grey-6")
+                        enabled = ui.switch(
+                            "启用",
+                            value=bool(user.get("enabled")),
+                        ).props("dense")
+
+                        def update_user(
+                            event: Any,
+                            *,
+                            user_id: str = str(user["id"]),
+                        ) -> None:
+                            try:
+                                state.auth.set_user_enabled(
+                                    user_id,
+                                    bool(event.value),
+                                    actor_user_id=str(
+                                        (state.current_user or {}).get("id")
+                                        or ""
+                                    ),
+                                )
+                                ui.notify(
+                                    "用户状态已更新", color="positive"
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                ui.notify(str(exc), color="negative")
+                                render_users.refresh()
+
+                        enabled.on_value_change(update_user)
+
+        render_users()
+
+        text_options = state.model_options(
+            include_default=False,
+            purpose="text",
+        )
+        current_default_model = str(
+            state.db.get_setting("merchant.default_text_model_id") or ""
+        )
+        if current_default_model not in text_options:
+            current_default_model = ""
+        with ui.element("div").classes("card w-full"):
+            ui.label("平台默认文章模型").classes(
+                "text-subtitle1 text-weight-bold"
+            )
+            ui.label(
+                "公众号没有单独选择模型时，自动使用这里的默认模型。"
+            ).classes("muted")
+            default_model_select = ui.select(
+                {"": "暂不设置", **text_options},
+                value=current_default_model,
+                label="默认文章模型",
+            ).classes("w-full").props("outlined dense options-dense")
+
+            def save_default_model(event: Any) -> None:
+                selected = str(event.value or "")
+                state.db.set_setting(
+                    "merchant.default_text_model_id", selected
+                )
+                state.refresh_model_selects()
+                state.refresh_account_selects()
+                ui.notify("平台默认模型已更新", color="positive")
+
+            default_model_select.on_value_change(save_default_model)
 
     tabs = ui.tabs().classes("workspace-tabs w-full").props(
         "dense align=left indicator-color=teal-9 active-color=teal-10"

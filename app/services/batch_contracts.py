@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from typing import Any
+from urllib.parse import urlencode
 
 from app.ai import (
     SUBTITLE_CANDIDATE_COUNT,
@@ -8,7 +10,11 @@ from app.ai import (
     clean_candidate_list,
     clean_candidate_text,
 )
-
+from app.services.failures import (
+    classify_job_failure,
+    public_failure,
+    sanitize_failure_text,
+)
 
 TERMINAL_STATUSES = {
     "ready_for_review",
@@ -83,12 +89,22 @@ def public_job(job: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
             str(job.get("selected_subtitle") or "")
         ) or None,
         "draft_media_id": job.get("draft_media_id"),
-        "error": job.get("error"),
+        "error": sanitize_failure_text(job.get("error"))
+        if job.get("error")
+        else None,
+        "failure": public_failure(
+            classify_job_failure(
+                job.get("error"),
+                step=job.get("step"),
+                status=job.get("status"),
+            )
+        ),
         "review_status": effective_review_status(job),
         "viewed_at": job.get("viewed_at"),
         "confirmed_at": job.get("confirmed_at"),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
+        "review_url": _review_url(job),
     }
     if include_content:
         result["body"] = str(job.get("body") or "")
@@ -97,6 +113,34 @@ def public_job(job: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
         result["thumb_media_id"] = str(job.get("thumb_media_id") or "")
         result["meta"] = meta
     return result
+
+
+def _review_url(job: dict[str, Any]) -> str | None:
+    """Return the one desktop workbench route shared by API and Feishu."""
+
+    if str(job.get("status") or "") != "ready_for_review":
+        return None
+    meta = dict(job.get("meta") or {})
+    batch_id = str(meta.get("batch_id") or job.get("batch_id") or "").strip()
+    try:
+        job_id = int(job.get("id") or 0)
+    except (TypeError, ValueError):
+        job_id = 0
+    if not batch_id or job_id <= 0:
+        return None
+    public_ui_url = str(
+        os.getenv("WECHAT_PUBLISHER_PUBLIC_UI_URL") or ""
+    ).strip().rstrip("/")
+    port = str(os.getenv("WECHAT_PUBLISHER_UI_PORT") or "18765").strip()
+    query = urlencode(
+        {
+            "view": "review",
+            "batch_id": batch_id,
+            "job_id": job_id,
+        }
+    )
+    base_url = public_ui_url or f"http://127.0.0.1:{port}"
+    return f"{base_url}/?{query}"
 
 
 def effective_review_status(job: dict[str, Any]) -> str:

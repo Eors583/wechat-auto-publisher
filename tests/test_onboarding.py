@@ -339,7 +339,7 @@ def test_saving_feishu_requires_currently_tested_model_and_default_account(
     service.save_text_model(
         preset_id="deepseek",
         api_key=None,
-        model="deepseek-v4-pro",
+        model="deepseek-reasoner",
     )
     assert service.readiness()["model_tested"] is False
     with pytest.raises(ValueError, match="先在第 1 步测试"):
@@ -488,6 +488,13 @@ def test_readiness_never_exposes_model_or_feishu_plaintext_secrets(
         default_account_ids=[str(account["id"])],
         allow_all=False,
     )
+    service.db.set_setting(
+        "feishu.runtime",
+        (
+            '{"status":"error","last_error":'
+            '"Authorization: Bearer runtime-secret-never-return"}'
+        ),
+    )
 
     readiness = service.readiness()
 
@@ -497,4 +504,5 @@ def test_readiness_never_exposes_model_or_feishu_plaintext_secrets(
         feishu_secret,
         "tenant-token-never-return",
         "wechat-secret-privacy",
+        "runtime-secret-never-return",
     )

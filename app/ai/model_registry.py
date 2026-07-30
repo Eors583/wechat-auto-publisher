@@ -225,7 +225,11 @@ def apply_model_selection(
         return model_id
 
     ai["primary"] = provider_key(primary_id)
-    ai["fallback"] = provider_key(fallback_id or primary_id)
+    ai["fallback"] = (
+        provider_key(fallback_id)
+        if fallback_id and fallback_id != primary_id
+        else ""
+    )
     result["ai"] = ai
     return result
 
@@ -253,7 +257,10 @@ def test_model_connection(db: Database, model_id: str) -> str:
             api_key=key,
             api_base=record.get("api_base") or "https://api.manus.ai",
             model=record["model"] or "manus-1.6",
-            timeout=60,
+            # Manus is an asynchronous task API. Even a minimal probe can take
+            # more than one minute after task creation, so a generic 60-second
+            # connection timeout produces false negatives.
+            timeout=180,
         )
         client.complete("只回复 OK")
     elif record["provider_type"] == GEMINI:

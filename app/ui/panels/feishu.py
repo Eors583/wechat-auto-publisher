@@ -8,7 +8,9 @@ from nicegui import run, ui
 from app.accounts import public_accounts
 from app.feishu.runtime import get_runtime
 from app.feishu.settings import public_feishu_settings, save_feishu_settings
+from app.runtime_control import restart_api_service
 from app.services.onboarding import OnboardingService
+from app.ui.lifecycle import client_timer
 from app.ui.state import AppState, set_button_loading
 
 
@@ -20,34 +22,61 @@ PERMISSION_CODES = (
 )
 
 
+def _feishu_account_catalog(
+    db: Any,
+) -> tuple[dict[str, str], list[str], list[str]]:
+    """Return selectable, disabled and model-unbound official accounts."""
+
+    options: dict[str, str] = {}
+    disabled_names: list[str] = []
+    unbound_names: list[str] = []
+    for item in public_accounts(db):
+        name = str(item.get("name") or item.get("id") or "未命名公众号")
+        if not bool(item.get("enabled", True)):
+            disabled_names.append(name)
+            continue
+        if item.get("has_model") is False:
+            unbound_names.append(name)
+            options[str(item["id"])] = f"{name} · 尚未绑定文章模型"
+        else:
+            options[str(item["id"])] = name
+    return options, disabled_names, unbound_names
+
+
 def build_feishu_panel(state: AppState) -> None:
     """Render the complete beginner-safe Feishu setup in its real settings page."""
 
     state.reload_config()
     service = OnboardingService(state.db, getattr(state, "config", None))
     saved = public_feishu_settings(state.db)
-    account_options = {
-        str(item["id"]): str(item["name"])
-        for item in public_accounts(state.db, enabled_only=True)
-    }
-    agent_model_options = state.model_options(include_default=False)
-    default_agent_model = str(saved.get("agent_model_id") or "")
-    if default_agent_model not in agent_model_options:
-        default_agent_model = (
-            "config:moonshot"
-            if "config:moonshot" in agent_model_options
-            else next(iter(agent_model_options), "")
-        )
-    if not agent_model_options:
+    (
+        account_options,
+        disabled_account_names,
+        unbound_account_names,
+    ) = _feishu_account_catalog(state.db)
+    available_agent_models = state.model_options(include_default=False)
+    saved_agent_model = str(saved.get("agent_model_id") or "").strip()
+    default_agent_model = (
+        saved_agent_model
+        if saved_agent_model in available_agent_models
+        else None
+    )
+    agent_model_options = dict(available_agent_models)
+    if not available_agent_models:
         agent_model_options = {
             "": "请先在“模型管理 → 文章模型”中添加并启用模型"
         }
+    saved_account_ids = [
+        str(item)
+        for item in saved.get("default_account_ids") or []
+        if str(item)
+    ]
     selected_accounts = [
         item
-        for item in saved.get("default_account_ids") or []
+        for item in saved_account_ids
         if item in account_options
     ]
-    if not selected_accounts:
+    if not saved_account_ids:
         selected_accounts = list(account_options)
     page_state: dict[str, Any] = {"pairing": None}
 
@@ -82,7 +111,7 @@ def build_feishu_panel(state: AppState) -> None:
             explanation = "本机长连接正在等待飞书消息；收到真实消息前不会显示完成。"
         elif readiness.get("feishu_saved"):
             label, color = "配置已保存，等待重启", "warning"
-            explanation = "关闭并重新打开本应用，让飞书服务读取新配置。"
+            explanation = "点击第 3 步“立即重启飞书服务”，让新配置生效。"
         else:
             label, color = "尚未配置", "grey"
             explanation = "请从第 1 步开始创建飞书企业自建应用。"
@@ -169,24 +198,162 @@ def build_feishu_panel(state: AppState) -> None:
             "在本页验证并保存",
             "系统会真实调用飞书和智能体模型，只有两项都通过才会保存。",
         )
-        agent_model_in = ui.select(
-            options=agent_model_options,
-            value=default_agent_model,
-            label="飞书智能体模型",
-        ).classes("w-full").props("outlined stack-label")
-        ui.label(
-            "它负责理解对话和选择工具；文章仍由各公众号绑定的模型生成。"
-        ).classes("muted")
+
+        @ui.refreshable
+        def configuration_status() -> None:
+            current = public_feishu_settings(state.db)
+            enabled = bool(current.get("enabled", False))
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("当前机器人配置状态").classes("text-weight-bold")
+                ui.badge(
+                    "已启用（enabled=true）"
+                    if enabled
+                    else "未启用（enabled=false）",
+                    color="positive" if enabled else "grey",
+                )
+            ui.label(
+                "“一键验证并保存”成功后会把机器人配置写为 "
+                "enabled=true；随后点击第 3 步立即重启飞书服务即可生效。"
+            ).classes("muted")
+
+        configuration_status()
+
+        with ui.element("div").classes("soft-panel w-full"):
+            agent_model_in = ui.select(
+                options=agent_model_options,
+                value=default_agent_model,
+                label="默认飞书智能体模型（从已有文本模型选择）",
+            ).classes("w-full").props(
+                "outlined stack-label color=teal-9"
+            )
+            state.register_model_select(
+                agent_model_in,
+                purpose="text",
+                default_label="请选择一个已启用的文本模型",
+            )
+            ui.label(
+                "它负责理解对话和选择工具；文章仍由各公众号绑定的模型生成。"
+            ).classes("muted")
+            if not available_agent_models:
+                ui.label(
+                    "当前没有可用文本模型。请先到“模型管理”添加并启用，"
+                    "再返回这里刷新。"
+                ).classes("text-warning text-weight-bold")
+            elif default_agent_model is None:
+                ui.label(
+                    "尚未保存可用的飞书智能体模型，或原模型已停用/删除。"
+                    "请重新选择一个已有文本模型。"
+                ).classes("text-warning text-weight-bold")
+
+            def refresh_agent_models() -> None:
+                state.reload_config()
+                refreshed = state.model_options(include_default=False)
+                options = dict(refreshed)
+                if not options:
+                    options = {
+                        "": "请先在“模型管理 → 文章模型”中添加并启用模型"
+                    }
+                current_model = str(agent_model_in.value or "").strip()
+                if current_model not in refreshed:
+                    current_model = (
+                        saved_agent_model
+                        if saved_agent_model in refreshed
+                        else None
+                    )
+                agent_model_in.options = options
+                agent_model_in.value = current_model
+                agent_model_in.update()
+                if refreshed:
+                    ui.notify(
+                        f"已刷新，共找到 {len(refreshed)} 个可用文本模型。",
+                        type="positive",
+                    )
+                else:
+                    ui.notify(
+                        "仍未找到可用文本模型，请先到“模型管理”添加并启用。",
+                        type="warning",
+                    )
+
+            ui.button(
+                "刷新已有文本模型",
+                on_click=refresh_agent_models,
+            ).props("outline color=teal-9 no-caps icon=refresh")
+
         default_accounts_in = ui.select(
             options=account_options,
             value=selected_accounts,
             label="机器人默认生成到哪些公众号？",
             multiple=True,
         ).classes("w-full").props("outlined stack-label use-chips")
-        if not account_options:
-            ui.label(
-                "尚无可用公众号，请先到“素材与模板”添加并启用公众号。"
-            ).classes("text-warning")
+        account_options_status = ui.label().classes("muted")
+
+        def update_account_options_status() -> None:
+            if account_options:
+                messages = [
+                    f"已实时载入 {len(account_options)} 个已启用公众号。"
+                ]
+            else:
+                messages = [
+                    "尚无可用公众号，请先到“公众号”设置中添加并启用。"
+                ]
+            if unbound_account_names:
+                messages.append(
+                    "尚未绑定文章模型："
+                    + "、".join(unbound_account_names)
+                    + "；可以先选择，但生成文章前必须完成模型绑定。"
+                )
+            if disabled_account_names:
+                messages.append(
+                    "以下公众号已停用，因此不进入发布选择："
+                    + "、".join(disabled_account_names)
+                    + "。"
+                )
+            account_options_status.text = " ".join(messages)
+
+        def refresh_default_accounts(*, notify: bool = False) -> None:
+            nonlocal account_options
+            nonlocal disabled_account_names
+            nonlocal unbound_account_names
+            previous_ids = set(account_options)
+            (
+                refreshed_options,
+                refreshed_disabled,
+                refreshed_unbound,
+            ) = _feishu_account_catalog(state.db)
+            current = [
+                str(item)
+                for item in (default_accounts_in.value or [])
+                if str(item) in refreshed_options
+            ]
+            account_options = refreshed_options
+            disabled_account_names = refreshed_disabled
+            unbound_account_names = refreshed_unbound
+            default_accounts_in.set_options(account_options, value=current)
+            update_account_options_status()
+            if notify:
+                added = len(set(account_options) - previous_ids)
+                message = f"已刷新，共找到 {len(account_options)} 个已启用公众号"
+                if added:
+                    message += f"，新增 {added} 个"
+                ui.notify(message + "。", type="positive")
+
+        update_account_options_status()
+        register_account_refresher = getattr(
+            state,
+            "register_account_option_refresher",
+            None,
+        )
+        if callable(register_account_refresher):
+            register_account_refresher(refresh_default_accounts)
+        ui.button(
+            "刷新已配置公众号",
+            on_click=lambda: refresh_default_accounts(notify=True),
+        ).props("outline color=teal-9 no-caps icon=refresh")
+        client_timer(
+            2.0,
+            refresh_default_accounts,
+            immediate=False,
+        )
 
         async def test_agent_model() -> None:
             set_button_loading(
@@ -256,10 +423,12 @@ def build_feishu_panel(state: AppState) -> None:
                     )
                 )
                 app_secret_in.value = ""
+                configuration_status.refresh()
                 runtime_card.refresh()
                 pairing_card.refresh()
                 ui.notify(
-                    "模型和飞书凭证验证成功，已按安全模式保存。下一步请重启本应用。",
+                    "模型和飞书凭证验证成功，机器人已启用。"
+                    "下一步请点击“立即重启飞书服务”。",
                     type="positive",
                     timeout=12000,
                 )
@@ -283,17 +452,55 @@ def build_feishu_panel(state: AppState) -> None:
     with ui.element("div").classes("card w-full"):
         _step_heading(
             3,
-            "关闭并重新打开本应用",
-            "保存后的新凭证只有重启飞书服务后才会建立长连接。",
+            "重启飞书服务",
+            "不用退出桌面应用；点击下面按钮会重启本机 API 和飞书长连接服务。",
         )
         ui.label(
-            "重启后先保持本应用开启。状态显示“服务已启动，等待测试消息”即可继续第 4 步；"
+            "重启后请保持本应用开启。状态显示“服务已启动，等待测试消息”即可继续第 4 步；"
             "收到真实飞书消息前不会显示接入完成。"
         ).classes("text-warning text-weight-bold")
-        ui.button(
-            "我已重启，检查服务状态",
-            on_click=lambda: runtime_card.refresh(),
-        ).props("outline color=teal-9 no-caps icon=refresh")
+
+        async def restart_feishu_service() -> None:
+            set_button_loading(
+                restart_service_btn,
+                True,
+                "正在重启飞书和 API 服务…",
+            )
+            try:
+                result = await run.io_bound(restart_api_service)
+                runtime_card.refresh()
+                pairing_card.refresh()
+                message = (
+                    str(result.get("message") or "")
+                    if isinstance(result, dict)
+                    else str(result or "")
+                )
+                ui.notify(
+                    message or "飞书服务已重启，正在建立长连接。",
+                    type="positive",
+                    timeout=12000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                ui.notify(
+                    f"重启飞书服务失败：{_friendly_error(exc)}",
+                    type="negative",
+                    timeout=15000,
+                )
+            finally:
+                set_button_loading(restart_service_btn, False)
+
+        with ui.row().classes("items-center gap-3"):
+            restart_service_btn = ui.button(
+                "立即重启飞书服务",
+                on_click=restart_feishu_service,
+            ).props("unelevated color=teal-9 no-caps icon=restart_alt")
+            ui.button(
+                "刷新接入状态",
+                on_click=lambda: (
+                    runtime_card.refresh(),
+                    pairing_card.refresh(),
+                ),
+            ).props("outline color=teal-9 no-caps icon=refresh")
 
     with ui.element("div").classes("card w-full"):
         _step_heading(
@@ -358,7 +565,10 @@ def build_feishu_panel(state: AppState) -> None:
                     "connecting",
                     "running",
                 }:
-                    raise ValueError("请先重启本应用，等待飞书服务启动后再生成绑定口令")
+                    raise ValueError(
+                        "请先点击第 3 步“立即重启飞书服务”，"
+                        "等待飞书服务启动后再生成绑定口令"
+                    )
                 page_state["pairing"] = await run.io_bound(
                     service.create_feishu_pairing_code
                 )
@@ -547,10 +757,12 @@ def build_feishu_panel(state: AppState) -> None:
                 app_secret_in.value = ""
                 verification_in.value = ""
                 encrypt_key_in.value = ""
+                configuration_status.refresh()
                 runtime_card.refresh()
                 pairing_card.refresh()
                 ui.notify(
-                    "飞书高级配置已加密保存，重启应用后生效。",
+                    "飞书高级配置已加密保存，请点击第 3 步"
+                    "“立即重启飞书服务”使其生效。",
                     type="positive",
                 )
             except Exception as exc:  # noqa: BLE001

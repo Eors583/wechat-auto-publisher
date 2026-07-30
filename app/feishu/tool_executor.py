@@ -35,6 +35,11 @@ from app.services import (
 
 
 CONFIRMATION_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "retry_article_step": (
+        "确认从失败步骤重试文章",
+        "确认重试当前文章",
+        "确认重试文章步骤",
+    ),
     "retry_failed_batch": ("确认重试失败公众号", "确认重试失败任务", "确认重试批次"),
     "copy_batch": ("确认复制批次重新生成", "确认复制批次"),
     "archive_batch": ("确认归档当前批次", "确认归档批次", "确认取消归档批次"),
@@ -70,15 +75,8 @@ CONFIRMATION_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "确认给公众号应用创作方案",
         "确认更换公众号创作方案",
     ),
-    "save_model": ("确认保存模型密钥配置", "确认保存模型密钥"),
     "set_account_model": ("确认更换公众号模型",),
-    "save_official_account": (
-        "确认保存公众号密钥配置",
-        "确认保存公众号密钥",
-    ),
     "delete_official_account": ("确认删除自有公众号", "确认删除公众号"),
-    "save_wechat_backend_login": ("确认保存微信公众号后台登录态",),
-    "clear_wechat_backend_login": ("确认清除微信公众号后台登录态",),
     "delete_model": ("确认删除模型",),
     "generate_model_test_image": ("确认生成模型测试图", "确认生成测试图"),
     "save_editorial_review_profile": ("确认保存 AI 评审方案", "确认保存AI评审方案"),
@@ -117,10 +115,8 @@ ADMIN_TOOLS = {
     "delete_prompt_template",
     "bind_account_prompt_template",
     "apply_account_creation_plan",
-    "save_model",
     "generate_model_test_image",
     "set_account_model",
-    "save_official_account",
     "configure_account_images",
     "update_account_layout",
     "select_draft_template",
@@ -128,18 +124,9 @@ ADMIN_TOOLS = {
     "delete_official_account",
     "set_model_enabled",
     "delete_model",
-    "test_wechat_backend_login",
-    "save_wechat_backend_login",
-    "clear_wechat_backend_login",
     "save_editorial_review_profile",
     "delete_editorial_review_profile",
     "set_account_editorial_review_default",
-}
-
-SECRET_CONFIGURATION_TOOLS = {
-    "save_model",
-    "save_official_account",
-    "save_wechat_backend_login",
 }
 
 BATCH_SCOPED_TOOLS = {
@@ -148,6 +135,8 @@ BATCH_SCOPED_TOOLS = {
     "select_article_title",
     "write_all_to_drafts",
     "cancel_rewrite_batch",
+    "get_article_attempts",
+    "retry_article_step",
     "retry_failed_batch",
     "copy_batch",
     "archive_batch",
@@ -261,24 +250,17 @@ class FeishuToolExecutor(
             # argument such as ``confirmed=true`` for this boundary.
             argument_confirmed=confirmation_verified,
         ):
-            if plan.tool in SECRET_CONFIGURATION_TOOLS:
-                self.reply_text(
-                    message_id,
-                    "该操作包含密钥，不会缓存原参数。请在同一条消息中重新发送完整配置，"
-                    f"并明确写“{confirmations[0]}”。",
-                )
-            else:
-                pending = self.sessions.set_pending_action(
-                    chat_id,
-                    tool=plan.tool,
-                    arguments=plan.arguments,
-                    prompt=confirmations[0],
-                )
-                self.reply_text(
-                    message_id,
-                    "该操作会修改配置、内容或产生接口费用。"
-                    f'请在 5 分钟内回复“确认 {pending["code"]}”。',
-                )
+            pending = self.sessions.set_pending_action(
+                chat_id,
+                tool=plan.tool,
+                arguments=plan.arguments,
+                prompt=confirmations[0],
+            )
+            self.reply_text(
+                message_id,
+                "该操作会修改配置、内容或产生接口费用。"
+                f'请在 5 分钟内回复“确认 {pending["code"]}”。',
+            )
             return
         if confirmations:
             self.sessions.clear_pending_action(chat_id)

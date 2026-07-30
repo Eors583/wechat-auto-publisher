@@ -26,7 +26,7 @@ from app.services.wechat_backend_settings import (
     public_backend_settings,
     save_backend_settings,
 )
-from app.wechat import WeChatAuth, WeChatClient
+from app.wechat.factory import build_wechat_client
 
 
 FETCH_METHODS = {
@@ -420,10 +420,11 @@ class FollowedContentService:
             raise ValueError("绑定的自有公众号已停用")
         app_id = str(record.get("app_id") or "").strip()
         app_secret = decrypt_api_key(str(record.get("app_secret_encrypted") or ""))
-        auth = WeChatAuth(app_id, app_secret, self.db)
-        client = WeChatClient(
-            get_token=auth.get_access_token,
-            refresh_token=lambda: auth.get_access_token(force_refresh=True),
+        client = build_wechat_client(
+            self.config,
+            self.db,
+            app_id,
+            app_secret,
         )
         rows: list[dict[str, Any]] = []
         offset = 0

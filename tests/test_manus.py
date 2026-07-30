@@ -4,10 +4,16 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
+import httpx
+
 from app.ai.failover import FailoverRewriter
 from app.ai.manus import (
     ManusAPIError,
     ManusClient,
+    ManusTransportError,
+    _next_request_at,
+    _wait_for_request_slot,
+    is_non_retryable_manus_error,
     _is_task_not_found,
     _latest_agent_status,
     _latest_error,
@@ -16,6 +22,9 @@ from app.ai.manus import (
 
 
 class ManusClientTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _next_request_at.clear()
+
     def test_latest_status_and_error_are_parsed(self) -> None:
         events = [
             {
@@ -166,6 +175,94 @@ class ManusClientTests(unittest.TestCase):
                 headers={"x-manus-api-key": "redacted"},
                 json_body={"safe": True},
             )
+
+    @patch("app.ai.manus.time.sleep", return_value=None)
+    def test_poll_transport_drop_retries_same_request(
+        self,
+        sleep_mock,
+    ) -> None:
+        class FakeResponse:
+            status_code = 200
+            headers: dict[str, str] = {}
+
+            @staticmethod
+            def json() -> dict[str, Any]:
+                return {"ok": True, "messages": []}
+
+        class FlakyClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def request(self, *_args: Any, **_kwargs: Any) -> FakeResponse:
+                self.calls += 1
+                if self.calls < 3:
+                    raise httpx.ReadError("connection reset while polling")
+                return FakeResponse()
+
+        transport = FlakyClient()
+        client = ManusClient(
+            "poll-retry-key",
+            poll_min_interval=0,
+            transport_retries=4,
+        )
+        result = client._request_json(  # noqa: SLF001 - transport regression
+            transport,  # type: ignore[arg-type]
+            "GET",
+            "/v2/task.listMessages",
+            headers={"x-manus-api-key": "redacted"},
+            params={"task_id": "task-existing"},
+        )
+
+        self.assertEqual(result, {"ok": True, "messages": []})
+        self.assertEqual(transport.calls, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_uncertain_task_create_drop_is_not_blindly_retried(self) -> None:
+        class BrokenClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def request(self, *_args: Any, **_kwargs: Any) -> None:
+                self.calls += 1
+                raise httpx.RemoteProtocolError(
+                    "server disconnected without sending a response"
+                )
+
+        transport = BrokenClient()
+        client = ManusClient(
+            "create-drop-key",
+            create_min_interval=0,
+            transport_retries=4,
+        )
+        with self.assertRaises(ManusTransportError) as raised:
+            client._request_json(  # noqa: SLF001 - transport regression
+                transport,  # type: ignore[arg-type]
+                "POST",
+                "/v2/task.create",
+                headers={"x-manus-api-key": "redacted"},
+                json_body={"message": {"content": "test"}},
+            )
+
+        self.assertEqual(transport.calls, 1)
+        self.assertTrue(is_non_retryable_manus_error(raised.exception))
+
+    @patch("app.ai.manus.time.sleep", return_value=None)
+    @patch("app.ai.manus.time.monotonic", side_effect=[100.0, 100.0, 106.25])
+    def test_same_credential_task_creation_is_staggered(
+        self,
+        _monotonic_mock,
+        sleep_mock,
+    ) -> None:
+        common = {
+            "api_base": "https://api.manus.ai",
+            "api_key": "shared-key",
+            "endpoint": "task.create",
+            "min_interval": 6.25,
+        }
+        _wait_for_request_slot(**common)
+        _wait_for_request_slot(**common)
+
+        sleep_mock.assert_called_once_with(6.25)
 
     @patch("app.ai.failover.time.sleep", return_value=None)
     def test_invalid_argument_is_not_retried_by_failover(self, _sleep) -> None:

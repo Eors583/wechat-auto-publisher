@@ -1,5 +1,6 @@
 from .auth import WeChatAuth
 from .client import WeChatAPIError, WeChatClient
+from .errors import WeChatHTTPError
 from .draft import (
     add_draft,
     article_from_news_item,
@@ -9,6 +10,7 @@ from .draft import (
     list_draft_summaries,
     update_draft,
 )
+from .factory import build_wechat_auth, build_wechat_client
 from .material import batch_get_material, upload_article_image, upload_thumb
 from .publish import (
     build_article_from_job,
@@ -21,6 +23,7 @@ from .publish import (
 __all__ = [
     "WeChatAuth",
     "WeChatAPIError",
+    "WeChatHTTPError",
     "WeChatClient",
     "add_draft",
     "article_from_news_item",
@@ -29,6 +32,8 @@ __all__ = [
     "get_draft",
     "list_draft_summaries",
     "update_draft",
+    "build_wechat_auth",
+    "build_wechat_client",
     "batch_get_material",
     "upload_article_image",
     "upload_thumb",

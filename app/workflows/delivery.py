@@ -7,10 +7,10 @@ from app.ai import TITLE_CANDIDATE_COUNT, clean_candidate_list
 from app.cover import invalidate_generated_cover
 from app.benchmark import fetch_latest_benchmark_record, sync_secondary_titles
 from app.layout import compose_articles, select_secondary_articles
+from app.services.failures import sanitize_failure_text
+from app.services.wechat_delivery import deliver_draft_once
 from app.wechat import (
-    add_draft,
     build_article_from_job,
-    ensure_draft_then_publish,
     submit_publish,
 )
 
@@ -60,7 +60,16 @@ class DeliverySteps:
         self.context.check_cancelled(job_id)
         meta = _delivery_meta(job, secondaries, len(articles))
 
-        draft_id = add_draft(client, articles)
+        draft_id = deliver_draft_once(
+            db,
+            client,
+            job_id=job_id,
+            account_id=_delivery_account_id(job),
+            articles=articles,
+            # Secondary articles come from a moving draft library. The primary
+            # article is the stable identity for resuming this job safely.
+            fingerprint_articles=[article],
+        )
         if publish_now:
             return self._publish_created_draft(job, client, draft_id, meta)
         db.update_job(
@@ -83,17 +92,31 @@ class DeliverySteps:
         client = self.context.wechat_client()
         try:
             if job.get("draft_media_id"):
-                draft_id, publish_id = ensure_draft_then_publish(
-                    client, media_id=job["draft_media_id"]
-                )
+                draft_id = str(job["draft_media_id"])
             else:
                 if not job.get("html_content"):
                     job = self.rendering.render(job)
-                draft_id, publish_id = ensure_draft_then_publish(
+                article = self._build_article(job)
+                draft_id = deliver_draft_once(
+                    self.context.db,
                     client,
-                    media_id=None,
-                    article=self._build_article(job),
+                    job_id=job_id,
+                    account_id=_delivery_account_id(job),
+                    articles=[article],
+                    fingerprint_articles=[article],
                 )
+                # Persist the accepted/reconciled draft before the separate
+                # publish mutation. A publish failure must never trigger a
+                # second untracked draft creation.
+                self.context.db.update_job(
+                    job_id,
+                    draft_media_id=draft_id,
+                    status="drafted",
+                    step="inject",
+                    error=None,
+                )
+                job = self.context.require_job(job_id)
+            publish_id = submit_publish(client, draft_id)
             self.context.db.update_job(
                 job_id,
                 draft_media_id=draft_id,
@@ -108,11 +131,15 @@ class DeliverySteps:
             )
             return self.context.require_job(job_id)
         except Exception as exc:  # noqa: BLE001
-            self._save_fallback_draft(job, client, exc)
+            safe_error = sanitize_failure_text(exc)
             self.context.notifier.send(
-                f"Job #{job_id} publish failed", str(exc), level="error"
+                f"Job #{job_id} publish failed", safe_error, level="error"
             )
-            self.context.db.update_job(job_id, status="failed", error=str(exc))
+            self.context.db.update_job(
+                job_id,
+                status="failed",
+                error=safe_error,
+            )
             raise
 
     def _apply_review_choices(
@@ -133,7 +160,9 @@ class DeliverySteps:
             selected_title = str(candidates[index])
             updates: dict[str, Any] = {"selected_title": selected_title}
             if selected_title != str(job.get("selected_title") or ""):
-                meta, cleared_generated_cover = invalidate_generated_cover(job.get("meta"))
+                meta, cleared_generated_cover = invalidate_generated_cover(
+                    job.get("meta")
+                )
                 if cleared_generated_cover:
                     updates["thumb_media_id"] = None
                     updates["meta_json"] = meta
@@ -183,7 +212,9 @@ class DeliverySteps:
             only_fans_can_comment=int(wechat_cfg.get("only_fans_can_comment") or 0),
         )
 
-    def _secondary_articles(self, client: Any, job: dict[str, Any]) -> list[dict[str, Any]]:
+    def _secondary_articles(
+        self, client: Any, job: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         try:
             secondaries = select_secondary_articles(
                 client,
@@ -200,12 +231,19 @@ class DeliverySteps:
                     record,
                     threshold=float(benchmark_cfg.get("image_match_threshold") or 0.90),
                     matched_only=bool(benchmark_cfg.get("matched_only", False)),
-                    follow_source_order=bool(benchmark_cfg.get("follow_source_order", True)),
-                    deduplicate_by_image=bool(benchmark_cfg.get("deduplicate_by_image", True)),
+                    follow_source_order=bool(
+                        benchmark_cfg.get("follow_source_order", True)
+                    ),
+                    deduplicate_by_image=bool(
+                        benchmark_cfg.get("deduplicate_by_image", True)
+                    ),
                 )
             return secondaries
         except Exception as exc:  # noqa: BLE001
-            logger.warning("select secondary articles failed: %s", exc)
+            logger.warning(
+                "select secondary articles failed: %s",
+                sanitize_failure_text(exc),
+            )
             return []
 
     def _publish_created_draft(
@@ -218,8 +256,12 @@ class DeliverySteps:
         job_id = int(job["id"])
         try:
             publish_id = submit_publish(client, draft_id)
-        except Exception:
-            logger.exception("Publish failed; draft kept media_id=%s", draft_id)
+        except Exception as exc:
+            logger.error(
+                "Publish failed; draft kept media_id=%s error=%s",
+                draft_id,
+                sanitize_failure_text(exc),
+            )
             self.context.db.update_job(
                 job_id,
                 draft_media_id=draft_id,
@@ -243,19 +285,6 @@ class DeliverySteps:
         )
         return self.context.require_job(job_id)
 
-    def _save_fallback_draft(self, job: dict[str, Any], client: Any, exc: Exception) -> None:
-        try:
-            if not job.get("draft_media_id") and job.get("html_content"):
-                draft_id = add_draft(client, [self._build_article(job)])
-                self.context.db.update_job(
-                    int(job["id"]),
-                    draft_media_id=draft_id,
-                    status="drafted",
-                    error=f"Publish failed, saved draft: {exc}",
-                )
-        except Exception as draft_exc:  # noqa: BLE001
-            logger.warning("Fallback draft also failed: %s", draft_exc)
-
 
 def _delivery_meta(
     job: dict[str, Any], secondaries: list[dict[str, Any]], article_count: int
@@ -276,3 +305,13 @@ def _delivery_meta(
     ]
     meta["article_count"] = article_count
     return meta
+
+
+def _delivery_account_id(job: dict[str, Any]) -> str:
+    meta = job.get("meta")
+    if isinstance(meta, dict):
+        account_id = str(meta.get("official_account_id") or "").strip()
+        if account_id:
+            return account_id
+    # Legacy and direct CLI jobs use the imported config account.
+    return "account_config_default"

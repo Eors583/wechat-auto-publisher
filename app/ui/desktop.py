@@ -4,23 +4,12 @@ import asyncio
 import json
 import logging
 import os
-import re
-import threading
 import time
-import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from nicegui import run, ui
 
-from app.config import load_config
-from app.db import Database
-from app.pipeline import Pipeline
-from app.batch import inject_pipelines_concurrently, run_pipelines_concurrently
-from app.layout_profiles import layout_to_template_config, normalize_layout, validate_layout
-from app.render import TemplateRenderer, finalize_article_html, prepare_preview_html
-from app.wechat.template_snapshot import load_template_snapshot
-from app.wechat.auth import WeChatAuth
-from app.wechat.client import WeChatClient
 from app.accounts import (
     DEFAULT_ACCOUNT_ID,
     IMPORTED_DEFAULT_ACCOUNT_ID,
@@ -30,11 +19,11 @@ from app.accounts import (
     save_account_layout,
     save_account_prompt_selection,
 )
-from app.ai import clean_candidate_text
-from app.ai.model_registry import (
-    apply_model_selection,
-    configured_models,
-    public_models,
+from app.config import load_config
+from app.layout_profiles import (
+    layout_to_template_config,
+    normalize_layout,
+    validate_layout,
 )
 from app.prompt_templates import (
     ARTICLE_PROMPT_PURPOSE,
@@ -44,22 +33,28 @@ from app.prompt_templates import (
     PROMPT_MODE_TEMPLATE,
     public_prompt_templates,
 )
-from app.ui.styles import step_title_html
+from app.render import TemplateRenderer, finalize_article_html, prepare_preview_html
+from app.services.batches import BatchService
+from app.services.creation_plans import CreationPlanService
+from app.services.failures import sanitize_failure_text
+from app.services.followed_content import FollowedContentService
+from app.services.onboarding import OnboardingService
+from app.services.topic_sources import TopicSourceService
+from app.ui import image_proxy as _image_proxy  # noqa: F401
 from app.ui.lifecycle import client_timer
-from app.ui.workflow import (
-    CREATION_WORKFLOW_STEPS,
-    next_review_job,
-    render_workflow_guide,
-)
-from app.ui import image_proxy as _image_proxy  # noqa: F401; registers local preview route
-from app.ui.state import (
-    AppState,
-    STATUS_LABEL,
-    clean_subtitles as _clean_subtitles,
-    clean_titles as _clean_titles,
-    set_button_loading as _set_button_loading,
+from app.ui.panels.auth import (
+    build_auth_screen,
+    current_desktop_user,
+    logout_desktop_user,
 )
 from app.ui.panels.feishu import build_feishu_panel
+from app.ui.panels.onboarding_wizard import (
+    build_configuration_health_banner,
+    build_onboarding_settings,
+    build_onboarding_wizard,
+    configuration_health_needs_refresh,
+    should_show_onboarding,
+)
 from app.ui.panels.overview import build_overview_cards
 from app.ui.panels.review_jury import enabled_profile_options
 from app.ui.panels.settings_hub import (
@@ -67,13 +62,22 @@ from app.ui.panels.settings_hub import (
     build_model_management_panel,
 )
 from app.ui.panels.tasks import build_tasks_panel
-from app.ui.panels.tasks import confirm_batch_write, open_review_workbench
 from app.ui.panels.topics import build_topic_center
-from app.services.batches import BatchService
-from app.services.batch_contracts import TERMINAL_STATUSES, effective_batch_status
-from app.services.creation_plans import CreationPlanService
-from app.services.followed_content import FollowedContentService
-from app.services.topic_sources import TopicSourceService
+from app.ui.state import (
+    STATUS_LABEL,
+    AppState,
+)
+from app.ui.state import (
+    set_button_loading as _set_button_loading,
+)
+from app.ui.styles import step_title_html
+from app.ui.workflow import (
+    CREATION_WORKFLOW_STEPS,
+    render_workflow_guide,
+)
+from app.wechat.client import WeChatClient
+from app.wechat.factory import build_wechat_auth, build_wechat_client
+from app.wechat.template_snapshot import load_template_snapshot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,44 +90,96 @@ logger = logging.getLogger(__name__)
 state: AppState | None = None
 
 
-def _finalize_generated_batch(
-    db: Database,
-    batch_id: str | None,
-    results: list[dict[str, Any]],
-) -> dict[str, int | str]:
-    """Persist the batch result before any best-effort UI updates."""
-
-    counts: dict[str, int | str] = {
-        "drafted": sum(1 for result in results if result.get("status") == "drafted"),
-        "ready_for_review": sum(
-            1 for result in results if result.get("status") == "ready_for_review"
-        ),
-        "failed": sum(1 for result in results if result.get("status") == "failed"),
-        "cancelled": sum(
-            1 for result in results if result.get("status") == "cancelled"
-        ),
-        "status": effective_batch_status(results),
-    }
-    if batch_id:
-        db.update_batch(batch_id, status=str(counts["status"]))
-    return counts
-
-
 def create_desktop_app() -> None:
     from app.ui.styles import APP_CSS, HEAD_HTML
 
     page_state = AppState()
+    try:
+        request = ui.context.client.request
+    except RuntimeError:
+        # Isolated UI tests and pre-connected desktop clients may not expose a
+        # request object yet; the normal page simply has no deep-link query.
+        request = None
+    query_params = getattr(request, "query_params", {}) if request else {}
+    requested_batch_id = str(query_params.get("batch_id") or "").strip()
+    try:
+        requested_job_id = int(query_params.get("job_id") or 0)
+    except (TypeError, ValueError):
+        requested_job_id = 0
+    open_requested_review = (
+        str(query_params.get("view") or "").strip().lower() == "review"
+        and bool(requested_batch_id)
+        and requested_job_id > 0
+    )
+    open_requested_config = (
+        str(query_params.get("view") or "").strip().lower() == "config"
+    )
+    open_requested_admin = (
+        str(query_params.get("view") or "").strip().lower() == "admin"
+    )
+    open_requested_onboarding = (
+        str(query_params.get("view") or "").strip().lower() == "onboarding"
+    )
     ui.add_head_html(HEAD_HTML)
     ui.add_css(APP_CSS)
+    if request is not None and hasattr(page_state, "auth"):
+        page_state.current_user = current_desktop_user(page_state.auth)
+        if not page_state.current_user:
+            build_auth_screen(page_state.auth)
+            return
+    elif not getattr(page_state, "current_user", None):
+        # Compatibility for lightweight UI test doubles.
+        page_state.current_user = {
+            "id": "test-admin",
+            "username": "test",
+            "role": "admin",
+        }
+    page_is_admin = bool(
+        getattr(
+            page_state,
+            "is_admin",
+            str((page_state.current_user or {}).get("role") or "") == "admin",
+        )
+    )
+
+    onboarding_service: OnboardingService | None = None
+    onboarding_status: dict[str, Any] = {}
+    if hasattr(page_state, "db") and hasattr(page_state, "config"):
+        try:
+            onboarding_service = OnboardingService(
+                page_state.db,
+                page_state.config,
+            )
+            status_method = getattr(
+                onboarding_service,
+                "status",
+                onboarding_service.readiness,
+            )
+            onboarding_status = dict(status_method() or {})
+        except Exception:
+            logger.exception("Unable to calculate onboarding status")
+    if (
+        onboarding_service is not None
+        and not open_requested_review
+        and not open_requested_config
+        and not open_requested_admin
+        and page_is_admin
+        and (open_requested_onboarding or should_show_onboarding(onboarding_status))
+    ):
+        build_onboarding_wizard(
+            page_state,
+            service=onboarding_service,
+            initial_status=onboarding_status,
+            on_completed=lambda _account_id: ui.navigate.to("/"),
+        )
+        return
 
     with ui.element("div").classes("shell"):
         with ui.element("div").classes("hero"):
             with ui.column().classes("gap-0"):
                 ui.label("CONTENT STUDIO").classes("eyebrow")
                 ui.label("公众号改写助手").classes("brand")
-                ui.label(
-                    "从选题到草稿，一站完成公众号内容生产"
-                ).classes("brand-sub")
+                ui.label("从选题到草稿，一站完成公众号内容生产").classes("brand-sub")
                 ui.html(
                     '<div class="q-mt-sm">'
                     '<span class="flow-chip"><span class="dot"></span>本地运行</span>'
@@ -135,12 +191,111 @@ def create_desktop_app() -> None:
             with ui.column().classes("items-end gap-2"):
                 ui.html(
                     '<div class="hero-badge"><span class="hero-badge-dot"></span>'
-                    '<span><b>草稿安全模式</b><small>仅写草稿，不会自动群发</small></span></div>',
+                    "<span><b>草稿安全模式</b><small>仅写草稿，不会自动群发</small></span></div>",
                     sanitize=False,
                 )
+                with ui.row().classes("items-center gap-2"):
+                    role_label = (
+                        "管理员" if page_is_admin else "普通用户"
+                    )
+                    ui.label(
+                        f'{page_state.current_user["username"]} · {role_label}'
+                    ).classes("text-caption text-grey-7")
 
-        tabs = ui.tabs().classes("workspace-tabs w-full").props(
-            "dense align=left indicator-color=teal-9 active-color=teal-10"
+                    def logout_current_user() -> None:
+                        logout_desktop_user(page_state.auth)
+                        ui.navigate.reload()
+
+                    ui.button(
+                        "退出",
+                        icon="logout",
+                        on_click=logout_current_user,
+                    ).props("flat dense no-caps color=grey-7")
+
+        health_state = {"status": onboarding_status}
+
+        @ui.refreshable
+        def configuration_health() -> None:
+            build_configuration_health_banner(health_state["status"])
+
+        configuration_health()
+        # Model credentials are managed by the standalone merchant backend.
+        # Keep already-open desktop selectors in sync with that shared
+        # PostgreSQL pool without requiring an application restart.
+        refresh_shared_models = getattr(
+            page_state,
+            "refresh_model_selects",
+            None,
+        )
+        if callable(refresh_shared_models):
+            ui.timer(5.0, refresh_shared_models)
+
+        if (
+            onboarding_service is not None
+            and configuration_health_needs_refresh(onboarding_status)
+        ):
+            owner_client = ui.context.client
+
+            async def refresh_stale_configuration_health() -> None:
+                try:
+                    checked = await run.io_bound(
+                        lambda: onboarding_service.status(
+                            refresh_wechat=True
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unable to refresh onboarding health in background"
+                    )
+                    if not bool(getattr(owner_client, "is_deleted", False)):
+                        failed_status = dict(health_state["status"])
+                        failed_status.update(
+                            wechat_refresh_needed=False,
+                            health_refresh_failed=True,
+                        )
+                        health_state["status"] = failed_status
+                        configuration_health.refresh()
+                    return
+                if bool(getattr(owner_client, "is_deleted", False)):
+                    return
+                health_state["status"] = dict(checked or {})
+                configuration_health.refresh()
+                ready_accounts = [
+                    str(item)
+                    for item in list(
+                        health_state["status"].get(
+                            "content_ready_account_ids"
+                        )
+                        or []
+                    )
+                    if str(item)
+                ]
+                if (
+                    not open_requested_review
+                    and len(ready_accounts) == 1
+                    and should_show_onboarding(health_state["status"])
+                    and str(
+                        health_state["status"].get("repair_step") or ""
+                    )
+                    == "wechat"
+                ):
+                    # An expired healthy cache never blocks startup. Once the
+                    # real read-only refresh proves that the sole usable
+                    # account can no longer write drafts, move directly to the
+                    # focused WeChat repair step.
+                    ui.navigate.to("/?view=onboarding")
+                    return
+
+            client_timer(
+                0.15,
+                refresh_stale_configuration_health,
+                once=True,
+            )
+
+        tabs = (
+            ui.tabs()
+            .classes("workspace-tabs w-full")
+            .props("dense align=left indicator-color=teal-9 active-color=teal-10")
         )
         with tabs:
             tab_wizard = ui.tab("工作台")
@@ -148,31 +303,62 @@ def create_desktop_app() -> None:
             tab_jobs = ui.tab("任务中心")
             tab_settings = ui.tab("设置")
 
-        panels = ui.tab_panels(tabs, value=tab_wizard).classes("w-full bg-transparent")
+        panels = ui.tab_panels(
+            tabs,
+            value=(
+                tab_jobs
+                if open_requested_review
+                else tab_settings
+                if open_requested_config or open_requested_admin
+                else tab_wizard
+            ),
+        ).classes("w-full bg-transparent")
         with panels:
             with ui.tab_panel(tab_wizard).classes("wizard-panel"):
                 _build_wizard(tabs, tab_topics, tab_jobs, state=page_state)
             with ui.tab_panel(tab_topics):
                 build_topic_center(page_state, tabs, tab_wizard)
             with ui.tab_panel(tab_jobs):
-                build_tasks_panel(page_state)
+                task_panel_kwargs: dict[str, Any] = {}
+                if open_requested_review:
+                    task_panel_kwargs.update(
+                        initial_batch_id=requested_batch_id,
+                        initial_job_id=requested_job_id,
+                    )
+                build_tasks_panel(page_state, **task_panel_kwargs)
             with ui.tab_panel(tab_settings):
-                settings_tabs = ui.tabs().classes("workspace-tabs w-full").props(
-                    "dense align=left indicator-color=teal-9 active-color=teal-10"
+                settings_tabs = (
+                    ui.tabs()
+                    .classes("workspace-tabs w-full")
+                    .props(
+                        "dense align=left indicator-color=teal-9 active-color=teal-10"
+                    )
                 )
                 with settings_tabs:
                     settings_accounts = ui.tab("公众号")
-                    settings_models = ui.tab("模型管理")
+                    settings_models = (
+                        ui.tab("模型管理")
+                        if page_is_admin
+                        else None
+                    )
                     settings_plans = ui.tab("创作方案")
                     settings_feishu = ui.tab("飞书")
                     settings_help = ui.tab("系统设置")
                 with ui.tab_panels(
-                    settings_tabs, value=settings_accounts
+                    settings_tabs,
+                    value=(
+                        settings_models
+                        if open_requested_admin and settings_models is not None
+                        else settings_help
+                        if open_requested_config
+                        else settings_accounts
+                    ),
                 ).classes("w-full bg-transparent"):
                     with ui.tab_panel(settings_accounts):
                         refresh_accounts_panel = _build_accounts_panel(page_state)
-                    with ui.tab_panel(settings_models):
-                        build_model_management_panel(page_state)
+                    if settings_models is not None:
+                        with ui.tab_panel(settings_models):
+                            build_model_management_panel(page_state)
                     with ui.tab_panel(settings_plans):
                         build_creation_plans_panel(
                             page_state,
@@ -181,6 +367,11 @@ def create_desktop_app() -> None:
                     with ui.tab_panel(settings_feishu):
                         build_feishu_panel(page_state)
                     with ui.tab_panel(settings_help):
+                        if onboarding_service is not None and page_is_admin:
+                            build_onboarding_settings(
+                                page_state,
+                                service=onboarding_service,
+                            )
                         _build_help_panel()
 
 
@@ -264,10 +455,14 @@ def _build_wizard(
         ).props("dense no-caps")
         source.set_visibility(False)
 
-        selected_label = ui.label("当前话题：未选择").classes("q-mt-sm text-weight-medium")
-        manual_in = ui.input("文章主题", placeholder="例如：AI 如何改变客服效率").classes(
-            "w-full"
-        ).props("outlined stack-label")
+        selected_label = ui.label("当前话题：未选择").classes(
+            "q-mt-sm text-weight-medium"
+        )
+        manual_in = (
+            ui.input("文章主题", placeholder="例如：AI 如何改变客服效率")
+            .classes("w-full")
+            .props("outlined stack-label")
+        )
         manual_in.set_visibility(True)
         with ui.expansion(
             "更多：根据主题查找参考文章",
@@ -280,7 +475,9 @@ def _build_wizard(
             state.selected_topic = text.strip()
             state.topic_source = src
             selected_label.text = (
-                f"当前话题：{state.selected_topic}" if state.selected_topic else "当前话题：未选择"
+                f"当前话题：{state.selected_topic}"
+                if state.selected_topic
+                else "当前话题：未选择"
             )
 
         async def fill_article_url(article_url: str, article_title: str = "") -> None:
@@ -294,7 +491,7 @@ def _build_wizard(
             # 先立刻回填，保证输入框始终可改
             try:
                 el.enable()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             el.props(remove="readonly")
             if hasattr(el, "set_value"):
@@ -318,9 +515,9 @@ def _build_wizard(
                         el.value = real
                     try:
                         el.enable()
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         pass
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.info("resolve url skipped: %s", exc)
 
         def on_manual_change(_: Any = None) -> None:
@@ -338,7 +535,9 @@ def _build_wizard(
             host.clear()
             with host:
                 if not items:
-                    ui.label("暂无选题，可切换到手动输入，或点击刷新。").classes("muted")
+                    ui.label("暂无选题，可切换到手动输入，或点击刷新。").classes(
+                        "muted"
+                    )
                     return
                 for it in items[:25]:
                     title = str(it.get("title") or it.get("topic") or "").strip()
@@ -370,13 +569,17 @@ def _build_wizard(
                             host.set_visibility(True)
                             with host:
                                 ui.spinner("dots", size="sm", color="teal-9")
-                                ui.label("正在拉取该话题热度前 3 篇文章…").classes("muted")
-                            from app.providers.article_search import search_weixin_articles
+                                ui.label("正在拉取该话题热度前 3 篇文章…").classes(
+                                    "muted"
+                                )
+                            from app.providers.article_search import (
+                                search_weixin_articles,
+                            )
 
                             arts = await run.io_bound(
                                 lambda: search_weixin_articles(topic_title, limit=3)
                             )
-                        except Exception as exc:  # noqa: BLE001
+                        except Exception as exc:
                             arts = []
                             logger.warning("article search failed: %s", exc)
                         finally:
@@ -415,10 +618,13 @@ def _build_wizard(
                                     async def _fill() -> None:
                                         set_topic(topic_t, s)
                                         await fill_article_url(u, t)
+
                                     return _fill
 
-                                with ui.element("div").classes("article-item").on(
-                                    "click", make_fill()
+                                with (
+                                    ui.element("div")
+                                    .classes("article-item")
+                                    .on("click", make_fill())
                                 ):
                                     ui.label(f"Top{rank}  {a_title}").classes(
                                         "text-weight-medium"
@@ -443,7 +649,9 @@ def _build_wizard(
 
                     with ui.element("div").classes("topic-item"):
                         with ui.row().classes("w-full items-center justify-between"):
-                            with ui.column().classes("gap-0").style("flex:1;min-width:0"):
+                            with (
+                                ui.column().classes("gap-0").style("flex:1;min-width:0")
+                            ):
                                 ui.label(title).classes("text-weight-medium")
                                 if meta_text:
                                     ui.label(meta_text).classes("muted")
@@ -465,6 +673,7 @@ def _build_wizard(
                 ui.spinner("dots", size="sm", color="teal-9")
                 ui.label("正在刷新近 7 天企业/管理/项目/组织热点…").classes("muted")
             try:
+
                 def load_topics() -> list[dict[str, Any]]:
                     cfg = state.reload_config()
                     service = TopicSourceService(state.db, cfg)
@@ -474,7 +683,7 @@ def _build_wizard(
                 items = await run.io_bound(load_topics)
                 render_topic_list(items, "hot")
                 ui.notify(f"已加载 {len(items)} 条近 7 天行业热点", type="positive")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 service = TopicSourceService(state.db, state.reload_config())
                 items = service.list_topics(days=7, limit=30)
                 render_topic_list(items, "hot")
@@ -507,22 +716,36 @@ def _build_wizard(
                 for item in topic_service.list_sources(enabled_only=True)
             }
             with topic_host:
-                ui.label("输入一个热点关键词，并选择要同时搜索的来源。").classes("muted")
-                keyword_in = ui.input(
-                    "热点关键词",
-                    placeholder="例如：人工智能、组织变革、项目管理",
-                ).classes("w-full").props("outlined stack-label clearable")
-                keyword_sources = ui.select(
-                    source_options,
-                    value=list(source_options),
-                    label="搜索来源（可多选）",
-                    multiple=True,
-                ).classes("w-full").props("outlined stack-label use-chips clearable")
-                keyword_days = ui.select(
-                    {1: "今天", 3: "最近3天", 7: "最近7天", 30: "最近30天"},
-                    value=7,
-                    label="日期范围",
-                ).classes("w-full").props("outlined stack-label")
+                ui.label("输入一个热点关键词，并选择要同时搜索的来源。").classes(
+                    "muted"
+                )
+                keyword_in = (
+                    ui.input(
+                        "热点关键词",
+                        placeholder="例如：人工智能、组织变革、项目管理",
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label clearable")
+                )
+                keyword_sources = (
+                    ui.select(
+                        source_options,
+                        value=list(source_options),
+                        label="搜索来源（可多选）",
+                        multiple=True,
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label use-chips clearable")
+                )
+                keyword_days = (
+                    ui.select(
+                        {1: "今天", 3: "最近3天", 7: "最近7天", 30: "最近30天"},
+                        value=7,
+                        label="日期范围",
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label")
+                )
                 keyword_btn = ui.button("搜索多来源热点", icon="search").props(
                     "unelevated color=teal-9 no-caps"
                 )
@@ -562,17 +785,17 @@ def _build_wizard(
                             ui.notify(
                                 "部分来源失败："
                                 + "；".join(
-                                    f'{item["name"]}：{item["error"]}'
+                                    f"{item['name']}：{item['error']}"
                                     for item in failures
                                 ),
                                 type="warning",
                                 timeout=12000,
                             )
                         ui.notify(
-                            f'已从 {len(report["sources"])} 个来源找到 {report["total"]} 条热点',
+                            f"已从 {len(report['sources'])} 个来源找到 {report['total']} 条热点",
                             type="positive",
                         )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         ui.notify(f"关键词搜索失败：{exc}", type="negative")
                     finally:
                         _set_button_loading(keyword_btn, False)
@@ -606,12 +829,14 @@ def _build_wizard(
                             ui.spinner("dots", size="sm", color="teal-9")
                             ui.label("检索中…").classes("muted")
                         try:
-                            from app.providers.article_search import search_weixin_articles
+                            from app.providers.article_search import (
+                                search_weixin_articles,
+                            )
 
                             arts = await run.io_bound(
                                 lambda: search_weixin_articles(t, limit=3)
                             )
-                        except Exception as exc:  # noqa: BLE001
+                        except Exception as exc:
                             arts = []
                             ui.notify(f"检索失败：{exc}", type="negative")
                         finally:
@@ -620,7 +845,9 @@ def _build_wizard(
                         with topic_host:
                             ui.label(f"话题：{t}").classes("text-weight-medium")
                             if not arts:
-                                ui.label("未找到相关文章，请手动粘贴链接。").classes("muted")
+                                ui.label("未找到相关文章，请手动粘贴链接。").classes(
+                                    "muted"
+                                )
                                 return
                             for rank, art in enumerate(arts, start=1):
                                 a_title = art.get("title") or f"文章 {rank}"
@@ -631,10 +858,13 @@ def _build_wizard(
                                 ) -> Callable[[], Any]:
                                     async def _fill() -> None:
                                         await fill_article_url(u, at)
+
                                     return _fill
 
-                                with ui.element("div").classes("article-item").on(
-                                    "click", make_fill()
+                                with (
+                                    ui.element("div")
+                                    .classes("article-item")
+                                    .on("click", make_fill())
                                 ):
                                     ui.label(f"Top{rank}  {a_title}")
                                     ui.label(a_url[:90]).classes("muted")
@@ -642,13 +872,13 @@ def _build_wizard(
                     search_btn.on_click(search_manual)
             elif src == "hot":
                 with topic_host:
-                    ui.label("范围：最近 7 天 · 企业 / 管理 / 项目 / 组织").classes("muted")
+                    ui.label("范围：最近 7 天 · 企业 / 管理 / 项目 / 组织").classes(
+                        "muted"
+                    )
                     hot_refresh_btn = ui.button("刷新近7天热点").props(
                         "outline dense no-caps color=teal-9"
                     )
-                    hot_refresh_btn.on_click(
-                        lambda: refresh_hot(hot_refresh_btn)
-                    )
+                    hot_refresh_btn.on_click(lambda: refresh_hot(hot_refresh_btn))
                 await refresh_hot()
             elif src == "peer":
                 show_peers()
@@ -685,26 +915,34 @@ def _build_wizard(
         )
         url_holder["el"] = url_in
         text_in = ui.textarea("粘贴文章正文").classes("w-full").props("rows=8 outlined")
-        references_in = ui.textarea(
-            "参考文章链接（每行一个，第一篇为主要参考）"
-        ).classes("w-full").props("rows=6 outlined")
+        references_in = (
+            ui.textarea("参考文章链接（每行一个，第一篇为主要参考）")
+            .classes("w-full")
+            .props("rows=6 outlined")
+        )
         with ui.expansion(
             "高级设置：事实保留与改写强度",
             icon="tune",
             value=False,
         ).classes("w-full"):
-            facts_in = ui.textarea(
-                "必须保留的事实或补充资料（可选）"
-            ).classes("w-full").props("rows=4 outlined")
-            intensity_in = ui.select(
-                options={
-                    "light": "轻度改写：尽量保留原结构",
-                    "standard": "标准改写：优化结构与表达",
-                    "strong": "深度改写：重构结构但不改变事实",
-                },
-                value="standard",
-                label="改写强度",
-            ).classes("w-full").props("outlined stack-label")
+            facts_in = (
+                ui.textarea("必须保留的事实或补充资料（可选）")
+                .classes("w-full")
+                .props("rows=4 outlined")
+            )
+            intensity_in = (
+                ui.select(
+                    options={
+                        "light": "轻度改写：尽量保留原结构",
+                        "standard": "标准改写：优化结构与表达",
+                        "strong": "深度改写：重构结构但不改变事实",
+                    },
+                    value="standard",
+                    label="改写强度",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
 
         def sync_source_mode() -> None:
             mode = str(source_mode_in.value or "link")
@@ -770,7 +1008,6 @@ def _build_wizard(
                 )
                 return
             target_accounts.set_value(selected_accounts)
-            sync_default_model_row()
             ui.notify("链接已填入，正在开始生成文章", type="positive")
             await asyncio.sleep(0)
             await start_rewrite()
@@ -781,38 +1018,27 @@ def _build_wizard(
         ui.html(step_title_html(2, "选择目标公众号"), sanitize=False)
         account_options = state.account_options()
         remembered_accounts = state.remembered_account_ids()
-        target_accounts = ui.select(
-            options=account_options,
-            value=remembered_accounts,
-            label="选择目标公众号（可多选）",
-            multiple=True,
-        ).classes("w-full q-mb-sm").props("outlined stack-label use-chips clearable")
-        state.account_selects.append((target_accounts, True))
-        model_options = state.model_options()
-        with ui.row().classes("w-full items-start q-mb-md").style("gap:12px") as default_model_row:
-            primary_model = ui.select(
-                options=model_options,
-                value="",
-                label="默认公众号使用的模型",
-            ).classes("col").props("outlined stack-label")
-            fallback_model = ui.select(
-                options=model_options,
-                value="",
-                label="备用模型（可选）",
-            ).classes("col").props("outlined stack-label clearable")
-        state.model_selects.extend(((primary_model, True), (fallback_model, True)))
-        ui.label(
-            "已管理的公众号会自动套用各自保存的模型和创作方案；只有选择系统默认公众号时才需要上面的模型选项。"
-        ).classes("muted q-mb-sm")
-
-        def sync_default_model_row() -> None:
-            default_model_row.set_visibility(
-                DEFAULT_ACCOUNT_ID in list(target_accounts.value or [])
+        target_accounts = (
+            ui.select(
+                options=account_options,
+                value=remembered_accounts,
+                label="选择目标公众号（可多选）",
+                multiple=True,
             )
+            .classes("w-full q-mb-sm")
+            .props("outlined stack-label use-chips clearable")
+        )
+        state.account_selects.append((target_accounts, True))
+        ui.label(
+            "系统会自动套用每个公众号已保存的模型、提示词、评审、排版和图片方案。"
+        ).classes("muted q-mb-sm")
 
         def source_is_ready() -> bool:
             mode = str(source_mode_in.value or "link")
-            if not state.selected_topic.strip() and not str(manual_in.value or "").strip():
+            if (
+                not state.selected_topic.strip()
+                and not str(manual_in.value or "").strip()
+            ):
                 return False
             if mode == "link":
                 return bool(str(url_in.value or "").strip())
@@ -840,7 +1066,6 @@ def _build_wizard(
             state.remember_account_ids(
                 [str(item) for item in list(target_accounts.value or [])]
             )
-            sync_default_model_row()
             sync_workflow_before_generation()
 
         target_accounts.on_value_change(on_target_accounts_change)
@@ -853,13 +1078,14 @@ def _build_wizard(
             references_in,
         ):
             element.on_value_change(lambda _event: sync_workflow_before_generation())
-        sync_default_model_row()
         sync_workflow_before_generation()
         with ui.row().classes("items-center justify-between w-full q-mb-sm"):
             status_label = ui.label("就绪").classes("status-pill")
             elapsed_label = ui.label("").classes("progress-elapsed")
         with ui.element("div").classes("rewrite-progress w-full") as progress_panel:
-            with ui.row().classes("items-center justify-between w-full progress-heading"):
+            with ui.row().classes(
+                "items-center justify-between w-full progress-heading"
+            ):
                 ui.label("处理进度").classes("progress-caption")
                 progress_percent = ui.label("0%").classes("progress-percent")
             with ui.element("div").classes("progress-track-wrap w-full"):
@@ -901,9 +1127,9 @@ def _build_wizard(
             else:
                 start_btn.enable()
 
-        active_cancel_event: threading.Event | None = None
-        active_task_items: list[dict[str, Any]] = []
+        active_batch_service: BatchService | None = None
         active_batch_id: str | None = None
+        active_stop_requested = False
 
         def append_log(msg: str) -> None:
             if not ui_alive():
@@ -915,31 +1141,24 @@ def _build_wizard(
                 log_area.value = prev + "\n" + msg
 
         def stop_rewrite() -> None:
-            if active_cancel_event is None or not state.busy:
+            nonlocal active_stop_requested
+            if not state.busy:
                 ui.notify("当前没有正在进行的改写任务", type="warning")
                 return
-            active_cancel_event.set()
+            active_stop_requested = True
             stop_btn.disable()
             status_label.text = "正在终止…"
             progress_stage.text = "正在终止所有公众号任务"
             progress_hint.text = "当前模型请求返回后将停止，不会继续写入草稿箱"
             append_log("已请求停止生成，正在停止各公众号任务…")
-            for item in active_task_items:
-                job_id = int(item["job_id"])
-                current = item["pipe"].db.get_job(job_id) or {}
-                if str(current.get("status") or "") not in TERMINAL_STATUSES:
-                    item["pipe"].db.update_job(
-                        job_id,
-                        status="cancelled",
-                        error="用户已终止改写",
+            if active_batch_service is not None and active_batch_id:
+                try:
+                    active_batch_service.cancel_batch(active_batch_id)
+                except (KeyError, ValueError) as exc:
+                    ui.notify(
+                        sanitize_failure_text(exc),
+                        type="warning",
                     )
-            if active_batch_id:
-                current_batch = state.db.get_batch(active_batch_id) or {}
-                current_jobs = list(current_batch.get("jobs") or [])
-                state.db.update_batch(
-                    active_batch_id,
-                    status=effective_batch_status(current_jobs, "cancelled"),
-                )
 
         stop_btn.on_click(stop_rewrite)
 
@@ -961,9 +1180,11 @@ def _build_wizard(
                 reports = await run.io_bound(
                     lambda: BatchService(load_config()).preflight(check_ids)
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 if ui_alive():
-                    ui.notify(f"发布环境检查失败：{exc}", type="negative", timeout=10000)
+                    ui.notify(
+                        f"发布环境检查失败：{exc}", type="negative", timeout=10000
+                    )
                 return False
             if not ui_alive():
                 return False
@@ -971,7 +1192,10 @@ def _build_wizard(
                 ui.notify("发布环境检查通过", type="positive")
                 return True
 
-            with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width:760px"):
+            with (
+                ui.dialog() as dialog,
+                ui.card().classes("w-full").style("max-width:760px"),
+            ):
                 ui.label("发布环境检查发现问题").classes("text-h6 text-weight-bold")
                 for report in reports:
                     with ui.element("div").classes("card w-full"):
@@ -984,7 +1208,9 @@ def _build_wizard(
                                 + str(check.get("name") or "")
                                 + "："
                                 + str(check.get("message") or "")
-                            ).classes("text-positive" if check.get("ok") else "text-negative")
+                            ).classes(
+                                "text-positive" if check.get("ok") else "text-negative"
+                            )
                 can_generate = all(item.get("can_generate") for item in reports)
                 ui.label(
                     "可以仅生成文章并进入审核，但配置修复前无法写入草稿箱。"
@@ -992,9 +1218,9 @@ def _build_wizard(
                     else "至少一个公众号的模型不可用，无法开始生成。"
                 ).classes("text-warning")
                 with ui.row().classes("w-full justify-end"):
-                    ui.button("修复配置后再开始", on_click=lambda: dialog.submit(False)).props(
-                        "flat no-caps"
-                    )
+                    ui.button(
+                        "修复配置后再开始", on_click=lambda: dialog.submit(False)
+                    ).props("flat no-caps")
                     if can_generate:
                         ui.button(
                             "仅生成文章",
@@ -1003,7 +1229,8 @@ def _build_wizard(
             return bool(await dialog)
 
         async def start_rewrite() -> None:
-            nonlocal active_cancel_event, active_task_items, active_batch_id
+            nonlocal active_batch_service, active_batch_id
+            nonlocal active_stop_requested
             if state.busy:
                 ui.notify("已有任务在处理", type="warning")
                 return
@@ -1041,12 +1268,13 @@ def _build_wizard(
                 return
 
             state.busy = True
+            active_stop_requested = False
+            active_batch_service = BatchService(load_config())
+            active_batch_id = None
             set_workflow(
                 "generate",
                 f"正在同时为 {len(selected_accounts)} 个公众号生成文章",
             )
-            active_cancel_event = threading.Event()
-            active_task_items = []
             show_rewrite_action(running=True)
             status_label.text = "准备生成…"
             status_label.classes(replace="status-pill")
@@ -1066,21 +1294,19 @@ def _build_wizard(
                 append_log(f"链接：{url}")
             append_log(f"目标公众号：{len(selected_accounts)} 个")
             append_log("正在检查公众号、模型、模板和素材接口…")
-            review_host.clear()
             preflight_ok = await confirm_preflight(selected_accounts)
             if not ui_alive():
                 state.busy = False
-                active_cancel_event = None
-                active_task_items = []
+                active_batch_service = None
                 return
-            if active_cancel_event.is_set():
+            if active_stop_requested:
                 state.busy = False
                 show_rewrite_action(running=False)
                 status_label.text = "已停止"
                 progress_stage.text = "已停止，不再创建生成任务"
                 progress_percent.text = "已停止"
                 progress_hint.text = "发布环境检查可能已完成，但没有继续生成文章"
-                active_cancel_event = None
+                active_batch_service = None
                 return
             if not preflight_ok:
                 state.busy = False
@@ -1088,7 +1314,7 @@ def _build_wizard(
                 status_label.text = "等待修复配置"
                 progress_stage.text = "发布环境检查未通过"
                 progress_percent.text = "未开始"
-                active_cancel_event = None
+                active_batch_service = None
                 return
 
             status_label.text = "改写中…"
@@ -1105,106 +1331,48 @@ def _build_wizard(
             if url:
                 append_log(f"链接：{url}")
             append_log(f"目标公众号：{len(selected_accounts)} 个")
-            append_log("每个公众号将使用绑定模型独立改写；审核后可一次性写入全部草稿箱…")
-            review_host.clear()
-
-            primary_id = str(primary_model.value or "") or None
-            fallback_id = str(fallback_model.value or "") or None
-            task_items: list[dict[str, Any]] = []
-            batch_mode = len(selected_accounts) > 1 or selected_accounts[0] != DEFAULT_ACCOUNT_ID
-            active_batch_id = uuid.uuid4().hex[:16]
-            state.db.create_batch(
-                active_batch_id,
-                topic=topic,
-                source_url=url or None,
-                raw_content=text or None,
-                source_mode=source_mode_value,
-                reference_urls=reference_urls,
-                required_facts=str(facts_in.value or ""),
-                rewrite_intensity=str(intensity_in.value or "standard"),
+            append_log(
+                "每个公众号将使用绑定模型独立改写；审核后可一次性写入全部草稿箱…"
             )
-            state.db.update_batch(active_batch_id, status="processing", error="")
+            batch_mode = (
+                len(selected_accounts) > 1 or selected_accounts[0] != DEFAULT_ACCOUNT_ID
+            )
+            service_account_ids = [
+                (
+                    IMPORTED_DEFAULT_ACCOUNT_ID
+                    if str(account_id) == DEFAULT_ACCOUNT_ID
+                    else str(account_id)
+                )
+                for account_id in selected_accounts
+            ]
             try:
-                for account_id in selected_accounts:
-                    cfg = load_config()
-                    if account_id == DEFAULT_ACCOUNT_ID:
-                        account_name = "系统默认公众号"
-                        model_id = primary_id or str((cfg.get("ai") or {}).get("primary") or "")
-                        selected_model = state.db.get_ai_model(model_id) if primary_id else None
-                        config_model = next(
-                            (m for m in configured_models(cfg) if m["id"] == model_id),
-                            None,
-                        )
-                        model_name = str(
-                            (selected_model or {}).get("name")
-                            or (config_model or {}).get("name")
-                            or model_id
-                            or "配置默认"
-                        )
-                        if primary_id:
-                            cfg = apply_model_selection(
-                                cfg, state.db, primary_id, fallback_id or primary_id
-                            )
-                    else:
-                        cfg, account_record = apply_account_selection(
-                            cfg, state.db, str(account_id)
-                        )
-                        account_name = str(account_record["name"])
-                        model_id = str(account_record["model_id"])
-                        selected_model = state.db.get_ai_model(model_id)
-                        config_model = next(
-                            (m for m in configured_models(cfg) if m["id"] == model_id),
-                            None,
-                        )
-                        model_name = str(
-                            (selected_model or {}).get("name")
-                            or (config_model or {}).get("name")
-                            or model_id
-                        )
-                    pipe = Pipeline(cfg, cancel_event=active_cancel_event)
-                    job_id = pipe.db.create_job(
+                assert active_batch_service is not None
+                created_batch = await run.io_bound(
+                    lambda: active_batch_service.create_batch(
                         topic=topic,
-                        source=state.topic_source,
                         source_url=url or None,
                         raw_content=text or None,
-                        mode="draft",
-                        meta={
-                            "review": True,
-                            "batch_id": active_batch_id,
-                            "source_mode": source_mode_value,
-                            "reference_urls": reference_urls,
-                            "required_facts": str(facts_in.value or ""),
-                            "rewrite_intensity": str(intensity_in.value or "standard"),
-                            "cover_media_id": None,
-                            "official_account_id": account_id,
-                            "official_account_name": account_name,
-                            "selected_model_id": model_id,
-                            "selected_model_name": model_name,
-                            "fallback_model_id": fallback_id if account_id == DEFAULT_ACCOUNT_ID else model_id,
-                        },
+                        source_mode=source_mode_value,
+                        reference_urls=reference_urls,
+                        required_facts=str(facts_in.value or ""),
+                        rewrite_intensity=str(intensity_in.value or "standard"),
+                        account_ids=service_account_ids,
                     )
-                    task_items.append(
-                        {
-                            "pipe": pipe,
-                            "job_id": job_id,
-                            "account_name": account_name,
-                        }
+                )
+                active_batch_id = str(created_batch["id"])
+                if active_stop_requested:
+                    created_batch = await run.io_bound(
+                        lambda: active_batch_service.cancel_batch(active_batch_id)
                     )
-                    state.db.attach_batch_job(
-                        active_batch_id, job_id, str(account_id), account_name
-                    )
-                    active_task_items = task_items
-            except Exception as exc:  # noqa: BLE001
-                for item in task_items:
-                    state.db.update_job(
-                        int(item["job_id"]),
-                        status="failed",
-                        error=f"批次初始化失败，未开始生成：{exc}",
-                    )
-                state.db.update_batch(active_batch_id, status="failed", error=str(exc))
+            except Exception as exc:
+                safe_error = sanitize_failure_text(exc)
                 state.busy = False
                 show_rewrite_action(running=False)
-                ui.notify(f"公众号或模型配置不可用：{exc}", type="negative")
+                ui.notify(
+                    f"公众号或模型配置不可用：{safe_error}",
+                    type="negative",
+                )
+                active_batch_service = None
                 return
 
             followed_article_id = pending_rewrite_origin.get("followed_article_id")
@@ -1219,124 +1387,167 @@ def _build_wizard(
                 state.db.update_topic_item_flags(topic_item_id, used=True)
             pending_rewrite_origin.clear()
 
-            state.wizard_job_id = int(task_items[0]["job_id"])
+            created_jobs = list(created_batch.get("jobs") or [])
+            if created_jobs:
+                state.wizard_job_id = int(created_jobs[0]["id"])
             stage_ui = {
                 "pending": (0.03, 0.08, "正在创建任务", "任务已经进入处理队列"),
-                "ingesting": (0.10, 0.22, "正在抓取并清洗原文", "正在提取文章正文与基础信息"),
-                "rewriting": (0.28, 0.70, "AI 正在改写正文", "这是通常耗时最长的阶段，请耐心等待"),
-                "title_optimizing": (0.74, 0.87, "正在整理标题与副标题", "正在本地校验、去重并筛选候选标题"),
-                "rendering": (0.90, 0.98, "正在套用历史排版样式", "正在生成蓝血经营管理系统正文"),
-                "injecting": (0.98, 0.995, "正在写入公众号草稿箱", "正在调用该公众号的草稿接口"),
+                "ingesting": (
+                    0.10,
+                    0.22,
+                    "正在抓取并清洗原文",
+                    "正在提取文章正文与基础信息",
+                ),
+                "rewriting": (
+                    0.28,
+                    0.70,
+                    "AI 正在改写正文",
+                    "这是通常耗时最长的阶段，请耐心等待",
+                ),
+                "title_optimizing": (
+                    0.74,
+                    0.87,
+                    "正在整理标题与副标题",
+                    "正在本地校验、去重并筛选候选标题",
+                ),
+                "rendering": (
+                    0.90,
+                    0.98,
+                    "正在套用历史排版样式",
+                    "正在生成蓝血经营管理系统正文",
+                ),
+                "injecting": (
+                    0.98,
+                    0.995,
+                    "正在写入公众号草稿箱",
+                    "正在调用该公众号的草稿接口",
+                ),
                 "drafted": (1.0, 1.0, "已写入草稿箱", "该公众号已完成"),
-                "ready_for_review": (1.0, 1.0, "改写与排版已完成", "请选择标题并预览正文"),
+                "ready_for_review": (
+                    1.0,
+                    1.0,
+                    "改写与排版已完成",
+                    "请选择标题并预览正文",
+                ),
                 "failed": (1.0, 1.0, "处理失败", "请查看下方错误信息"),
                 "cancelled": (1.0, 1.0, "已停止生成", "不会继续写入草稿箱"),
             }
 
             started_at = time.monotonic()
-            stage_started_at = {
-                int(item["job_id"]): started_at for item in task_items
+            stage_started_at = {int(item["id"]): started_at for item in created_jobs}
+            last_status = {
+                int(item["id"]): str(item.get("status") or "pending")
+                for item in created_jobs
             }
-            last_status = {int(item["job_id"]): "pending" for item in task_items}
 
-            async def update_progress(task: asyncio.Task[list[dict[str, Any]]]) -> None:
-                while not task.done() and ui_alive():
+            async def wait_for_batch() -> dict[str, Any] | None:
+                while ui_alive():
+                    assert active_batch_service is not None
+                    assert active_batch_id is not None
+                    current_batch = await run.io_bound(
+                        lambda: active_batch_service.get_batch(active_batch_id)
+                    )
+                    current_jobs = list(current_batch.get("jobs") or [])
                     now = time.monotonic()
                     values: list[float] = []
                     active_labels: list[str] = []
                     done_count = 0
                     latest_hint = "各公众号任务正在同时进行"
-                    for item in task_items:
-                        job_id = int(item["job_id"])
-                        current = item["pipe"].db.get_job(job_id) or {}
+                    for current in current_jobs:
+                        job_id = int(current["id"])
                         current_status = str(current.get("status") or "pending")
-                        if current_status != last_status[job_id]:
+                        if current_status != last_status.get(job_id):
                             last_status[job_id] = current_status
                             stage_started_at[job_id] = now
                             append_log(
-                                f'[{item["account_name"]}] '
-                                f'{STATUS_LABEL.get(current_status, current_status)}'
+                                f"[{current.get('account_name') or '公众号'}] "
+                                f"{STATUS_LABEL.get(current_status, current_status)}"
                             )
                         base, ceiling, label, hint = stage_ui.get(
                             current_status,
-                            (0.05, 0.95, STATUS_LABEL.get(current_status, current_status), "正在处理…"),
+                            (
+                                0.05,
+                                0.95,
+                                STATUS_LABEL.get(current_status, current_status),
+                                "正在处理…",
+                            ),
                         )
                         stage_value = min(
                             ceiling,
                             base + (now - stage_started_at[job_id]) * 0.0025,
                         )
                         values.append(stage_value)
-                        if current_status in {"drafted", "published", "ready_for_review", "failed", "cancelled"}:
+                        if current_status in {
+                            "drafted",
+                            "published",
+                            "ready_for_review",
+                            "failed",
+                            "cancelled",
+                        }:
                             done_count += 1
                         else:
-                            active_labels.append(f'{item["account_name"]}：{label}')
+                            active_labels.append(
+                                f"{current.get('account_name') or '公众号'}：{label}"
+                            )
                             latest_hint = hint
                     value = sum(values) / max(len(values), 1)
                     progress_bar.value = value
-                    progress_stage.text = " ｜ ".join(active_labels[:3]) or "正在汇总结果"
+                    progress_stage.text = (
+                        " ｜ ".join(active_labels[:3]) or "正在汇总结果"
+                    )
                     progress_percent.text = f"{round(value * 100)}%"
                     progress_hint.text = (
-                        f"{done_count}/{len(task_items)} 个公众号完成 · {latest_hint}"
+                        f"{done_count}/{len(current_jobs)} 个公众号完成 · {latest_hint}"
                     )
                     elapsed = int(time.monotonic() - started_at)
-                    elapsed_label.text = f"已用时 {elapsed // 60}分{elapsed % 60:02d}秒" if elapsed >= 60 else f"已用时 {elapsed}秒"
+                    elapsed_label.text = (
+                        f"已用时 {elapsed // 60}分{elapsed % 60:02d}秒"
+                        if elapsed >= 60
+                        else f"已用时 {elapsed}秒"
+                    )
+                    if current_jobs and done_count >= len(current_jobs):
+                        return current_batch
                     await asyncio.sleep(0.8)
-
-            task = asyncio.create_task(
-                run_pipelines_concurrently(
-                    task_items,
-                    review=True,
-                    cancel_event=active_cancel_event,
-                )
-            )
-            batch_id_for_run = active_batch_id
-
-            async def wait_and_finalize() -> tuple[
-                list[dict[str, Any]], dict[str, int | str]
-            ]:
-                """Finish business state even if the page disconnects."""
-
-                try:
-                    pipeline_results = await task
-                except Exception as exc:
-                    if batch_id_for_run:
-                        state.db.update_batch(
-                            batch_id_for_run,
-                            status="failed",
-                            error=str(exc),
-                        )
-                    raise
-                return (
-                    pipeline_results,
-                    _finalize_generated_batch(
-                        state.db,
-                        batch_id_for_run,
-                        pipeline_results,
-                    ),
-                )
-
-            finalizer_task = asyncio.create_task(wait_and_finalize())
+                return None
 
             try:
-                await update_progress(task)
-                results, counts = await asyncio.shield(finalizer_task)
-                if not ui_alive():
+                completed_batch = await wait_for_batch()
+                if completed_batch is None or not ui_alive():
                     logger.info(
                         "rewrite batch %s completed after its UI client disconnected",
-                        batch_id_for_run,
+                        active_batch_id,
                     )
                     return
+                results = list(completed_batch.get("jobs") or [])
+                if not results:
+                    raise RuntimeError("批次没有生成任何公众号文章")
                 job = results[0]
                 state.wizard_job_id = int(job["id"])
-                st = str(job.get("status"))
+                st = str(completed_batch.get("status") or job.get("status"))
                 progress_bar.value = 1.0
                 progress_percent.text = "100%"
                 progress_stage.text = "所有公众号处理完成"
                 progress_hint.text = "请逐个切换公众号预览配图，确认后再写入各自草稿箱"
-                drafted_count = int(counts["drafted"])
-                review_count = int(counts["ready_for_review"])
-                failed_count = int(counts["failed"])
-                cancelled_count = int(counts["cancelled"])
+                drafted_count = sum(
+                    1
+                    for result in results
+                    if str(result.get("status") or "") in {"drafted", "published"}
+                )
+                review_count = sum(
+                    1
+                    for result in results
+                    if str(result.get("status") or "") == "ready_for_review"
+                )
+                failed_count = sum(
+                    1
+                    for result in results
+                    if str(result.get("status") or "") == "failed"
+                )
+                cancelled_count = sum(
+                    1
+                    for result in results
+                    if str(result.get("status") or "") == "cancelled"
+                )
                 status_label.text = (
                     f"待确认 {review_count} · 已写入草稿箱 {drafted_count} · 失败 {failed_count} · 已停止 {cancelled_count}"
                     if batch_mode
@@ -1345,14 +1556,15 @@ def _build_wizard(
                 status_label.classes(
                     replace=f"status-pill {st if st in ('failed', 'ready_for_review') else ''}".strip()
                 )
-                for result, item in zip(results, task_items):
+                for result in results:
                     result_status = str(result.get("status") or "failed")
                     append_log(
-                        f'{item["account_name"]} · Job #{result["id"]} → '
-                        f'{STATUS_LABEL.get(result_status, result_status)}'
+                        f"{result.get('account_name') or '公众号'} · "
+                        f"Job #{result['id']} → "
+                        f"{STATUS_LABEL.get(result_status, result_status)}"
                     )
                     if result.get("error"):
-                        append_log(f'  错误：{result["error"]}')
+                        append_log(f"  错误：{result['error']}")
                 if cancelled_count:
                     progress_stage.text = "改写已终止"
                     progress_hint.text = "已停止后续处理，不会继续写入草稿箱"
@@ -1378,31 +1590,19 @@ def _build_wizard(
                         type=notify_type,
                         timeout=10000,
                     )
-                review_host.clear()
-                with review_host:
-                    with ui.element("div").classes("card w-full"):
-                        ui.label("本次生成已进入任务中心").classes(
-                            "text-subtitle1 text-weight-bold"
-                        )
-                        ui.label(
-                            "文章审核、AI 评审、失败重试和批量写入统一在任务中心处理。"
-                        ).classes("muted")
-                        ui.button(
-                            "进入任务中心",
-                            on_click=lambda: tabs.set_value(tab_jobs),
-                        ).props("unelevated color=teal-9 no-caps icon=task_alt")
                 if callable(state.task_center_refresh):
                     state.task_center_refresh(active_batch_id)
                 tabs.set_value(tab_jobs)
             except asyncio.CancelledError:
                 logger.info(
                     "rewrite UI callback for batch %s was cancelled; "
-                    "the pipeline finalizer will continue in the background",
-                    batch_id_for_run,
+                    "the batch service will continue in the background",
+                    active_batch_id,
                 )
                 return
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("rewrite failed")
+            except Exception as exc:
+                safe_error = sanitize_failure_text(exc)
+                logger.error("rewrite failed: %s", safe_error)
                 if not ui_alive():
                     return
                 status_label.text = "失败"
@@ -1413,7 +1613,7 @@ def _build_wizard(
                 progress_stage.text = "处理失败"
                 progress_hint.text = "请查看下方错误信息后重试"
                 set_workflow("generate", "生成未完成，请查看错误后重试")
-                err = str(exc)
+                err = safe_error
                 append_log(f"错误：{err}")
                 if "过载" in err or "429" in err or "overloaded" in err.lower():
                     ui.notify(
@@ -1422,775 +1622,14 @@ def _build_wizard(
                         timeout=12000,
                     )
                 else:
-                    ui.notify(f"失败：{exc}", type="negative", timeout=10000)
+                    ui.notify(f"失败：{safe_error}", type="negative", timeout=10000)
             finally:
                 state.busy = False
-                active_task_items = []
-                active_cancel_event = None
+                active_batch_service = None
+                active_stop_requested = False
                 show_rewrite_action(running=False)
 
         start_btn.on_click(start_rewrite)
-
-    review_host = ui.column().classes("review-section w-full")
-
-    def open_batch_review(job_id: int, batch_results: list[dict[str, Any]]) -> None:
-        """Review one account in a modal without replacing the batch result tabs."""
-        with ui.dialog() as dialog, ui.card().classes("w-full").style(
-            "max-width:1100px;max-height:92vh;overflow-y:auto"
-        ):
-            with ui.row().classes("w-full items-center justify-between"):
-                ui.label("检查配图并写入草稿").classes("text-h6 text-weight-bold")
-                ui.button("关闭", on_click=dialog.close).props(
-                    "flat dense color=grey-8 no-caps icon=close"
-                )
-            modal_host = ui.column().classes("w-full")
-
-        def refresh_batch_after_inject(_job: dict[str, Any]) -> None:
-            dialog.close()
-            refreshed = [
-                state.db.get_job(int(item["id"])) or item for item in batch_results
-            ]
-            render_batch_results(refreshed)
-
-        dialog.open()
-        render_review(
-            job_id,
-            target_host=modal_host,
-            on_completed=refresh_batch_after_inject,
-        )
-
-    def _legacy_render_batch_results(results: list[dict[str, Any]]) -> None:
-        review_host.clear()
-        ready_jobs = [job for job in results if job.get("status") == "ready_for_review"]
-        title_selectors: dict[int, Any] = {}
-        subtitle_selectors: dict[int, Any] = {}
-
-        async def inject_all_reviewed() -> None:
-            if state.busy:
-                ui.notify("已有任务正在处理", type="warning")
-                return
-            state.busy = True
-            _set_button_loading(
-                batch_inject_btn,
-                True,
-                f"正在同时写入 {len(ready_jobs)} 个公众号草稿箱，请稍候…",
-            )
-            batch_inject_status.text = f"正在同时写入 {len(ready_jobs)} 个公众号草稿箱…"
-            task_items: list[dict[str, Any]] = []
-            try:
-                for summary in ready_jobs:
-                    job_id = int(summary["id"])
-                    latest = state.db.get_job(job_id) or summary
-                    meta = dict(latest.get("meta") or {})
-
-                    cfg = load_config()
-                    account_id = str(meta.get("official_account_id") or "")
-                    if account_id:
-                        cfg, _ = apply_account_selection(
-                            cfg, state.db, account_id, allow_disabled=True
-                        )
-                    if not account_id or account_id == DEFAULT_ACCOUNT_ID:
-                        model_id = str(meta.get("selected_model_id") or "")
-                        configured_primary = str((cfg.get("ai") or {}).get("primary") or "")
-                        if model_id and model_id != configured_primary:
-                            cfg = apply_model_selection(
-                                cfg,
-                                state.db,
-                                model_id,
-                                str(meta.get("fallback_model_id") or model_id),
-                            )
-                    pipe = Pipeline(cfg)
-                    selector = title_selectors.get(job_id)
-                    selected = str(
-                        (selector.value if selector is not None else "")
-                        or latest.get("selected_title")
-                        or ""
-                    )
-                    if selected:
-                        state.db.update_job(job_id, selected_title=selected)
-                    subtitle_selector = subtitle_selectors.get(job_id)
-                    if subtitle_selector is not None:
-                        selected_subtitle = str(subtitle_selector.value or "")
-                        state.db.update_job(
-                            job_id,
-                            selected_subtitle=(
-                                None
-                                if selected_subtitle == "（不使用副标题）"
-                                else selected_subtitle
-                            ),
-                        )
-                    task_items.append(
-                        {
-                            "pipe": pipe,
-                            "job_id": job_id,
-                            "title_index": None,
-                        }
-                    )
-
-                updated = await inject_pipelines_concurrently(task_items)
-                drafted = sum(1 for job in updated if job.get("status") == "drafted")
-                failed = len(updated) - drafted
-                ui.notify(
-                    f"批量写入完成：{drafted} 个已进入草稿箱，{failed} 个失败",
-                    type="positive" if failed == 0 else "warning",
-                    timeout=10000,
-                )
-                refreshed = [
-                    state.db.get_job(int(item["id"])) or item for item in results
-                ]
-                render_batch_results(refreshed)
-            except Exception as exc:  # noqa: BLE001
-                ui.notify(f"批量写入失败：{exc}", type="negative", timeout=10000)
-                batch_inject_status.text = f"写入失败：{exc}"
-            finally:
-                state.busy = False
-                try:
-                    _set_button_loading(batch_inject_btn, False)
-                except Exception:  # noqa: BLE001
-                    pass
-
-        with review_host:
-            with ui.element("div").classes("card w-full"):
-                ui.html(step_title_html(4, "多公众号处理结果"), sanitize=False)
-                ui.label(
-                    "点击公众号名称切换审核各自文章；全部确认后，只需点击一次即可同时写入各公众号草稿箱。"
-                ).classes("muted")
-                batch_inject_status = ui.label(
-                    f"{len(ready_jobs)} 篇文章待审核写入"
-                    if ready_jobs
-                    else "当前没有待写入文章"
-                ).classes("muted q-mt-sm")
-                batch_inject_btn = ui.button(
-                    "全部写入草稿箱", on_click=inject_all_reviewed
-                ).props("unelevated color=teal-9 no-caps icon=cloud_upload").classes(
-                    "q-mt-sm"
-                )
-                if not ready_jobs:
-                    batch_inject_btn.disable()
-            result_tabs = ui.tabs().classes("workspace-tabs w-full").props(
-                "dense align=left indicator-color=teal-9 active-color=teal-10"
-            )
-            tab_jobs: list[tuple[Any, dict[str, Any]]] = []
-            with result_tabs:
-                for job in results:
-                    meta = job.get("meta") or {}
-                    account_name = str(meta.get("official_account_name") or "默认公众号")
-                    status = str(job.get("status") or "failed")
-                    marker = "✓" if status in {"drafted", "published"} else "!"
-                    tab_jobs.append((ui.tab(f"{account_name} {marker}"), job))
-
-            if not tab_jobs:
-                return
-            result_panels = ui.tab_panels(
-                result_tabs, value=tab_jobs[0][0]
-            ).classes("w-full bg-transparent")
-            with result_panels:
-                for result_tab, job in tab_jobs:
-                    meta = job.get("meta") or {}
-                    account_name = str(meta.get("official_account_name") or "默认公众号")
-                    status = str(job.get("status") or "failed")
-                    body = str(job.get("body") or "")
-                    html = str(job.get("html_content") or "")
-                    body_chars = len("".join(body.split()))
-                    with ui.tab_panel(result_tab).classes("q-pa-none q-pt-md"):
-                        with ui.element("div").classes("card w-full"):
-                            with ui.row().classes("w-full items-center justify-between"):
-                                with ui.column().classes("gap-0"):
-                                    ui.label(account_name).classes("text-h6 text-weight-bold")
-                                    ui.label(
-                                        f'任务 #{job.get("id")} · 模型：'
-                                        f'{meta.get("selected_model_name") or meta.get("selected_model_id") or "配置默认"}'
-                                    ).classes("muted")
-                                ui.label(STATUS_LABEL.get(status, status)).classes(
-                                    "text-positive text-weight-bold"
-                                    if status in {"drafted", "published"}
-                                    else "text-negative text-weight-bold"
-                                )
-                            job_id = int(job["id"])
-                            titles = _clean_titles(job)
-                            selected_title = clean_candidate_text(
-                                str(job.get("selected_title") or "")
-                            )
-                            if selected_title and selected_title not in titles:
-                                titles = [selected_title, *titles[:9]]
-                            if status == "ready_for_review" and titles:
-                                ui.label("请选择该公众号使用的标题").classes(
-                                    "text-weight-bold q-mt-md"
-                                )
-                                initial_title = (
-                                    selected_title if selected_title in titles else titles[0]
-                                )
-                                title_radio = ui.radio(
-                                    {title: title for title in titles},
-                                    value=initial_title,
-                                ).classes("w-full q-mt-xs")
-                                title_selectors[job_id] = title_radio
-                                selected_title_label = ui.label(initial_title).classes(
-                                    "text-h6 text-weight-bold q-mt-sm"
-                                )
-
-                                def update_selected_title(
-                                    event: Any,
-                                    jid: int = job_id,
-                                    label: Any = selected_title_label,
-                                ) -> None:
-                                    value = str(event.value or "")
-                                    if not value:
-                                        return
-                                    state.db.update_job(jid, selected_title=value)
-                                    label.text = value
-
-                                title_radio.on_value_change(update_selected_title)
-                            elif selected_title:
-                                ui.label(selected_title).classes(
-                                    "text-h6 text-weight-bold q-mt-md"
-                                )
-                            if status == "ready_for_review":
-                                subtitles = _clean_subtitles(job)
-                                current_subtitle = clean_candidate_text(
-                                    str(job.get("selected_subtitle") or "")
-                                )
-                                if current_subtitle and current_subtitle not in subtitles:
-                                    subtitles = [current_subtitle, *subtitles[:9]]
-                                if subtitles:
-                                    ui.label("副标题（可选）").classes(
-                                        "text-weight-bold q-mt-md"
-                                    )
-                                    subtitle_options = ["（不使用副标题）", *subtitles]
-                                    subtitle_select = ui.select(
-                                        options=subtitle_options,
-                                        value=(
-                                            current_subtitle
-                                            if current_subtitle in subtitles
-                                            else "（不使用副标题）"
-                                        ),
-                                    ).classes("w-full").props(
-                                        "outlined dense options-dense"
-                                    )
-                                    subtitle_selectors[job_id] = subtitle_select
-                            ui.label(f"正文 {body_chars} 字").classes("muted")
-                            quality = meta.get("layout_quality") or {}
-                            if quality.get("errors"):
-                                ui.label(
-                                    "排版检查未通过：" + "；".join(quality["errors"])
-                                ).classes("text-negative q-mt-sm")
-                            elif quality:
-                                ui.label(
-                                    f'排版检查通过 · {quality.get("paragraph_count", 0)} 个段落'
-                                    f' · {quality.get("image_count", 0)} 张图片'
-                                ).classes("text-positive q-mt-sm")
-                            if job.get("draft_media_id"):
-                                ui.label("已保存到该公众号草稿箱").classes(
-                                    "text-positive q-mt-sm"
-                                )
-                            if job.get("error"):
-                                ui.label(f'错误：{job["error"]}').classes(
-                                    "text-negative q-mt-sm"
-                                )
-                            if status == "ready_for_review":
-                                ui.label("已纳入上方批量写入队列").classes(
-                                    "text-positive text-caption q-mt-sm"
-                                )
-                            with ui.element("div").classes("preview-frame w-full q-mt-md"):
-                                if html:
-                                    ui.html(prepare_preview_html(html), sanitize=False)
-                                elif body:
-                                    ui.markdown(body.replace("\n", "\n\n"))
-                                else:
-                                    ui.label("该任务没有生成可预览的正文。 ").classes("muted")
-
-    def render_batch_results(results: list[dict[str, Any]]) -> None:
-        """Render the same explicit batch review state used by API and Feishu."""
-        review_host.clear()
-        first_meta = dict((results[0].get("meta") or {})) if results else {}
-        batch_id = str(first_meta.get("batch_id") or "")
-        if not batch_id:
-            with review_host:
-                ui.label("这些是升级前的历史独立任务，请到任务中心单独查看。").classes(
-                    "card text-warning"
-                )
-            return
-        service = BatchService(load_config())
-        batch = service.get_batch(batch_id, include_content=True)
-        jobs = list(batch.get("jobs") or [])
-        progress = batch.get("progress") or {}
-        unconfirmed = int(progress.get("unconfirmed") or 0)
-        ready_count = int(progress.get("ready_for_review") or 0)
-        drafted_count = int(progress.get("drafted") or 0)
-        failed_count = int(progress.get("failed") or 0)
-        if unconfirmed:
-            set_workflow("review", f"还需审核确认 {unconfirmed} 篇文章")
-        elif ready_count:
-            set_workflow("draft", f"{ready_count} 篇文章已确认，可以批量写入草稿箱")
-        elif jobs and drafted_count == len(jobs):
-            set_workflow("draft", "本批次已全部写入草稿箱", completed=True)
-        elif failed_count:
-            set_workflow("review", f"有 {failed_count} 篇失败，可到任务中心重试")
-
-        def refresh() -> None:
-            latest = service.get_batch(batch_id, include_content=True)
-            render_batch_results(list(latest.get("jobs") or []))
-
-        with review_host:
-            with ui.element("div").classes("card w-full"):
-                ui.html(step_title_html(4, "多公众号文章审核"), sanitize=False)
-                ui.label(
-                    f'批次 #{batch.get("display_id")} · 已审核 '
-                    f'{progress.get("reviewed", 0)}/{progress.get("review_total", 0)}'
-                    f' · 尚有 {progress.get("unconfirmed", 0)} 篇未确认'
-                ).classes(
-                    "text-warning" if progress.get("unconfirmed") else "text-positive"
-                )
-                ui.label(
-                    "必须逐篇打开统一审核工作台并点击“确认此文章”，候选标题的默认值不会自动算作审核。"
-                ).classes("muted")
-                pending_job = next_review_job(jobs)
-                if pending_job is not None:
-                    ui.button(
-                        f"审核下一篇（剩余 {unconfirmed} 篇）",
-                        on_click=lambda _=None, jid=int(pending_job["id"]): open_review_workbench(
-                            state, service, batch_id, jid, refresh
-                        ),
-                    ).props("unelevated color=teal-9 no-caps icon=rate_review")
-                else:
-                    write_btn = ui.button(
-                        f"写入已确认的 {ready_count} 篇",
-                        on_click=lambda: confirm_batch_write(service, batch, refresh),
-                    ).props("unelevated color=teal-9 no-caps icon=cloud_upload")
-                    if not ready_count:
-                        write_btn.disable()
-
-            tabs = ui.tabs().classes("workspace-tabs w-full").props(
-                "dense align=left indicator-color=teal-9 active-color=teal-10"
-            )
-            tab_jobs: list[tuple[Any, dict[str, Any]]] = []
-            with tabs:
-                for job in jobs:
-                    status = str(job.get("status") or "")
-                    review_status = str(job.get("review_status") or "unviewed")
-                    marker = (
-                        "✓"
-                        if status in {"drafted", "published"} or review_status == "confirmed"
-                        else ("●" if status == "ready_for_review" else "!")
-                    )
-                    tab_jobs.append(
-                        (ui.tab(f'{job.get("account_name") or "公众号"} {marker}'), job)
-                    )
-            if not tab_jobs:
-                return
-            panels = ui.tab_panels(tabs, value=tab_jobs[0][0]).classes(
-                "w-full bg-transparent"
-            )
-            with panels:
-                for tab, job in tab_jobs:
-                    with ui.tab_panel(tab).classes("q-pa-none q-pt-md"):
-                        with ui.element("div").classes("card w-full"):
-                            with ui.row().classes("w-full items-center justify-between"):
-                                with ui.column().classes("gap-0"):
-                                    ui.label(str(job.get("account_name") or "公众号")).classes(
-                                        "text-h6 text-weight-bold"
-                                    )
-                                    ui.label(
-                                        f'任务 #{job.get("id")} · 模型：{job.get("model_name") or "配置默认"}'
-                                    ).classes("muted")
-                                if job.get("status") == "ready_for_review":
-                                    review_status = str(job.get("review_status") or "unviewed")
-                                    ui.badge(
-                                        {
-                                            "unviewed": "未查看",
-                                            "viewed": "已查看，未确认",
-                                            "confirmed": "已确认",
-                                            "needs_changes": "需要修改",
-                                        }.get(review_status, review_status)
-                                    ).props(
-                                        "color=teal-7" if review_status == "confirmed" else "color=orange-8"
-                                    )
-                            if job.get("selected_title"):
-                                ui.label(str(job["selected_title"])).classes(
-                                    "text-h6 text-weight-bold q-mt-md"
-                                )
-                            if job.get("error"):
-                                ui.label(f'错误：{job["error"]}').classes("text-negative")
-                            if job.get("status") == "ready_for_review":
-                                ui.button(
-                                    "进入文章审核工作台",
-                                    on_click=lambda _=None, jid=int(job["id"]): open_review_workbench(
-                                        state, service, batch_id, jid, refresh
-                                    ),
-                                ).props("unelevated color=teal-9 no-caps icon=rate_review")
-                            with ui.element("div").classes("preview-frame w-full q-mt-md"):
-                                if job.get("html_content"):
-                                    ui.html(
-                                        prepare_preview_html(str(job["html_content"])),
-                                        sanitize=False,
-                                    )
-                                elif job.get("body"):
-                                    ui.markdown(str(job["body"]).replace("\n", "\n\n"))
-                                else:
-                                    ui.label("暂无可预览正文").classes("muted")
-
-    def render_review(
-        job_id: int,
-        *,
-        target_host: Any | None = None,
-        on_completed: Callable[[dict[str, Any]], None] | None = None,
-    ) -> None:
-        host = target_host if target_host is not None else review_host
-        host.clear()
-        state.db = Database(load_config()["_db_path"])
-        job = state.db.get_job(job_id)
-        if not job:
-            with host:
-                ui.label("任务不存在").classes("card")
-            return
-
-        titles = _clean_titles(job)
-        if not titles and job.get("selected_title"):
-            selected = clean_candidate_text(str(job["selected_title"]))
-            titles = [selected] if selected else []
-        subtitles = _clean_subtitles(job)
-        html = job.get("html_content") or ""
-        body = job.get("body") or ""
-
-        with host:
-            with ui.element("div").classes("card"):
-                ui.html(step_title_html(4, "选择标题并预览文章"), sanitize=False)
-                ui.label(
-                    f"任务 #{job_id} · 确认后再写入公众号草稿箱（不会直接群发）"
-                ).classes("muted q-mb-sm")
-                body_chars = len("".join(str(body).split()))
-                count_class = "text-positive" if body_chars >= 2000 else "text-negative"
-                ui.label(
-                    f"正文 {body_chars} 字 · "
-                    + ("已达到不少于 2000 字要求" if body_chars >= 2000 else "未达到 2000 字硬性要求")
-                ).classes(f"{count_class} q-mb-sm text-weight-medium")
-                quality = (job.get("meta") or {}).get("layout_quality") or {}
-                if quality.get("errors"):
-                    ui.label(
-                        "最终排版检查未通过：" + "；".join(quality["errors"])
-                    ).classes("text-negative q-mb-sm")
-                elif quality:
-                    ui.label(
-                        f'最终排版检查通过 · {quality.get("paragraph_count", 0)} 个段落'
-                        f' · {quality.get("image_count", 0)} 张图片'
-                    ).classes("text-positive q-mb-sm")
-
-                inline_assets = list((job.get("meta") or {}).get("inline_images") or [])
-                inline_warnings = list((job.get("meta") or {}).get("inline_image_warnings") or [])
-                if inline_warnings:
-                    ui.label("配图提示：" + "；".join(inline_warnings)).classes(
-                        "text-warning q-mb-sm"
-                    )
-                if inline_assets:
-                    with ui.expansion(
-                        f"正文配图（{len(inline_assets)} 张，可在写入前移除）",
-                        icon="photo_library",
-                    ).classes("w-full q-mb-sm"):
-                        for asset in inline_assets:
-                            with ui.row().classes("w-full items-center justify-between"):
-                                ui.label(
-                                    f'{asset.get("index")}. {asset.get("caption") or "正文配图"} · '
-                                    + {
-                                        "library": "公众号素材库",
-                                        "source": "原文图片",
-                                        "generated": "AI 生成",
-                                        "visual_card": "论点视觉卡片",
-                                    }.get(str(asset.get("source") or ""), "正文配图")
-                                ).classes("text-caption")
-
-                                def remove_image(
-                                    _=None,
-                                    image_index=int(asset.get("index") or 0),
-                                ) -> None:
-                                    from app.inline_images import remove_inline_image
-
-                                    latest = state.db.get_job(job_id) or {}
-                                    latest_meta = dict(latest.get("meta") or {})
-                                    latest_meta["inline_images"] = [
-                                        item for item in (latest_meta.get("inline_images") or [])
-                                        if int(item.get("index") or 0) != image_index
-                                    ]
-                                    state.db.update_job(
-                                        job_id,
-                                        html_content=remove_inline_image(
-                                            str(latest.get("html_content") or ""), image_index
-                                        ),
-                                        meta_json=latest_meta,
-                                    )
-                                    ui.notify("已移除该配图", type="positive")
-                                    render_review(
-                                        job_id,
-                                        target_host=host,
-                                        on_completed=on_completed,
-                                    )
-
-                                ui.button("移除", on_click=remove_image).props(
-                                    "flat dense color=red-7 no-caps icon=delete_outline"
-                                )
-
-                editor_template_cfg = load_config().get("editor_template") or {}
-                if editor_template_cfg.get("enabled", False):
-                    template_applied = bool(
-                        (job.get("meta") or {}).get("editor_template_applied")
-                    )
-                    if template_applied:
-                        ui.label("已套用：蓝血经营管理系统模板快照").classes(
-                            "text-positive q-mb-sm"
-                        )
-                    else:
-                        ui.label(
-                            "模板尚未同步：请在公众号编辑器中插入一次“蓝血经营管理系统模板”，"
-                            "保留“蓝血经营管理系统正文”并保存临时文章。"
-                        ).classes("text-warning")
-                        sync_template_btn = ui.button("同步模板并重新排版").props(
-                            "outline color=teal-9 no-caps dense"
-                        ).classes("q-mb-sm")
-
-                        async def sync_editor_template() -> None:
-                            _set_button_loading(sync_template_btn, True)
-                            try:
-                                def work() -> dict[str, Any]:
-                                    from app.wechat.template_snapshot import (
-                                        capture_template_snapshot,
-                                    )
-
-                                    cfg = load_config()
-                                    template_cfg = dict(
-                                        cfg.get("editor_template") or {}
-                                    )
-                                    template_cfg["_root"] = cfg.get("_root")
-                                    pipe = Pipeline(cfg)
-                                    capture_template_snapshot(
-                                        pipe._wechat_client(), template_cfg
-                                    )
-                                    return pipe.run_job(
-                                        job_id, review=True, from_step="render"
-                                    )
-
-                                await run.io_bound(work)
-                                ui.notify("模板已同步并完成重新排版", type="positive")
-                                render_review(
-                                    job_id,
-                                    target_host=host,
-                                    on_completed=on_completed,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                ui.notify(
-                                    f"同步失败：{exc}", type="negative", timeout=10000
-                                )
-                            finally:
-                                _set_button_loading(sync_template_btn, False)
-
-                        sync_template_btn.on_click(sync_editor_template)
-
-                if not titles:
-                    ui.label("没有可用标题，请到任务列表重试。").classes("text-negative")
-                    return
-
-                title_radio = ui.radio(
-                    {i: t for i, t in enumerate(titles[:10])},
-                    value=0,
-                ).classes("w-full")
-
-                subtitle_select = None
-                if subtitles:
-                    ui.label("副标题（可选，用于正文开头）").classes("q-mt-sm muted")
-                    subtitle_select = ui.select(
-                        options=["（不使用副标题）"] + subtitles[:10],
-                        value="（不使用副标题）",
-                    ).classes("w-full")
-
-                preview_title = ui.label(titles[0]).classes(
-                    "preview-article-title text-h6 text-weight-bold q-mt-md"
-                )
-                preview_box = ui.element("div").classes("preview-frame w-full q-mt-sm")
-
-                def refresh_preview() -> None:
-                    idx = int(title_radio.value or 0)
-                    t = titles[idx] if 0 <= idx < len(titles) else titles[0]
-                    preview_title.text = t
-                    preview_box.clear()
-                    with preview_box:
-                        if html:
-                            ui.html(prepare_preview_html(html), sanitize=False)
-                        else:
-                            ui.markdown(body.replace("\n", "\n\n") if body else "（无正文）")
-
-                title_radio.on_value_change(lambda _: refresh_preview())
-                refresh_preview()
-
-                layout_box = ui.column().classes("w-full q-mt-md gap-1")
-                with layout_box:
-                    ui.label("⑤ 下方图文编排（来自草稿箱「已有内容」）").classes(
-                        "text-weight-bold"
-                    )
-                    ui.label(
-                        "写入时会把草稿箱里所有标题含「广告」的条目挂上（随机排序），"
-                        "再按图片同步蓝血研究最新标题。"
-                    ).classes("muted")
-                    layout_list = ui.column().classes("w-full gap-1")
-                    with layout_list:
-                        ui.label("正在读取草稿箱可用次条…").classes("muted")
-
-                async def load_layout_preview() -> None:
-                    layout_list.clear()
-                    cfg = load_config()
-                    layout_cfg = cfg.get("layout") or {}
-                    if not layout_cfg.get("enabled", True):
-                        with layout_list:
-                            ui.label("多图文编排已关闭（config.layout.enabled=false）").classes(
-                                "muted"
-                            )
-                        return
-                    try:
-                        from app.layout import select_secondary_articles
-
-                        pipe = state.pipeline()
-                        secs = await run.io_bound(
-                            lambda: select_secondary_articles(
-                                pipe._wechat_client(),
-                                layout_cfg,
-                                exclude_titles=[str(job.get("selected_title") or "")],
-                            )
-                        )
-                        benchmark_cfg = cfg.get("benchmark") or {}
-                        if benchmark_cfg.get("enabled", False):
-                            from app.benchmark import (
-                                fetch_latest_benchmark_record,
-                                sync_secondary_titles,
-                            )
-
-                            record = await run.io_bound(
-                                lambda: fetch_latest_benchmark_record(cfg, pipe.db)
-                            )
-                            secs = await run.io_bound(
-                                lambda: sync_secondary_titles(
-                                    secs,
-                                    record,
-                                    threshold=float(
-                                        benchmark_cfg.get("image_match_threshold") or 0.90
-                                    ),
-                                    matched_only=bool(
-                                        benchmark_cfg.get("matched_only", False)
-                                    ),
-                                    follow_source_order=bool(
-                                        benchmark_cfg.get("follow_source_order", True)
-                                    ),
-                                    deduplicate_by_image=bool(
-                                        benchmark_cfg.get("deduplicate_by_image", True)
-                                    ),
-                                )
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        with layout_list:
-                            ui.label(f"读取次条失败：{exc}").classes("text-negative")
-                        return
-                    with layout_list:
-                        if not secs:
-                            ui.label(
-                                "未匹配到次条草稿。请确认草稿箱有标题含「广告」的内容，"
-                                "或在 config.yaml 的 layout.secondary_media_ids 填入草稿 media_id。"
-                            ).classes("muted")
-                            return
-                        for i, sec in enumerate(secs, start=2):
-                            with ui.element("div").classes("article-item"):
-                                raw = sec.get("_raw_title") or sec.get("title") or "未命名"
-                                clean = sec.get("title") or "未命名"
-                                ui.label(
-                                    f"第{i}条 · {clean}"
-                                ).classes("text-weight-medium")
-                                if sec.get("_benchmark_title"):
-                                    score = float(sec.get("_benchmark_image_score") or 0)
-                                    order = int(sec.get("_benchmark_order") or 0) + 1
-                                    ui.label(
-                                        f"蓝血研究广告位 {order} · 图片匹配 {score:.0%} · 已同步标题"
-                                    ).classes("text-positive")
-                                    ui.label(f"原草稿标题：{raw}").classes("muted")
-                                else:
-                                    if raw != clean:
-                                        ui.label(f"原草稿标题：{raw}（已去广告标记）").classes(
-                                            "muted"
-                                        )
-                                    ui.label("图片未匹配 · 沿用原广告标题并排在匹配项之后").classes(
-                                        "text-warning"
-                                    )
-                                mid = sec.get("_from_media_id") or ""
-                                if mid:
-                                    ui.label(f"来源草稿：{mid[:28]}…").classes("muted")
-
-                client_timer(0.05, load_layout_preview, once=True)
-
-                inject_btn = ui.button("确认并写入多图文草稿").props(
-                    "unelevated color=teal-9 no-caps"
-                ).classes("q-mt-md")
-                if body_chars < 2000:
-                    inject_btn.disable()
-                    ui.label("正文不足 2000 字，已禁止写入草稿，请重新生成。 ").classes(
-                        "text-negative q-mt-sm"
-                    )
-
-                async def inject() -> None:
-                    if state.busy:
-                        ui.notify("请稍候", type="warning")
-                        return
-                    idx = int(title_radio.value or 0)
-                    state.busy = True
-                    _set_button_loading(inject_btn, True)
-
-                    # 可选写入副标题
-                    if subtitle_select is not None:
-                        sub = str(subtitle_select.value or "")
-                        if sub and sub != "（不使用副标题）":
-                            state.db.update_job(job_id, selected_subtitle=sub)
-
-                    def work() -> dict[str, Any]:
-                        return state.pipeline().review_and_inject(
-                            job_id, title_index=idx
-                        )
-
-                    try:
-                        job2 = await run.io_bound(work)
-                        secs = (job2.get("meta") or {}).get("secondary_titles") or []
-                        tip = "、".join([str(x) for x in secs if x][:3])
-                        msg = "已写入多图文草稿箱，请到公众号后台刷新查看"
-                        if tip:
-                            msg += f"（次条：{tip}）"
-                        ui.notify(msg, type="positive", timeout=8000)
-                        if on_completed is not None:
-                            on_completed(job2)
-                            return
-                        with host:
-                            ui.label(
-                                f"已完成：#{job2.get('id')} · {job2.get('selected_title')}"
-                            ).classes("card text-weight-medium")
-                            if secs:
-                                ui.label(
-                                    "已编排次条：" + " / ".join(str(x) for x in secs if x)
-                                ).classes("muted")
-                            ui.button(
-                                "查看任务列表",
-                                on_click=lambda: tabs.set_value(tab_jobs),
-                            ).props("flat color=teal-9 no-caps")
-                    except Exception as exc:  # noqa: BLE001
-                        ui.notify(f"写入失败：{exc}", type="negative", timeout=10000)
-                    finally:
-                        state.busy = False
-                        _set_button_loading(inject_btn, False)
-
-                inject_btn.on_click(inject)
-
-    # 若已有待审核任务，启动时提示
-    pending = [
-        j
-        for j in state.db.list_jobs(20)
-        if j.get("status") == "ready_for_review"
-    ]
-    if pending:
-        with review_host:
-            ui.button(
-                f"有 {len(pending)} 篇文章待审核，前往任务中心",
-                on_click=lambda: tabs.set_value(tab_jobs),
-            ).props("outline color=teal-9 no-caps")
 
 
 def _build_accounts_panel(
@@ -2205,45 +1644,75 @@ def _build_accounts_panel(
     def open_editor(account_id: str | None = None) -> None:
         record = state.db.get_official_account(account_id) if account_id else None
         model_options = state.model_options(include_default=False)
-        with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width:680px"):
+        with (
+            ui.dialog() as dialog,
+            ui.card().classes("w-full").style("max-width:680px"),
+        ):
             ui.label("编辑公众号" if record else "添加公众号").classes(
                 "text-h6 text-weight-bold"
             )
             if not model_options:
                 ui.label(
-                    "请先到“设置 → 模型管理 → 文章模型”添加并启用至少一个模型。 "
-                ).classes(
-                    "text-warning"
+                    "当前还没有可用的文章模型，仍可先保存公众号，之后再回来绑定模型。"
+                ).classes("text-warning")
+            name_in = (
+                ui.input(
+                    "公众号名称",
+                    value=str((record or {}).get("name") or ""),
+                    placeholder="例如：品牌主账号",
                 )
-            name_in = ui.input(
-                "公众号名称",
-                value=str((record or {}).get("name") or ""),
-                placeholder="例如：品牌主账号",
-            ).classes("w-full").props("outlined stack-label")
-            app_id_in = ui.input(
-                "公众号 AppID",
-                value=str((record or {}).get("app_id") or ""),
-                placeholder="wx...",
-            ).classes("w-full").props("outlined stack-label")
-            secret_in = ui.input(
-                "AppSecret" + ("（留空表示不修改）" if record else ""),
-                password=True,
-                password_toggle_button=True,
-            ).classes("w-full").props("outlined stack-label autocomplete=new-password")
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
+            app_id_in = (
+                ui.input(
+                    "公众号 AppID",
+                    value=str((record or {}).get("app_id") or ""),
+                    placeholder="wx...",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
+            secret_in = (
+                ui.input(
+                    "AppSecret" + ("（留空表示不修改）" if record else ""),
+                    password=True,
+                    password_toggle_button=True,
+                )
+                .classes("w-full")
+                .props("outlined stack-label autocomplete=new-password")
+            )
             current_model = str((record or {}).get("model_id") or "")
-            model_in = ui.select(
-                options=model_options,
-                value=current_model if current_model in model_options else None,
-                label="该公众号固定使用的模型",
-            ).classes("w-full").props("outlined stack-label")
-            enabled_in = ui.switch("启用", value=bool((record or {}).get("enabled", True)))
+            model_in = (
+                ui.select(
+                    options={"": "暂不绑定模型（可稍后选择）", **model_options},
+                    value=current_model if current_model in model_options else "",
+                    label="该公众号使用的文章模型（可选）",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
+            state.register_model_select(
+                model_in,
+                purpose="text",
+                default_label="暂不绑定模型（可稍后选择）",
+                owner=dialog,
+            )
+            enabled_in = ui.switch(
+                "启用", value=bool((record or {}).get("enabled", True))
+            )
+            priority_in = ui.switch(
+                "高优先级公众号",
+                value=int((record or {}).get("review_priority") or 0) > 0,
+            )
             ui.label(
-                "一个公众号绑定一个模型；同一篇选题发给多个公众号时，会分别调用各自绑定的模型改写。"
+                "可以先保存公众号再配置模型；未绑定文章模型前，该公众号不会进入文章生成目标列表。"
             ).classes("muted")
+            ui.label("高优先级公众号的文章会排在审核收件箱前面。").classes("muted")
 
             async def submit() -> None:
                 try:
-                    save_account(
+                    saved_account_id = save_account(
                         state.db,
                         account_id=account_id,
                         name=str(name_in.value or ""),
@@ -2252,20 +1721,27 @@ def _build_accounts_panel(
                         model_id=str(model_in.value or ""),
                         enabled=bool(enabled_in.value),
                     )
+                    saved_record = state.db.get_official_account(saved_account_id)
+                    if saved_record:
+                        saved_record["review_priority"] = (
+                            100 if bool(priority_in.value) else 0
+                        )
+                        state.db.upsert_official_account(saved_record)
                     dialog.close()
                     render_accounts()
                     state.refresh_account_selects()
                     ui.notify("公众号配置已保存", type="positive")
-                except Exception as exc:  # noqa: BLE001
-                    ui.notify(str(exc), type="negative")
+                except Exception as exc:
+                    ui.notify(
+                        sanitize_failure_text(exc),
+                        type="negative",
+                    )
 
             with ui.row().classes("w-full justify-end"):
                 ui.button("取消", on_click=dialog.close).props("flat no-caps")
-                save_btn = ui.button("保存", on_click=submit).props(
+                ui.button("保存", on_click=submit).props(
                     "unelevated color=teal-9 no-caps"
                 )
-                if not model_options:
-                    save_btn.disable()
         dialog.open()
 
     def open_layout_editor(account_id: str) -> None:
@@ -2285,25 +1761,37 @@ def _build_accounts_panel(
             key: {} for key in ("body", "title", "argument", "quote", "list", "meta")
         }
 
-        with ui.dialog() as dialog, ui.card().classes("w-full").style(
-            "max-width:960px;max-height:92vh;overflow-y:auto"
+        with (
+            ui.dialog() as dialog,
+            ui.card()
+            .classes("w-full")
+            .style("max-width:960px;max-height:92vh;overflow-y:auto"),
         ):
-            ui.label(f'排版管理 · {record["name"]}').classes("text-h6 text-weight-bold")
+            ui.label(f"排版管理 · {record['name']}").classes("text-h6 text-weight-bold")
             ui.label(
                 "按正文元素逐项定义样式。保存后只影响这个公众号，新生成的文章会自动套用。"
             ).classes("muted")
             preview_host = ui.column().classes("w-full")
 
-            break_mode = ui.select(
-                options={"blank_line": "空行分段（推荐）", "each_line": "每一行都换成新段落"},
-                value=layout["paragraph_break_mode"],
-                label="段落换行规则",
-            ).classes("w-full").props("outlined stack-label")
+            break_mode = (
+                ui.select(
+                    options={
+                        "blank_line": "空行分段（推荐）",
+                        "each_line": "每一行都换成新段落",
+                    },
+                    value=layout["paragraph_break_mode"],
+                    label="段落换行规则",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
 
             def text_field(section: str, key: str, label: str) -> None:
-                fields[section][key] = ui.input(
-                    label, value=str(layout[section][key])
-                ).classes("w-full").props("outlined dense stack-label")
+                fields[section][key] = (
+                    ui.input(label, value=str(layout[section][key]))
+                    .classes("w-full")
+                    .props("outlined dense stack-label")
+                )
 
             class ColorFieldValue:
                 def __init__(self, picker: Any, transparent: Any | None = None) -> None:
@@ -2328,12 +1816,14 @@ def _build_accounts_panel(
                 picker_value = "#ffffff" if is_transparent else current
                 with ui.column().classes("w-full gap-1"):
                     with ui.row().classes("w-full items-center no-wrap gap-2"):
-                        picker = ui.color_input(
-                            label=label,
-                            value=picker_value,
-                            preview=True,
-                        ).classes("col").props(
-                            "outlined dense stack-label readonly"
+                        picker = (
+                            ui.color_input(
+                                label=label,
+                                value=picker_value,
+                                preview=True,
+                            )
+                            .classes("col")
+                            .props("outlined dense stack-label readonly")
                         )
                         transparent_switch = None
                         if allow_transparent:
@@ -2351,9 +1841,8 @@ def _build_accounts_panel(
                         )
 
                 def update_current_color(_: Any = None) -> None:
-                    transparent = (
-                        transparent_switch is not None
-                        and bool(transparent_switch.value)
+                    transparent = transparent_switch is not None and bool(
+                        transparent_switch.value
                     )
                     if transparent:
                         current_swatch.style(
@@ -2371,18 +1860,29 @@ def _build_accounts_panel(
                 if transparent_switch is not None:
                     transparent_switch.on_value_change(update_current_color)
                 update_current_color()
-                fields[section][key] = ColorFieldValue(
-                    picker, transparent_switch
-                )
+                fields[section][key] = ColorFieldValue(picker, transparent_switch)
 
             def align_field(section: str) -> None:
-                fields[section]["alignment"] = ui.select(
-                    {"left": "左对齐", "center": "居中", "right": "右对齐", "justify": "两端对齐"},
-                    value=layout[section]["alignment"],
-                    label="对齐方式",
-                ).classes("w-full").props("outlined dense stack-label")
+                fields[section]["alignment"] = (
+                    ui.select(
+                        {
+                            "left": "左对齐",
+                            "center": "居中",
+                            "right": "右对齐",
+                            "justify": "两端对齐",
+                        },
+                        value=layout[section]["alignment"],
+                        label="对齐方式",
+                    )
+                    .classes("w-full")
+                    .props("outlined dense stack-label")
+                )
 
-            with ui.expansion("正文段落", icon="notes").classes("w-full").props("default-opened"):
+            with (
+                ui.expansion("正文段落", icon="notes")
+                .classes("w-full")
+                .props("default-opened")
+            ):
                 with ui.grid(columns=2).classes("w-full gap-3"):
                     text_field("body", "font_size", "字号（如 16px）")
                     color_field("body", "color", "文字颜色")
@@ -2400,7 +1900,9 @@ def _build_accounts_panel(
                     text_field("title", "spacing_before", "标题前间距")
                     text_field("title", "spacing_after", "标题后间距")
                     align_field("title")
-                    fields["title"]["bold"] = ui.switch("加粗", value=bool(layout["title"]["bold"]))
+                    fields["title"]["bold"] = ui.switch(
+                        "加粗", value=bool(layout["title"]["bold"])
+                    )
 
             with ui.expansion("论点标题", icon="format_quote").classes("w-full"):
                 with ui.grid(columns=2).classes("w-full gap-3"):
@@ -2413,7 +1915,9 @@ def _build_accounts_panel(
                         "argument", "background", "背景色", allow_transparent=True
                     )
                     color_field(
-                        "argument", "border_color", "左侧强调线颜色",
+                        "argument",
+                        "border_color",
+                        "左侧强调线颜色",
                         allow_transparent=True,
                     )
                     align_field("argument")
@@ -2421,7 +1925,9 @@ def _build_accounts_panel(
                         "加粗", value=bool(layout["argument"]["bold"])
                     )
 
-            with ui.expansion("引用块", icon="format_indent_increase").classes("w-full"):
+            with ui.expansion("引用块", icon="format_indent_increase").classes(
+                "w-full"
+            ):
                 with ui.grid(columns=2).classes("w-full gap-3"):
                     text_field("quote", "font_size", "字号")
                     color_field("quote", "color", "文字颜色")
@@ -2441,7 +1947,8 @@ def _build_accounts_panel(
                     color_field("list", "marker_color", "序号 / 圆点颜色")
                     for key, label in (
                         ("line_height", "行高"),
-                        ("indent", "列表缩进"), ("spacing_after", "列表项间距"),
+                        ("indent", "列表缩进"),
+                        ("spacing_after", "列表项间距"),
                     ):
                         text_field("list", key, label)
 
@@ -2451,8 +1958,10 @@ def _build_accounts_panel(
                 )
                 with ui.grid(columns=2).classes("w-full gap-3"):
                     for key, label in (
-                        ("byline_author", "作者"), ("byline_source", "来源"),
-                        ("byline_contact", "联系方式"), ("footer_follow_text", "页尾关注文案"),
+                        ("byline_author", "作者"),
+                        ("byline_source", "来源"),
+                        ("byline_contact", "联系方式"),
+                        ("footer_follow_text", "页尾关注文案"),
                     ):
                         text_field("meta", key, label)
                 fields["meta"]["show_footer_follow"] = ui.switch(
@@ -2471,7 +1980,11 @@ def _build_accounts_panel(
                 try:
                     current_layout = collect_layout()
                 except ValueError as exc:
-                    ui.notify(str(exc), type="negative", timeout=8000)
+                    ui.notify(
+                        sanitize_failure_text(exc),
+                        type="negative",
+                        timeout=8000,
+                    )
                     return
                 cfg = dict(effective_config)
                 template_cfg = dict(cfg.get("template") or {})
@@ -2508,9 +2021,9 @@ def _build_accounts_panel(
                 with preview_host:
                     ui.label("最终公众号成品预览").classes("text-weight-bold")
                     if snapshot:
-                        ui.label(
-                            f"已合并该公众号模板：{snapshot.path.name}"
-                        ).classes("text-positive text-caption")
+                        ui.label(f"已合并该公众号模板：{snapshot.path.name}").classes(
+                            "text-positive text-caption"
+                        )
                     elif editor_cfg.get("enabled", False):
                         ui.label(
                             "该公众号模板快照尚不存在，当前仅预览正文排版；同步模板后会显示完整成品。"
@@ -2529,7 +2042,7 @@ def _build_accounts_panel(
                     dialog.close()
                     render_accounts()
                     ui.notify("该公众号的排版方案已保存", type="positive")
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     ui.notify(f"保存失败：{exc}", type="negative")
 
             with ui.row().classes("w-full justify-between q-mt-md"):
@@ -2566,22 +2079,20 @@ def _build_accounts_panel(
 
         def account_wechat_client() -> WeChatClient:
             wechat_cfg = effective_config.get("wechat") or {}
-            auth = WeChatAuth(
+            return build_wechat_client(
+                effective_config,
+                state.db,
                 app_id=str(wechat_cfg.get("app_id") or ""),
                 app_secret=str(wechat_cfg.get("app_secret") or ""),
-                db=state.db,
-            )
-            return WeChatClient(
-                get_token=auth.get_access_token,
-                refresh_token=lambda: auth.get_access_token(force_refresh=True),
             )
 
-        with ui.dialog() as dialog, ui.card().classes("w-full").style(
-            "max-width:760px;max-height:88vh;overflow-y:auto"
+        with (
+            ui.dialog() as dialog,
+            ui.card()
+            .classes("w-full")
+            .style("max-width:760px;max-height:88vh;overflow-y:auto"),
         ):
-            ui.label(f'模板管理 · {record["name"]}').classes(
-                "text-h6 text-weight-bold"
-            )
+            ui.label(f"模板管理 · {record['name']}").classes("text-h6 text-weight-bold")
             ui.label(
                 "仅读取这个公众号草稿箱中标题包含“模板”的草稿；选择一个标题作为当前模板。"
             ).classes("muted")
@@ -2589,15 +2100,19 @@ def _build_accounts_panel(
             ui.label(f"当前模板：{current_title or '未选择'}").classes(
                 "text-positive text-weight-medium"
             )
-            placeholder_input = ui.input(
-                "替换正文字样",
-                value=str(
-                    layout["editor_template"].get("placeholder")
-                    or editor_cfg.get("placeholder")
-                    or "公众号正文"
-                ),
-                placeholder="例如：蓝血经营管理系统正文",
-            ).classes("w-full").props("outlined stack-label")
+            placeholder_input = (
+                ui.input(
+                    "替换正文字样",
+                    value=str(
+                        layout["editor_template"].get("placeholder")
+                        or editor_cfg.get("placeholder")
+                        or "公众号正文"
+                    ),
+                    placeholder="例如：蓝血经营管理系统正文",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
             ui.label(
                 "生成文章时，模板中与该字样完全一致的内容会被替换为生成后的正文。"
             ).classes("muted text-caption")
@@ -2634,13 +2149,17 @@ def _build_accounts_panel(
                     candidates.clear()
                     candidates.update({item.key: item for item in rows})
                     current_key = (
-                        f'{layout["editor_template"].get("selected_media_id") or ""}:'
-                        f'{int(layout["editor_template"].get("selected_article_index") or 0)}'
+                        f"{layout['editor_template'].get('selected_media_id') or ''}:"
+                        f"{int(layout['editor_template'].get('selected_article_index') or 0)}"
                     )
                     preferred = current_key if current_key in candidates else None
                     options = {
                         item.key: item.title
-                        + ("" if item.has_placeholder else "（缺少正文占位符，不能应用）")
+                        + (
+                            ""
+                            if item.has_placeholder
+                            else "（缺少正文占位符，不能应用）"
+                        )
                         for item in rows
                     }
                     with candidate_host:
@@ -2650,13 +2169,13 @@ def _build_accounts_panel(
                                 options, value=preferred
                             ).classes("w-full")
                         else:
-                            ui.label(
-                                "没有找到标题包含“模板”的草稿。"
-                            ).classes("text-warning")
+                            ui.label("没有找到标题包含“模板”的草稿。").classes(
+                                "text-warning"
+                            )
                     status_label.text = f"共找到 {len(rows)} 个模板草稿"
                     if rows:
                         apply_btn.enable()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     status_label.text = f"读取失败：{exc}"
                     status_label.classes("text-negative")
                 finally:
@@ -2692,7 +2211,7 @@ def _build_accounts_panel(
                     dialog.close()
                     render_accounts()
                     ui.notify(f"已选择模板：{candidate.title}", type="positive")
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     ui.notify(f"应用模板失败：{exc}", type="negative", timeout=10000)
                 finally:
                     _set_button_loading(apply_btn, False)
@@ -2713,10 +2232,10 @@ def _build_accounts_panel(
             stored = {}
         layout = normalize_layout(stored)
         settings = layout["inline_images"]
-        image_models = {
-            str(item["id"]): f'{item["name"]} · {item["model"]}'
-            for item in public_models(state.db, enabled_only=True, purpose="image")
-        }
+        image_models = state.model_options(
+            include_default=False,
+            purpose="image",
+        )
         model_value = str(settings.get("image_model_id") or "")
         if model_value not in image_models:
             model_value = ""
@@ -2732,39 +2251,58 @@ def _build_accounts_panel(
             template_id: str(item["name"])
             for template_id, item in prompt_templates.items()
         }
-        prompt_mode_value = str(
-            settings.get("prompt_mode") or PROMPT_MODE_DEFAULT
-        )
+        prompt_mode_value = str(settings.get("prompt_mode") or PROMPT_MODE_DEFAULT)
         prompt_template_value = str(settings.get("prompt_template_id") or "")
         if prompt_template_value not in prompt_templates:
             prompt_template_value = ""
 
-        with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width:720px"):
-            ui.label(f'正文与封面生图配置 · {record["name"]}').classes("text-h6 text-weight-bold")
+        with (
+            ui.dialog() as dialog,
+            ui.card().classes("w-full").style("max-width:720px"),
+        ):
+            ui.label(f"正文与封面生图配置 · {record['name']}").classes(
+                "text-h6 text-weight-bold"
+            )
             ui.label(
                 "每个公众号可绑定自己的生图智能体。系统会识别正文中的小标题论点，"
                 "按实际论点数量一一生成，并在每个论点最后一个段落之后插图。"
                 "封面主图会同时参考最终标题、正文主题和核心论点。"
             ).classes("muted")
-            enabled = ui.switch("启用正文生图智能体", value=bool(settings.get("enabled")))
+            enabled = ui.switch(
+                "启用正文生图智能体", value=bool(settings.get("enabled"))
+            )
             generate_cover = ui.switch(
                 "使用同一智能体生成封面主图",
                 value=bool(settings.get("generate_cover", True)),
             )
-            source = ui.select(
-                {
-                    "generate": "每个论点均由生图智能体生成（推荐，避免来源 Logo）",
-                    "hybrid": "优先通过过滤的原文/素材图片，缺少时智能生成",
-                    "library": "仅使用该公众号素材库",
-                },
-                value=str(settings.get("source_mode") or "generate"),
-                label="配图来源",
-            ).classes("w-full").props("outlined stack-label")
-            model_select = ui.select(
-                {"": "不配置图片生成模型", **image_models},
-                value=model_value,
-                label="该公众号使用的生图智能体",
-            ).classes("w-full").props("outlined stack-label")
+            source = (
+                ui.select(
+                    {
+                        "generate": "每个论点均由生图智能体生成（推荐，避免来源 Logo）",
+                        "hybrid": "优先通过过滤的原文/素材图片，缺少时智能生成",
+                        "library": "仅使用该公众号素材库",
+                    },
+                    value=str(settings.get("source_mode") or "generate"),
+                    label="配图来源",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
+            model_select = (
+                ui.select(
+                    {"": "不配置图片生成模型", **image_models},
+                    value=model_value,
+                    label="该公众号使用的生图智能体",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
+            state.register_model_select(
+                model_select,
+                purpose="image",
+                default_label="不配置图片生成模型",
+                owner=dialog,
+            )
             if not image_models:
                 ui.label(
                     "还没有生图智能体。请先到“设置 → 生图智能体”添加并生成测试图。"
@@ -2774,55 +2312,92 @@ def _build_accounts_panel(
                 value="每个正文论点的最后一个段落之后",
             ).classes("w-full").props("outlined stack-label readonly")
             with ui.grid(columns=2).classes("w-full gap-3"):
-                min_count = ui.number(
-                    "无小标题时最少图片数",
-                    value=int(settings.get("min_count", 2)),
-                    min=0,
-                    max=8,
-                ).classes("w-full").props("outlined stack-label")
-                max_count = ui.number(
-                    "无小标题时最多图片数",
-                    value=int(settings.get("max_count", 6)),
-                    min=1,
-                    max=8,
-                ).classes("w-full").props("outlined stack-label")
-                min_spacing = ui.number(
-                    "最小间隔（字）", value=int(settings.get("min_spacing", 600)), min=300
-                ).classes("w-full").props("outlined stack-label")
-                max_spacing = ui.number(
-                    "目标最大间隔（字）", value=int(settings.get("max_spacing", 900)), min=300
-                ).classes("w-full").props("outlined stack-label")
-                concurrency = ui.number(
-                    "同时生图任务数",
-                    value=int(settings.get("generation_concurrency", 2)),
-                    min=1,
-                    max=4,
-                ).classes("w-full").props("outlined stack-label")
-            prompt_mode = ui.select(
-                {
-                    PROMPT_MODE_DEFAULT: "使用默认模板（不使用用户自定义模板）",
-                    PROMPT_MODE_TEMPLATE: "使用自定义提示词模板",
-                },
-                value=(
-                    prompt_mode_value
-                    if prompt_mode_value in {PROMPT_MODE_DEFAULT, PROMPT_MODE_TEMPLATE}
-                    else PROMPT_MODE_DEFAULT
-                ),
-                label="提示词配置方式",
-            ).classes("w-full").props("outlined stack-label")
-            prompt_template = ui.select(
-                {"": "请选择图片提示词模板", **prompt_template_options},
-                value=prompt_template_value,
-                label="公众号使用的图片提示词模板",
-            ).classes("w-full").props("outlined stack-label options-dense")
+                min_count = (
+                    ui.number(
+                        "无小标题时最少图片数",
+                        value=int(settings.get("min_count", 2)),
+                        min=0,
+                        max=8,
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label")
+                )
+                max_count = (
+                    ui.number(
+                        "无小标题时最多图片数",
+                        value=int(settings.get("max_count", 6)),
+                        min=1,
+                        max=8,
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label")
+                )
+                min_spacing = (
+                    ui.number(
+                        "最小间隔（字）",
+                        value=int(settings.get("min_spacing", 600)),
+                        min=300,
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label")
+                )
+                max_spacing = (
+                    ui.number(
+                        "目标最大间隔（字）",
+                        value=int(settings.get("max_spacing", 900)),
+                        min=300,
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label")
+                )
+                concurrency = (
+                    ui.number(
+                        "同时生图任务数",
+                        value=int(settings.get("generation_concurrency", 2)),
+                        min=1,
+                        max=4,
+                    )
+                    .classes("w-full")
+                    .props("outlined stack-label")
+                )
+            prompt_mode = (
+                ui.select(
+                    {
+                        PROMPT_MODE_DEFAULT: "使用默认模板（不使用用户自定义模板）",
+                        PROMPT_MODE_TEMPLATE: "使用自定义提示词模板",
+                    },
+                    value=(
+                        prompt_mode_value
+                        if prompt_mode_value
+                        in {PROMPT_MODE_DEFAULT, PROMPT_MODE_TEMPLATE}
+                        else PROMPT_MODE_DEFAULT
+                    ),
+                    label="提示词配置方式",
+                )
+                .classes("w-full")
+                .props("outlined stack-label")
+            )
+            prompt_template = (
+                ui.select(
+                    {"": "请选择图片提示词模板", **prompt_template_options},
+                    value=prompt_template_value,
+                    label="公众号使用的图片提示词模板",
+                )
+                .classes("w-full")
+                .props("outlined stack-label options-dense")
+            )
             if not prompt_templates:
                 ui.label(
                     "还没有自定义图片模板，可到“设置 → 创作方案 → 写作与图片规则”中添加。"
                 ).classes("text-warning text-caption")
-            prompt_preview = ui.textarea(
-                "当前生效提示词预览",
-                value="默认模板由系统代码维护，内容不在界面展示。",
-            ).classes("w-full").props("outlined rows=4 stack-label readonly")
+            prompt_preview = (
+                ui.textarea(
+                    "当前生效提示词预览",
+                    value="默认模板由系统代码维护，内容不在界面展示。",
+                )
+                .classes("w-full")
+                .props("outlined rows=4 stack-label readonly")
+            )
 
             def sync_prompt_selection() -> None:
                 use_template = str(prompt_mode.value or "") == PROMPT_MODE_TEMPLATE
@@ -2868,22 +2443,24 @@ def _build_accounts_panel(
                         and str(prompt_template.value or "") not in prompt_templates
                     ):
                         raise ValueError("请选择一个已启用的提示词模板")
+                    current_image_models = state.model_options(
+                        include_default=False,
+                        purpose="image",
+                    )
                     if (
-                        (
-                            bool(generate_cover.value)
-                            or (
-                                bool(enabled.value)
-                                and str(source.value or "generate") in {"generate", "hybrid"}
-                            )
+                        bool(generate_cover.value)
+                        or (
+                            bool(enabled.value)
+                            and str(source.value or "generate")
+                            in {"generate", "hybrid"}
                         )
-                        and str(model_select.value or "") not in image_models
-                    ):
+                    ) and str(model_select.value or "") not in current_image_models:
                         raise ValueError("请先选择一个已启用的生图智能体")
                     save_account_layout(state.db, account_id, layout)
                     dialog.close()
                     render_accounts()
                     ui.notify("该公众号的生图智能体配置已保存", type="positive")
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     ui.notify(f"保存失败：{exc}", type="negative")
 
             with ui.row().classes("w-full justify-end"):
@@ -2906,7 +2483,9 @@ def _build_accounts_panel(
 
             with ui.row().classes("justify-end w-full"):
                 ui.button("取消", on_click=confirm.close).props("flat no-caps")
-                ui.button("删除", on_click=remove).props("unelevated color=red-7 no-caps")
+                ui.button("删除", on_click=remove).props(
+                    "unelevated color=red-7 no-caps"
+                )
         confirm.open()
 
     def set_enabled(account_id: str, enabled: bool) -> None:
@@ -2935,11 +2514,11 @@ def _build_accounts_panel(
             )
             purpose_label = "文章" if purpose == ARTICLE_PROMPT_PURPOSE else "图片"
             ui.notify(
-                f'{record["name"]} 的{purpose_label}提示词已使用：{prompt_name}',
+                f"{record['name']} 的{purpose_label}提示词已使用：{prompt_name}",
                 type="positive",
             )
             render_accounts()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             ui.notify(f"保存提示词配置失败：{exc}", type="negative")
             render_accounts()
 
@@ -2950,10 +2529,10 @@ def _build_accounts_panel(
                 profile_id=profile_id,
             )
             ui.notify(
-                f'默认评审方案已设为：{selected.get("profile_name") or profile_id}',
+                f"默认评审方案已设为：{selected.get('profile_name') or profile_id}",
                 type="positive",
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             ui.notify(f"保存默认评审方案失败：{exc}", type="negative")
             render_accounts()
 
@@ -2965,24 +2544,23 @@ def _build_accounts_panel(
                 account_id,
                 plan_id,
             )
-            template_result = dict(
-                selected.get("draft_template_application") or {}
-            )
+            template_result = dict(selected.get("draft_template_application") or {})
             template_message = str(template_result.get("message") or "").strip()
             ui.notify(
-                f'已应用创作方案：{(selected.get("plan") or {}).get("name") or plan_id}'
+                f"已应用创作方案：{(selected.get('plan') or {}).get('name') or plan_id}"
                 + (f"；{template_message}" if template_message else ""),
                 type="positive",
                 timeout=10000 if template_message else 5000,
             )
             render_accounts()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             ui.notify(f"应用创作方案失败：{exc}", type="negative", timeout=10000)
             render_accounts()
 
     async def test_account_connection(account_id: str, button: Any) -> None:
         _set_button_loading(button, True, "正在验证公众号凭证和接口权限…")
         try:
+
             def verify() -> None:
                 cfg, _ = apply_account_selection(
                     load_config(),
@@ -2991,15 +2569,16 @@ def _build_accounts_panel(
                     allow_disabled=True,
                 )
                 wechat_cfg = cfg.get("wechat") or {}
-                WeChatAuth(
+                build_wechat_auth(
+                    cfg,
+                    state.db,
                     app_id=str(wechat_cfg.get("app_id") or ""),
                     app_secret=str(wechat_cfg.get("app_secret") or ""),
-                    db=state.db,
                 ).get_access_token(force_refresh=True)
 
             await run.io_bound(verify)
             ui.notify("公众号连接正常，凭证可以调用微信接口", type="positive")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             ui.notify(f"公众号连接失败：{exc}", type="negative", timeout=12000)
         finally:
             _set_button_loading(button, False)
@@ -3038,14 +2617,17 @@ def _build_accounts_panel(
             if bool(plan.get("available", True))
         ]
         creation_plan_options = {
-            str(plan["id"]): str(plan["name"])
-            for plan in available_creation_plans
+            str(plan["id"]): str(plan["name"]) for plan in available_creation_plans
         }
         latest_account_errors: dict[str, str] = {}
         for job in state.db.list_jobs(100):
             meta = job.get("meta") or {}
             account_id = str(meta.get("official_account_id") or "")
-            if account_id and job.get("error") and account_id not in latest_account_errors:
+            if (
+                account_id
+                and job.get("error")
+                and account_id not in latest_account_errors
+            ):
                 latest_account_errors[account_id] = str(job["error"])
         with host:
             with ui.element("div").classes("card w-full"):
@@ -3065,7 +2647,9 @@ def _build_accounts_panel(
             if not accounts:
                 with ui.element("div").classes("card w-full"):
                     ui.label("尚未添加公众号").classes("text-weight-medium")
-                    ui.label("请先添加模型，再添加公众号并完成一对一绑定。 ").classes("muted")
+                    ui.label("可以直接添加公众号，文章模型也可以稍后再绑定。").classes(
+                        "muted"
+                    )
                 return
 
             for item in accounts:
@@ -3075,7 +2659,7 @@ def _build_accounts_panel(
                     account_creation_default = (
                         creation_plan_service.get_account_default(account_id)
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     account_creation_default = {
                         "bound": False,
                         "plan_id": "",
@@ -3097,9 +2681,7 @@ def _build_accounts_panel(
                 article_prompt_settings = dict(
                     account_layout.get("article_prompt") or {}
                 )
-                inline_settings = dict(
-                    account_layout.get("inline_images") or {}
-                )
+                inline_settings = dict(account_layout.get("inline_images") or {})
                 article_prompt_selection = PROMPT_MODE_DEFAULT
                 if (
                     str(
@@ -3125,14 +2707,10 @@ def _build_accounts_panel(
                     )
                 try:
                     review_default = (
-                        review_service.get_account_editorial_review_default(
-                            account_id
-                        )
+                        review_service.get_account_editorial_review_default(account_id)
                     )
-                    review_profile_value = str(
-                        review_default.get("profile_id") or ""
-                    )
-                except Exception:  # noqa: BLE001
+                    review_profile_value = str(review_default.get("profile_id") or "")
+                except Exception:
                     review_profile_value = ""
                 if review_profile_value not in review_profile_options:
                     review_profile_value = next(
@@ -3145,27 +2723,36 @@ def _build_accounts_panel(
                     if account_creation_default.get("bound")
                     else "沿用原有单项配置"
                 )
-                if (
-                    account_creation_default.get("bound")
-                    and not account_creation_default.get("in_sync", True)
-                ):
+                if account_creation_default.get(
+                    "bound"
+                ) and not account_creation_default.get("in_sync", True):
                     creation_plan_summary += "（有单项调整）"
                 with ui.element("div").classes("card w-full"):
                     with ui.row().classes("w-full items-center justify-between"):
                         with ui.column().classes("gap-0").style("min-width:0;flex:1"):
-                            ui.label(str(item["name"])).classes("text-weight-bold")
+                            with ui.row().classes("items-center gap-2"):
+                                ui.label(str(item["name"])).classes("text-weight-bold")
+                                if int(item.get("review_priority") or 0) > 0:
+                                    ui.badge("审核优先").props("color=deep-orange-7")
                             ui.label(
-                                f'{"已启用" if item["enabled"] else "已停用"}'
-                                f' · 模型：{item["model_name"]}'
-                                f' · {"专属排版" if item.get("has_custom_layout") else "默认排版"}'
+                                f"{'已启用' if item['enabled'] else '已停用'}"
+                                f" · 模型：{item['model_name']}"
+                                f" · {'专属排版' if item.get('has_custom_layout') else '默认排版'}"
                             ).classes("muted")
-                            ui.label(
-                                f"创作方案：{creation_plan_summary}"
-                            ).classes("muted text-caption")
-                            ui.label(
-                                "AppID 与 AppSecret 已安全保存"
-                            ).classes("text-positive text-caption")
-                            if "40125" in account_error or "invalid appsecret" in account_error.lower():
+                            ui.label(f"创作方案：{creation_plan_summary}").classes(
+                                "muted text-caption"
+                            )
+                            ui.label("AppID 与 AppSecret 已安全保存").classes(
+                                "text-positive text-caption"
+                            )
+                            if not item.get("has_model"):
+                                ui.label(
+                                    "尚未绑定文章模型：可以测试公众号连接，但暂不能生成文章。"
+                                ).classes("text-warning text-caption")
+                            if (
+                                "40125" in account_error
+                                or "invalid appsecret" in account_error.lower()
+                            ):
                                 ui.label(
                                     "账号不可用：AppSecret 无效（微信错误 40125），请进入管理更新。"
                                 ).classes("text-negative text-caption")
@@ -3179,8 +2766,8 @@ def _build_accounts_panel(
                                 icon="wifi_tethering",
                             ).props("flat dense color=teal-9 no-caps")
                             test_btn.on_click(
-                                lambda _=None, aid=account_id, btn=test_btn: test_account_connection(
-                                    aid, btn
+                                lambda _=None, aid=account_id, btn=test_btn: (
+                                    test_account_connection(aid, btn)
                                 )
                             )
                             with ui.button(icon="more_horiz").props(
@@ -3189,8 +2776,8 @@ def _build_accounts_panel(
                                 with ui.menu():
                                     ui.menu_item(
                                         "删除公众号",
-                                        on_click=lambda _=None, aid=account_id, n=str(item["name"]): confirm_delete(
-                                            aid, n
+                                        on_click=lambda _=None, aid=account_id, n=str(item["name"]): (
+                                            confirm_delete(aid, n)
                                         ),
                                     )
                             enabled_switch = ui.switch(
@@ -3205,12 +2792,14 @@ def _build_accounts_panel(
                         "创作方案：一次绑定写作规则、排版、图片与封面、"
                         "公众号专属草稿模板和默认 AI 评审"
                     ).classes("text-weight-medium q-mt-md")
-                    creation_plan_select = ui.select(
-                        creation_plan_options,
-                        value=account_creation_plan_id or None,
-                        label="公众号默认创作方案",
-                    ).classes("w-full q-mt-sm").props(
-                        "outlined dense stack-label options-dense"
+                    creation_plan_select = (
+                        ui.select(
+                            creation_plan_options,
+                            value=account_creation_plan_id or None,
+                            label="公众号默认创作方案",
+                        )
+                        .classes("w-full q-mt-sm")
+                        .props("outlined dense stack-label options-dense")
                     )
                     creation_plan_select.on_value_change(
                         lambda event, aid=account_id: set_account_creation_plan(
@@ -3224,19 +2813,23 @@ def _build_accounts_panel(
                     with ui.grid(columns=2).classes(
                         "w-full gap-3 q-mt-sm"
                     ) as prompt_grid:
-                        article_prompt_select = ui.select(
-                            article_prompt_template_options,
-                            value=article_prompt_selection,
-                            label="文章提示词模板",
-                        ).classes("w-full").props(
-                            "outlined dense stack-label options-dense"
+                        article_prompt_select = (
+                            ui.select(
+                                article_prompt_template_options,
+                                value=article_prompt_selection,
+                                label="文章提示词模板",
+                            )
+                            .classes("w-full")
+                            .props("outlined dense stack-label options-dense")
                         )
-                        image_prompt_select = ui.select(
-                            image_prompt_template_options,
-                            value=image_prompt_selection,
-                            label="图片提示词模板",
-                        ).classes("w-full").props(
-                            "outlined dense stack-label options-dense"
+                        image_prompt_select = (
+                            ui.select(
+                                image_prompt_template_options,
+                                value=image_prompt_selection,
+                                label="图片提示词模板",
+                            )
+                            .classes("w-full")
+                            .props("outlined dense stack-label options-dense")
                         )
                     article_prompt_select.on_value_change(
                         lambda event, aid=account_id: set_account_prompt_template(
@@ -3252,12 +2845,14 @@ def _build_accounts_panel(
                             str(event.value or PROMPT_MODE_DEFAULT),
                         )
                     )
-                    review_profile_select = ui.select(
-                        review_profile_options,
-                        value=review_profile_value,
-                        label="默认 AI 评审方案",
-                    ).classes("w-full q-mt-sm").props(
-                        "outlined dense stack-label options-dense"
+                    review_profile_select = (
+                        ui.select(
+                            review_profile_options,
+                            value=review_profile_value,
+                            label="默认 AI 评审方案",
+                        )
+                        .classes("w-full q-mt-sm")
+                        .props("outlined dense stack-label options-dense")
                     )
                     review_profile_select.on_value_change(
                         lambda event, aid=account_id: set_account_review_profile(
@@ -3265,9 +2860,9 @@ def _build_accounts_panel(
                             str(event.value or ""),
                         )
                     )
-                    presentation_label = ui.label(
-                        "排版与呈现"
-                    ).classes("text-weight-medium q-mt-md")
+                    presentation_label = ui.label("排版与呈现").classes(
+                        "text-weight-medium q-mt-md"
+                    )
                     with ui.row().classes("q-mt-sm") as management_actions:
                         ui.button(
                             "基础信息",
@@ -3285,8 +2880,12 @@ def _build_accounts_panel(
                         )
                         ui.button(
                             "图片与封面",
-                            on_click=lambda aid=account_id: open_inline_image_manager(aid),
-                        ).props("outline dense color=indigo-7 no-caps icon=auto_awesome")
+                            on_click=lambda aid=account_id: open_inline_image_manager(
+                                aid
+                            ),
+                        ).props(
+                            "outline dense color=indigo-7 no-caps icon=auto_awesome"
+                        )
                     management_visible = {"value": False}
                     for element in (
                         management_intro,
@@ -3332,7 +2931,7 @@ def _build_help_panel() -> None:
             """
 **第一次使用**
 
-教程已经放进对应配置页面：进入“设置 → 模型管理”，选择文章模型或图片模型后，按照页面步骤获取 API Key 并完成真实连接测试；进入“设置 → 飞书”，按照 App 凭证、长连接、发布和绑定口令的顺序操作。
+模型与 API Key 由管理员在“设置 → 后台管理”中统一维护。普通用户只需在公众号管理中选择平台已经启用的模型，不需要接触密钥和接口协议；飞书管理员可在“设置 → 飞书”中按页面引导完成连接。
 
 1. **选择内容**：在工作台直接粘贴链接、正文或输入话题；需要找热点和关注文章时，点击“从选题库选择”  
 2. **选择公众号**：系统会自动使用每个公众号已经保存的模型、创作规则、排版和图片配置  
@@ -3357,6 +2956,10 @@ AI 评审使用目标公众号绑定的文本模型，会产生模型费用。�
 
 def main() -> None:
     port = int(str(os.getenv("WECHAT_PUBLISHER_UI_PORT") or "18765"))
+    storage_secret = str(
+        os.getenv("AUTH_STORAGE_SECRET")
+        or "wechat-auto-publisher-local-storage-v1"
+    )
     try:
         ui.run(
             root=create_desktop_app,
@@ -3367,8 +2970,9 @@ def main() -> None:
             reconnect_timeout=30.0,
             port=port,
             show=True,
+            storage_secret=storage_secret,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("Native window unavailable, falling back to browser UI")
         ui.run(
             root=create_desktop_app,
@@ -3377,6 +2981,7 @@ def main() -> None:
             reconnect_timeout=30.0,
             port=port,
             show=True,
+            storage_secret=storage_secret,
         )
 
 

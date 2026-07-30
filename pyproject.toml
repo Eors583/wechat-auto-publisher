@@ -1,6 +1,6 @@
 [project]
 name = "wechat-auto-publisher"
-version = "1.0.0"
+version = "1.3.0"
 description = "Local CLI to rewrite articles and push WeChat Official Account drafts"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,7 @@ dependencies = [
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
   "lark-oapi>=1.7.1",
+  "psycopg[binary]>=3.2.0",
 ]
 
 [project.scripts]

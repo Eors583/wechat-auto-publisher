@@ -236,6 +236,8 @@ class FailoverRewriter:
                 "当前 AI 服务过载（429），已自动重试仍失败。"
                 "请稍等 1–2 分钟后再点「开始改写」。详情：" + detail
             )
+        if len(providers) == 1:
+            raise RuntimeError("Rewrite provider failed: " + detail)
         raise RuntimeError("All rewrite providers failed: " + detail)
 
     def prompt_trace(self, provider: str = "") -> dict[str, Any]:

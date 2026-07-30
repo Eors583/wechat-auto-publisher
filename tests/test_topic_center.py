@@ -167,17 +167,7 @@ def test_owned_account_reads_wechat_official_publish_records(
         }
     )
 
-    class FakeAuth:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def get_access_token(self, force_refresh=False):
-            return "token"
-
     class FakeClient:
-        def __init__(self, **_kwargs):
-            pass
-
         def request(self, *_args, **_kwargs):
             return {
                 "item": [
@@ -196,8 +186,16 @@ def test_owned_account_reads_wechat_official_publish_records(
                 ]
             }
 
-    monkeypatch.setattr("app.services.followed_content.WeChatAuth", FakeAuth)
-    monkeypatch.setattr("app.services.followed_content.WeChatClient", FakeClient)
+    factory_calls: list[tuple[object, object, str, str]] = []
+
+    def fake_build_wechat_client(config, factory_db, app_id, app_secret):
+        factory_calls.append((config, factory_db, app_id, app_secret))
+        return FakeClient()
+
+    monkeypatch.setattr(
+        "app.services.followed_content.build_wechat_client",
+        fake_build_wechat_client,
+    )
     monkeypatch.setattr(
         "app.services.followed_content.fetch_public_article_metadata",
         lambda _url: (_ for _ in ()).throw(httpx.ReadError("blocked")),
@@ -207,6 +205,7 @@ def test_owned_account_reads_wechat_official_publish_records(
     article = service.list_articles(account_ids=[followed["id"]], days=3650)[0]
     assert article["title"] == "公众号官方文章"
     assert article["source_channel"] == "wechat_official"
+    assert factory_calls == [(config, db, "wx-test", "secret")]
 
 
 def test_backend_search_articles_enter_the_followed_pool_with_trusted_account(

@@ -149,6 +149,30 @@ def test_scroll_helper_reveals_inline_result_and_uses_browser_scroll() -> None:
     assert "smooth" in literals
 
 
+def test_jury_ui_liveness_honors_the_parent_workbench_callback() -> None:
+    """A live browser client is insufficient once its review dialog is closed."""
+
+    ui_alive = _function("ui_alive")
+    call_names = {
+        _call_name(call)
+        for call in ast.walk(ui_alive)
+        if isinstance(call, ast.Call)
+    }
+
+    assert "is_workbench_alive" in call_names
+    assert any(
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "is_workbench_alive"
+        and any(
+            isinstance(operator, ast.Is)
+            for operator in node.test.ops
+        )
+        for node in ast.walk(ui_alive)
+    ), "the callback must remain optional for non-workbench reuse"
+
+
 def test_view_conclusion_button_scrolls_to_inline_result() -> None:
     """Opening an existing conclusion uses the same in-page navigation."""
 
@@ -267,6 +291,101 @@ def test_smart_rewrite_keeps_parent_review_workbench_open() -> None:
     assert "result_dialog.open" not in call_names
     assert "open_review_workbench" not in call_names
     assert "on_job_updated" in call_names
+
+
+def test_article_comparison_uses_persisted_review_snapshots() -> None:
+    """Before/after previews must survive closing and reopening the workbench.
+
+    The review source and generated candidate are persisted with the editorial
+    review records.  Reading mutable ``job`` state here would lose the original
+    article as soon as ``on_job_updated`` refreshes it.
+    """
+
+    render_comparison = _function("render_article_comparison")
+    literals = _string_literals(render_comparison)
+
+    assert "source_snapshot" in literals
+    assert "candidate_snapshot" in literals
+    assert "改写前原文" in literals
+    assert "智能修改后" in literals
+
+
+def test_article_comparison_is_a_responsive_two_column_inline_preview() -> None:
+    """Wide screens compare side by side; narrow screens may stack naturally."""
+
+    render_comparison = _function("render_article_comparison")
+    layout_calls = [
+        call
+        for call in ast.walk(render_comparison)
+        if isinstance(call, ast.Call)
+        and _call_name(call) in {"ui.row", "ui.grid"}
+    ]
+    assert layout_calls, "the two versions need one shared comparison layout"
+
+    layout_literals = "\n".join(_string_literals(render_comparison))
+    assert (
+        "grid-cols-2" in layout_literals
+        or "lg:" in layout_literals
+        or "md:" in layout_literals
+        or "col-md-6" in layout_literals
+    ), "the comparison must become two columns on desktop widths"
+    assert (
+        "w-full" in layout_literals
+    ), "the comparison must remain usable at narrow workbench widths"
+    assert "gap:0" in layout_literals, (
+        "NiceGUI rows add their own flex gap; it must be removed so two "
+        "50% Quasar columns do not wrap on desktop"
+    )
+
+
+def test_smart_rewrite_renders_and_scrolls_to_before_after_comparison() -> None:
+    """Successful AI rewriting focuses the comparison, not only the new body."""
+
+    smart_rewrite = _function("smart_rewrite", async_function=True)
+    render_calls = _calls(smart_rewrite, "render_article_comparison")
+    scroll_calls = _calls(smart_rewrite, "scroll_to_article_comparison")
+    update_calls = _calls(smart_rewrite, "on_job_updated")
+
+    assert len(render_calls) == 1
+    assert len(scroll_calls) == 1
+    assert len(update_calls) == 1
+    assert update_calls[0].lineno < render_calls[0].lineno < scroll_calls[0].lineno
+
+
+def test_article_comparison_scroll_helper_keeps_current_workbench_open() -> None:
+    """Displaying the generated comparison is an in-page navigation action."""
+
+    scroll_to_comparison = _function(
+        "scroll_to_article_comparison",
+        async_function=True,
+    )
+    call_names = {
+        _call_name(call)
+        for call in ast.walk(scroll_to_comparison)
+        if isinstance(call, ast.Call)
+    }
+    literals = _string_literals(scroll_to_comparison)
+
+    assert "comparison_section.set_visibility" in call_names
+    assert "comparison_section.run_method" in call_names
+    assert "scrollIntoView" in literals
+    assert "smooth" in literals
+    assert not any(name.endswith(".close") for name in call_names)
+    assert "open_review_workbench" not in call_names
+
+
+def test_existing_application_restores_the_persisted_comparison() -> None:
+    """Reopening a reviewed article must still show its before/after result."""
+
+    panel = _function("build_review_jury_panel")
+    render_result = _function("render_review_result")
+    direct_calls = _calls(panel, "render_article_comparison")
+    delegated_calls = _calls(render_result, "render_article_comparison")
+
+    assert direct_calls or delegated_calls, (
+        "the initial persisted application must be rendered as a comparison "
+        "when the review workbench is reopened"
+    )
 
 
 def test_review_result_displays_ai_estimated_engagement_dimensions() -> None:

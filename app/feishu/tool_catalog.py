@@ -49,13 +49,6 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         True,
         "请明确回复“确认更换公众号模型”。",
     ),
-    "save_official_account": ToolSpec(
-        "公众号",
-        "save_official_account：新增或更新自有公众号及 AppSecret",
-        "name，app_id，app_secret，model_id；可选 account_id、enabled、confirmation",
-        True,
-        "请把完整公众号配置重新发来，并明确说“确认保存公众号密钥”。",
-    ),
     "set_official_account_enabled": ToolSpec(
         "公众号",
         "set_official_account_enabled：启用或停用一个自有公众号",
@@ -86,6 +79,26 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         "批次",
         "list_batches：查询历史批次、待审核和失败任务",
         "可选 limit、include_archived、status、keyword",
+    ),
+    "list_review_inbox": ToolSpec(
+        "审核收件箱",
+        "list_review_inbox：查询待我审核、写入失败、生成失败或今日完成的文章级待办",
+        "可选 bucket（review/write_failed/generation_failed/today_completed）、account_id、limit、cursor",
+    ),
+    "get_article_attempts": ToolSpec(
+        "失败恢复",
+        "get_article_attempts：查看一篇文章各处理阶段的执行与重试记录",
+        "batch_id、job_id",
+    ),
+    "retry_article_step": ToolSpec(
+        "失败恢复",
+        "retry_article_step：从失败步骤继续处理一篇文章，并保留已经完成的上游结果",
+        (
+            "batch_id、job_id；可选 step（auto/ingest/rewrite/title_optimize/render/"
+            "images/inject）、model_id、source_url、raw_content、confirmation"
+        ),
+        True,
+        "请明确回复“确认从失败步骤重试文章”。",
     ),
     "retry_failed_batch": ToolSpec(
         "批次",
@@ -458,25 +471,6 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         "关注公众号",
         "get_wechat_backend_status：查看微信公众号后台搜索登录态（不返回 token/cookie）",
     ),
-    "test_wechat_backend_login": ToolSpec(
-        "关注公众号",
-        "test_wechat_backend_login：测试微信公众号后台 token/cookie 登录态",
-        "可选 token、cookie；省略时测试已保存登录态",
-    ),
-    "save_wechat_backend_login": ToolSpec(
-        "关注公众号",
-        "save_wechat_backend_login：加密保存微信公众号后台搜索登录态",
-        "enabled、token、cookie；可选 session_label、confirmation",
-        True,
-        "请明确回复“确认保存微信公众号后台登录态”。",
-    ),
-    "clear_wechat_backend_login": ToolSpec(
-        "关注公众号",
-        "clear_wechat_backend_login：清除已保存的微信公众号后台登录态",
-        "confirmation",
-        True,
-        "请明确回复“确认清除微信公众号后台登录态”。",
-    ),
     "list_prompt_templates": ToolSpec(
         "提示词",
         "list_prompt_templates：分别列出文章或图片提示词模板；默认模板由代码维护，不展示正文",
@@ -532,17 +526,6 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         "model_id 或 model_name，confirmation",
         True,
         "真实出图可能产生费用，请明确回复“确认生成模型测试图”。",
-    ),
-    "save_model": ToolSpec(
-        "模型",
-        "save_model：新增或更新模型并加密保存 API Key",
-        (
-            "name，provider_type，model，api_key；可选 model_id、api_base、enabled、confirmation。"
-            "provider_type 可为 manus、openai_compatible、gemini、image_alibaba、image_minimax、"
-            "image_volcengine、image_zhipu、openai_image"
-        ),
-        True,
-        "请把完整模型配置重新发来，并明确说“确认保存模型密钥”。",
     ),
     "set_model_enabled": ToolSpec(
         "模型",

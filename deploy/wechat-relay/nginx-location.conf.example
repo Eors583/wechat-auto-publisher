@@ -1,0 +1,34 @@
+# Add these locations inside the HTTPS server block for your relay domain.
+# Keep access logs disabled: WeChat access_token is carried in the query string.
+
+location = /wechat-relay/health {
+    auth_basic "WeChat API Relay";
+    auth_basic_user_file /etc/nginx/.htpasswd-wechat-relay;
+    default_type application/json;
+    add_header Cache-Control "no-store" always;
+    return 200 '{"status":"ok","service":"wechat-api-relay"}';
+}
+
+location ^~ /wechat-relay/ {
+    auth_basic "WeChat API Relay";
+    auth_basic_user_file /etc/nginx/.htpasswd-wechat-relay;
+
+    limit_except GET POST HEAD {
+        deny all;
+    }
+
+    proxy_pass https://api.weixin.qq.com/;
+    proxy_http_version 1.1;
+    proxy_ssl_server_name on;
+    proxy_ssl_name api.weixin.qq.com;
+    proxy_set_header Host api.weixin.qq.com;
+    proxy_set_header Connection "";
+
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 65s;
+    proxy_read_timeout 65s;
+    proxy_buffering off;
+
+    access_log off;
+    proxy_hide_header Set-Cookie;
+}

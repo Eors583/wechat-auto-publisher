@@ -10,6 +10,7 @@ binaries = []
 hiddenimports = collect_submodules("app")
 hiddenimports += collect_submodules("google.genai")
 hiddenimports += collect_submodules("lark_oapi")
+hiddenimports += collect_submodules("psycopg")
 
 for package in (
     "nicegui",
@@ -19,6 +20,8 @@ for package in (
     "justext",
     "lark_oapi",
     "google.genai",
+    "psycopg",
+    "psycopg_binary",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas

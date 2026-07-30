@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from app.accounts import (
@@ -15,13 +16,13 @@ from app.ai import (
     TITLE_CANDIDATE_COUNT,
     clean_candidate_text,
 )
-from app.ai.model_registry import configured_models, public_models
+from app.ai.model_registry import public_models
 from app.ai.openai_compat import is_junk_title_or_subtitle
-from app.config import load_config
+from app.config import database_target, load_config
 from app.db import Database
-from app.pipeline import Pipeline
+from app.services.auth import AuthService
+from app.services.onboarding import OnboardingService
 from app.ui.loading import DEFAULT_REQUEST_MESSAGE, get_request_loading
-
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,11 @@ def set_button_loading(
     message: str = DEFAULT_REQUEST_MESSAGE,
 ) -> None:
     """Show button feedback and a blocking overlay for an API request."""
+    if button is None or bool(getattr(button, "is_deleted", False)):
+        return
+    client = getattr(button, "client", None)
+    if client is not None and bool(getattr(client, "is_deleted", False)):
+        return
     if loading:
         button.props(add="loading")
         button.disable()
@@ -61,21 +67,26 @@ def set_button_loading(
 class AppState:
     """UI state and option providers, separate from NiceGUI view composition."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, recover_stale_work: bool = True) -> None:
         self.config = load_config()
-        self.db = Database(self.config["_db_path"])
-        recovered = self.db.recover_stale_jobs(older_than_minutes=30)
-        if recovered:
-            logger.warning("Recovered %s stale in-progress jobs", recovered)
-        recovered_reviews = self.db.recover_stale_editorial_reviews(
-            older_than_minutes=30
-        )
-        if recovered_reviews:
-            logger.warning(
-                "Recovered %s stale editorial review operations",
-                recovered_reviews,
+        self.db = Database(database_target(self.config))
+        self.auth = AuthService(self.db)
+        self.auth.ensure_default_admin()
+        self.current_user: dict[str, Any] | None = None
+        if recover_stale_work:
+            recovered = self.db.recover_stale_jobs(older_than_minutes=30)
+            if recovered:
+                logger.warning("Recovered %s stale in-progress jobs", recovered)
+            recovered_reviews = self.db.recover_stale_editorial_reviews(
+                older_than_minutes=30
             )
+            if recovered_reviews:
+                logger.warning(
+                    "Recovered %s stale editorial review operations",
+                    recovered_reviews,
+                )
         ensure_config_accounts_imported(self.db, self.config)
+        OnboardingService(self.db, self.config).migrate_legacy_state()
         ensure_account_layouts_initialized(self.db, self.config)
         self.busy = False
         self.wizard_job_id: int | None = None
@@ -83,8 +94,14 @@ class AppState:
         self.topic_source = "manual"
         self.pending_rewrite: dict[str, Any] | None = None
         self.model_selects: list[Any] = []
+        self._model_select_client: Any | None = None
         self.account_selects: list[Any] = []
+        self.account_option_refreshers: list[Callable[[], None]] = []
         self.task_center_refresh: Any | None = None
+
+    @property
+    def is_admin(self) -> bool:
+        return str((self.current_user or {}).get("role") or "") == "admin"
 
     def remembered_account_ids(self) -> list[str]:
         """Return the last desktop target selection, filtered by current accounts."""
@@ -109,44 +126,172 @@ class AppState:
 
     def reload_config(self) -> dict[str, Any]:
         self.config = load_config()
-        self.db = Database(self.config["_db_path"])
+        self.db = Database(database_target(self.config))
+        self.auth = AuthService(self.db)
+        self.auth.ensure_default_admin()
         ensure_config_accounts_imported(self.db, self.config)
         ensure_account_layouts_initialized(self.db, self.config)
         return self.config
 
-    def pipeline(self) -> Pipeline:
-        return Pipeline(load_config())
+    def model_options(
+        self,
+        *,
+        include_default: bool = True,
+        purpose: str = "text",
+        default_label: str | None = None,
+    ) -> dict[str, str]:
+        """Return enabled model choices for one model purpose.
 
-    def model_options(self, *, include_default: bool = True) -> dict[str, str]:
-        config_options = {
-            str(item["id"]): (
-                f'{item["name"]} · {item["model"]}'
-                + ("（当前默认）" if item.get("is_default") else "（配置模型）")
-            )
-            for item in configured_models(self.config)
-        }
+        End users only see the merchant-managed model pool stored in the shared
+        database. Legacy ``config.yaml`` providers remain available to offline
+        migration code, but must not leak into desktop selectors.
+        """
+
+        if purpose not in {"text", "image"}:
+            raise ValueError(f"unsupported model purpose: {purpose}")
         options = {
             str(item["id"]): f'{item["name"]} · {item["model"]}'
-            for item in public_models(self.db, enabled_only=True, purpose="text")
+            for item in public_models(
+                self.db,
+                enabled_only=True,
+                purpose=purpose,
+            )
         }
-        options = {**config_options, **options}
-        return {"": "使用系统默认模型", **options} if include_default else options
+        if not include_default:
+            return options
+        fallback_label = (
+            "使用系统默认图片模型"
+            if purpose == "image"
+            else "使用系统默认模型"
+        )
+        return {"": default_label or fallback_label, **options}
+
+    def register_model_select(
+        self,
+        select: Any,
+        *,
+        include_default: bool = True,
+        purpose: str = "text",
+        default_label: str | None = None,
+        owner: Any | None = None,
+    ) -> Any:
+        """Register a model selector owned by this page's client.
+
+        ``AppState`` is created once per desktop page. Keeping the element
+        registry on that page state, and rejecting elements from another
+        NiceGUI client, prevents a save in one browser window from mutating UI
+        elements in another window.
+        """
+
+        if purpose not in {"text", "image"}:
+            raise ValueError(f"unsupported model purpose: {purpose}")
+        select_client = getattr(select, "client", None)
+        if self._model_select_client is None and select_client is not None:
+            self._model_select_client = select_client
+        elif (
+            select_client is not None
+            and self._model_select_client is not None
+            and select_client is not self._model_select_client
+        ):
+            logger.warning("ignored model selector from a different UI client")
+            return select
+        self.model_selects = [
+            item
+            for item in self.model_selects
+            if not (
+                isinstance(item, dict)
+                and item.get("select") is select
+            )
+        ]
+        self.model_selects.append(
+            {
+                "select": select,
+                "include_default": include_default,
+                "purpose": purpose,
+                "default_label": default_label,
+                "owner": owner,
+                "client": select_client,
+            }
+        )
+        if (
+            owner is not None
+            and hasattr(owner, "on_value_change")
+            and not bool(getattr(owner, "_model_refresh_bound", False))
+        ):
+            owner._model_refresh_bound = True
+
+            def refresh_when_reopened(event: Any) -> None:
+                if bool(getattr(event, "value", False)):
+                    self.register_model_select(
+                        select,
+                        include_default=include_default,
+                        purpose=purpose,
+                        default_label=default_label,
+                        owner=owner,
+                    )
+                    self.refresh_model_selects()
+
+            owner.on_value_change(refresh_when_reopened)
+        return select
 
     def refresh_model_selects(self) -> None:
-        for select, include_default in list(self.model_selects):
+        active: list[Any] = []
+        for registration in list(self.model_selects):
+            if isinstance(registration, dict):
+                select = registration.get("select")
+                include_default = bool(
+                    registration.get("include_default", True)
+                )
+                purpose = str(registration.get("purpose") or "text")
+                default_label = registration.get("default_label")
+                owner = registration.get("owner")
+                registered_client = registration.get("client")
+            else:
+                # Backwards compatibility for tests and extensions which used
+                # the original ``(select, include_default)`` tuple directly.
+                select, include_default = registration
+                purpose = "text"
+                default_label = None
+                owner = None
+                registered_client = getattr(select, "client", None)
+            if select is None or bool(getattr(select, "is_deleted", False)):
+                continue
+            if owner is not None and bool(getattr(owner, "is_deleted", False)):
+                continue
+            if (
+                owner is not None
+                and not bool(getattr(owner, "value", True))
+            ):
+                # Closed dialogs are refreshed by the value-change hook when
+                # they are reopened. Avoid touching their client meanwhile.
+                continue
+            if (
+                registered_client is not None
+                and bool(getattr(registered_client, "is_deleted", False))
+            ):
+                continue
             try:
-                options = self.model_options(include_default=include_default)
-                select.set_options(options)
-                if select.value not in options:
-                    select.value = ""
+                options = self.model_options(
+                    include_default=include_default,
+                    purpose=purpose,
+                    default_label=default_label,
+                )
+                current_value = getattr(select, "value", None)
+                if current_value not in options:
+                    current_value = "" if "" in options else None
+                select.set_options(options, value=current_value)
+                active.append(registration)
             except Exception:  # noqa: BLE001
                 logger.exception("refresh model selector failed")
+                active.append(registration)
+        self.model_selects = active
 
     def account_options(self, *, include_default: bool = True) -> dict[str, str]:
         accounts = public_accounts(self.db, enabled_only=True)
         options = {
             str(item["id"]): f'{item["name"]} · {item["model_name"]}'
             for item in accounts
+            if bool(item.get("has_model"))
         }
         if include_default:
             configured_app_id = str((self.config.get("wechat") or {}).get("app_id") or "")
@@ -166,6 +311,26 @@ class AppState:
                 select.set_options(options, value=current)
             except Exception:  # noqa: BLE001
                 logger.exception("refresh account selector failed")
+        for refresher in list(self.account_option_refreshers):
+            try:
+                refresher()
+            except Exception:  # noqa: BLE001
+                logger.exception("refresh custom account options failed")
+
+    def register_account_option_refresher(
+        self,
+        refresher: Callable[[], None],
+    ) -> None:
+        """Register a selector whose account eligibility differs from the workbench.
+
+        The workbench only accepts enabled accounts with a bound text model.
+        Settings panels may need to show an enabled account before its model is
+        configured, so they supply their own option refresh callback instead of
+        reusing :meth:`account_options`.
+        """
+
+        if refresher not in self.account_option_refreshers:
+            self.account_option_refreshers.append(refresher)
 
 
 def clean_titles(job: dict[str, Any]) -> list[str]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -9,6 +10,7 @@ from nicegui import run, ui
 from app.config import load_config
 from app.render.preview import prepare_preview_html
 from app.services.batches import BatchService
+from app.services.failures import sanitize_failure_text
 from app.ui.state import (
     AppState,
     STATUS_LABEL,
@@ -18,6 +20,11 @@ from app.ui.state import (
 )
 from app.ai import clean_candidate_text
 from app.ui.image_proxy import wechat_image_proxy_url
+from app.ui.ip_whitelist_guide import (
+    has_ip_whitelist_issue,
+    show_ip_whitelist_guide,
+)
+from app.wechat.errors import friendly_wechat_error
 from app.ui.lifecycle import client_timer
 from app.ui.panels.review_jury import build_review_jury_panel
 from app.ui.workflow import next_review_job, render_workflow_guide
@@ -41,58 +48,396 @@ REVIEW_COLORS = {
     "write_failed": "red-7",
 }
 
+INBOX_BUCKETS = {
+    "review": {
+        "label": "待审核",
+        "color": "orange-8",
+        "icon": "rate_review",
+    },
+    "write_failed": {
+        "label": "写入失败",
+        "color": "deep-orange-8",
+        "icon": "cloud_off",
+    },
+    "generation_failed": {
+        "label": "生成失败",
+        "color": "red-7",
+        "icon": "error_outline",
+    },
+    "today_completed": {
+        "label": "今日完成",
+        "color": "teal-8",
+        "icon": "task_alt",
+    },
+}
 
-def build_tasks_panel(state: AppState) -> None:
-    """Batch-oriented task center shared with the API/Feishu domain rules."""
+
+def _load_review_inbox(
+    service: BatchService,
+    *,
+    bucket: str,
+    account_id: str,
+    search: str = "",
+    limit: int,
+    batches: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Read the review inbox through one UI-facing adapter.
+
+    Newer services expose a first-class inbox query.  The local projection keeps
+    the desktop usable with an older service during rolling upgrades.
+    """
+
+    loader = getattr(service, "list_review_inbox", None)
+    if callable(loader):
+        requested_limit = max(1, int(limit))
+        items: list[dict[str, Any]] = []
+        counts = {key: 0 for key in INBOX_BUCKETS}
+        cursor: str | None = None
+        next_cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while len(items) < requested_limit:
+            query: dict[str, Any] = {
+                "bucket": bucket,
+                "account_id": account_id or None,
+                "limit": min(100, requested_limit - len(items)),
+                "cursor": cursor,
+            }
+            if str(search or "").strip():
+                query["search"] = str(search).strip()
+            page = _normalize_inbox_payload(
+                loader(**query)
+            )
+            items.extend(
+                list(page.get("items") or [])[
+                    : requested_limit - len(items)
+                ]
+            )
+            counts = dict(page.get("counts") or counts)
+            next_cursor = page.get("next_cursor")
+            if next_cursor is None or len(items) >= requested_limit:
+                break
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                # A malformed service cursor must not spin or repeat a page.
+                next_cursor = None
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return {
+            "items": items,
+            "counts": counts,
+            "next_cursor": next_cursor,
+        }
+    return _fallback_review_inbox(
+        batches or [],
+        bucket=bucket,
+        account_id=account_id,
+        search=search,
+        limit=limit,
+    )
+
+
+def _normalize_inbox_payload(payload: Any) -> dict[str, Any]:
+    source = dict(payload or {})
+    raw_counts = dict(source.get("counts") or {})
+    return {
+        "items": [
+            dict(item)
+            for item in list(source.get("items") or [])
+            if isinstance(item, dict)
+        ],
+        "counts": {
+            key: int(raw_counts.get(key) or 0)
+            for key in INBOX_BUCKETS
+        },
+        "next_cursor": (
+            str(source["next_cursor"])
+            if source.get("next_cursor") not in {None, ""}
+            else None
+        ),
+    }
+
+
+def _fallback_review_inbox(
+    batches: list[dict[str, Any]],
+    *,
+    bucket: str,
+    account_id: str = "",
+    search: str = "",
+    limit: int = 30,
+) -> dict[str, Any]:
+    """Project the stable batch contract into the P0 inbox shape."""
+
+    today = datetime.now().date().isoformat()
+    grouped: dict[str, list[dict[str, Any]]] = {
+        key: [] for key in INBOX_BUCKETS
+    }
+    for batch in batches:
+        for job in list(batch.get("jobs") or []):
+            if account_id and str(job.get("account_id") or "") != account_id:
+                continue
+            status = str(job.get("status") or "")
+            step = str(job.get("step") or "")
+            review_status = str(job.get("review_status") or "unviewed")
+            job_bucket = ""
+            if status == "ready_for_review" and review_status != "confirmed":
+                job_bucket = "review"
+            elif status == "failed" and (
+                step == "inject" or review_status == "write_failed"
+            ):
+                job_bucket = "write_failed"
+            elif status == "failed":
+                job_bucket = "generation_failed"
+            elif status in {"drafted", "published"} and str(
+                job.get("updated_at") or ""
+            ).startswith(today):
+                job_bucket = "today_completed"
+            if not job_bucket:
+                continue
+            failure = str(job.get("error") or "")
+            grouped[job_bucket].append(
+                {
+                    "batch_id": str(batch.get("id") or ""),
+                    "batch_display_id": str(
+                        batch.get("display_id") or batch.get("id") or ""
+                    ),
+                    "job_id": int(job["id"]),
+                    "status": status,
+                    "step": step,
+                    "account_id": str(job.get("account_id") or ""),
+                    "account_name": str(job.get("account_name") or "公众号"),
+                    "title": str(
+                        job.get("selected_title") or "尚未选择标题"
+                    ),
+                    "source": str(
+                        batch.get("topic") or batch.get("source_url") or ""
+                    ),
+                    "source_url": str(batch.get("source_url") or ""),
+                    "created_at": job.get("created_at")
+                    or batch.get("created_at"),
+                    "updated_at": job.get("updated_at")
+                    or batch.get("updated_at"),
+                    "body_chars": 0,
+                    "review_status": review_status,
+                    "latest_review_summary": "",
+                    "cover_status": "",
+                    "blockers": [failure] if failure else [],
+                    "priority_reason": (
+                        "已标记需要修改"
+                        if review_status == "needs_changes"
+                        else (
+                            "尚未查看"
+                            if job_bucket == "review"
+                            and review_status == "unviewed"
+                            else ""
+                        )
+                    ),
+                    "failure": failure,
+                }
+            )
+    needle = str(search or "").strip().casefold()
+    if needle:
+        for grouped_bucket, grouped_items in grouped.items():
+            grouped[grouped_bucket] = [
+                item
+                for item in grouped_items
+                if needle
+                in " ".join(
+                    (
+                        str(item.get("title") or ""),
+                        str(item.get("account_name") or ""),
+                        str(item.get("source") or ""),
+                    )
+                ).casefold()
+            ]
+    items = grouped.get(bucket, [])
+    return {
+        "items": items[:limit],
+        "counts": {key: len(value) for key, value in grouped.items()},
+        "next_cursor": str(limit) if len(items) > limit else None,
+    }
+
+
+def build_tasks_panel(
+    state: AppState,
+    *,
+    initial_batch_id: str | None = None,
+    initial_job_id: int | None = None,
+) -> None:
+    """Review-first task center backed by the shared batch service."""
     service = BatchService(load_config())
     render_workflow_guide(
         "review",
         note="生成完成后在这里逐篇审核，全部确认后再一次写入草稿箱",
         compact=True,
     )
-    search_in = ui.input("搜索话题、标题或公众号").props(
-        "outlined dense clearable debounce=300"
-    ).classes("col")
-    status_in = ui.select(
-        options={
-            "": "全部状态",
-            "attention": "待我审核 / 失败",
-            "ready_for_review": "待审核",
-            "drafted": "已写入草稿箱",
-            "failed": "失败",
-            "cancelled": "已停止",
-        },
-        value="",
-        label="状态",
-    ).props("outlined dense options-dense").style("min-width:180px")
     account_options = {"": "全部公众号", **{
         item["id"]: item["name"] for item in service.list_accounts()
     }}
-    account_in = ui.select(
-        options=account_options, value="", label="公众号"
-    ).props("outlined dense options-dense").style("min-width:190px")
-    today_only = ui.switch("只看今天", value=False)
-    archived_in = ui.switch("显示已归档", value=False)
+    with ui.row().classes("w-full items-center justify-between q-mb-sm"):
+        view_in = ui.toggle(
+            {
+                "inbox": "待处理收件箱",
+                "batches": "全部批次",
+            },
+            value="inbox",
+        ).props("no-caps color=teal-9")
+        refresh_btn = ui.button("刷新").props(
+            "outline dense color=teal-9 icon=refresh no-caps"
+        )
+    with ui.row().classes("w-full items-center q-col-gutter-sm"):
+        search_in = ui.input("搜索话题、标题或公众号").props(
+            "outlined dense clearable debounce=300"
+        ).classes("col")
+        account_in = ui.select(
+            options=account_options, value="", label="公众号"
+        ).props("outlined dense options-dense").style("min-width:190px")
+        status_in = ui.select(
+            options={
+                "": "全部状态",
+                "attention": "待我审核 / 失败",
+                "ready_for_review": "待审核",
+                "drafted": "已写入草稿箱",
+                "failed": "失败",
+                "cancelled": "已停止",
+            },
+            value="",
+            label="状态",
+        ).props("outlined dense options-dense").style("min-width:180px")
+        batch_only_filters = ui.row().classes(
+            "items-center q-col-gutter-sm"
+        )
+        with batch_only_filters:
+            today_only = ui.switch("只看今天", value=False)
+            archived_in = ui.switch("显示已归档", value=False)
+    status_in.set_visibility(False)
+    batch_only_filters.set_visibility(False)
     host = ui.column().classes("w-full gap-3 q-mt-md")
     runtime = {
         "has_active_batch": False,
         "review_open": False,
-        "focus_batch_id": "",
+        "focus_batch_id": str(initial_batch_id or ""),
         "visible_limit": 30,
+        "inbox_bucket": "review",
     }
 
-    with ui.row().classes("w-full items-center q-col-gutter-sm"):
-        search_in
-        status_in
-        account_in
-        today_only
-        archived_in
-        refresh_btn = ui.button("刷新").props("outline dense color=teal-9 icon=refresh")
+    def show_batch(batch_id: str) -> None:
+        runtime["focus_batch_id"] = str(batch_id)
+        runtime["visible_limit"] = 30
+        view_in.value = "batches"
+        status_in.set_visibility(True)
+        batch_only_filters.set_visibility(True)
+        render()
+
+    def select_inbox_bucket(bucket: str) -> None:
+        runtime["inbox_bucket"] = bucket
+        runtime["visible_limit"] = 30
+        render()
 
     def render() -> None:
         host.clear()
+        view_mode = str(view_in.value or "inbox")
+        if view_mode == "inbox":
+            has_active_batches = getattr(service, "has_active_batches", None)
+            runtime["has_active_batch"] = (
+                bool(has_active_batches())
+                if callable(has_active_batches)
+                else False
+            )
+            payload = _load_review_inbox(
+                service,
+                bucket=str(runtime["inbox_bucket"]),
+                account_id=str(account_in.value or ""),
+                search=str(search_in.value or ""),
+                limit=int(runtime["visible_limit"]),
+            )
+            items = list(payload.get("items") or [])
+            with host:
+                with ui.row().classes("w-full items-center justify-between"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("待处理收件箱").classes(
+                            "text-h6 text-weight-bold"
+                        )
+                        ui.label(
+                            "先处理需要你决策的文章；深度编辑仍在同一个审核工作台完成。"
+                        ).classes("muted")
+                with ui.grid(columns=4).classes("w-full gap-2"):
+                    counts = dict(payload.get("counts") or {})
+                    for bucket, meta in INBOX_BUCKETS.items():
+                        selected = bucket == str(runtime["inbox_bucket"])
+                        button = ui.button(
+                            f'{meta["label"]} · {int(counts.get(bucket) or 0)}',
+                            icon=str(meta["icon"]),
+                            on_click=lambda _=None, value=bucket: select_inbox_bucket(
+                                value
+                            ),
+                        ).classes("w-full").props(
+                            (
+                                f'unelevated color={meta["color"]} no-caps'
+                                if selected
+                                else f'outline color={meta["color"]} no-caps'
+                            )
+                        )
+                        if selected:
+                            button.props("aria-current=true")
+                if not items:
+                    current = INBOX_BUCKETS[str(runtime["inbox_bucket"])]["label"]
+                    with ui.element("div").classes("card w-full"):
+                        ui.label(f"当前没有{current}文章").classes(
+                            "text-weight-medium"
+                        )
+                        ui.label(
+                            "新任务完成后会自动出现在这里；历史记录可切换到“全部批次”。"
+                        ).classes("muted")
+                        if runtime["focus_batch_id"]:
+                            ui.button(
+                                "查看刚完成的批次",
+                                on_click=lambda: show_batch(
+                                    str(runtime["focus_batch_id"])
+                                ),
+                            ).props(
+                                "outline color=teal-9 no-caps icon=inventory_2"
+                            )
+                    return
+                focused_card = None
+                for item in items:
+                    card = _render_inbox_article_card(
+                        state,
+                        service,
+                        item,
+                        render,
+                        review_runtime=runtime,
+                        on_show_batch=show_batch,
+                    )
+                    if (
+                        focused_card is None
+                        and str(item.get("batch_id") or "")
+                        == str(runtime["focus_batch_id"])
+                    ):
+                        focused_card = card
+                if focused_card is not None:
+                    focused_card.run_method(
+                        "scrollIntoView",
+                        {"behavior": "smooth", "block": "start"},
+                    )
+                    runtime["focus_batch_id"] = ""
+                if payload.get("next_cursor"):
+                    ui.button(
+                        "加载更多文章",
+                        on_click=lambda: (
+                            runtime.__setitem__(
+                                "visible_limit",
+                                int(runtime["visible_limit"]) + 30,
+                            ),
+                            render(),
+                        ),
+                    ).props(
+                        "outline color=teal-9 no-caps icon=expand_more"
+                    ).classes("self-center q-my-md")
+            return
+
         batches = service.list_batches(
-            limit=300, include_archived=bool(archived_in.value)
+            limit=300,
+            include_archived=bool(archived_in.value),
         )
         runtime["has_active_batch"] = any(
             str(batch.get("status") or "") in {"pending", "processing", "injecting"}
@@ -176,29 +521,849 @@ def build_tasks_panel(state: AppState) -> None:
             today_only.value = False
             archived_in.value = False
             runtime["focus_batch_id"] = str(batch_id)
+            runtime["inbox_bucket"] = "review"
+            runtime["visible_limit"] = 30
+            view_in.value = "inbox"
+            status_in.set_visibility(False)
+            batch_only_filters.set_visibility(False)
         elif status_filter is not None or today is not None:
             search_in.value = ""
             account_in.value = ""
             archived_in.value = False
             status_in.value = str(status_filter or "")
             today_only.value = bool(today)
+            runtime["visible_limit"] = 30
+            view_in.value = "batches"
+            status_in.set_visibility(True)
+            batch_only_filters.set_visibility(True)
         render()
 
     def reset_and_render(_: Any = None) -> None:
         runtime["visible_limit"] = 30
         render()
 
+    def switch_view(event: Any) -> None:
+        show_batches = str(event.value or "inbox") == "batches"
+        status_in.set_visibility(show_batches)
+        batch_only_filters.set_visibility(show_batches)
+        runtime["visible_limit"] = 30
+        render()
+
+    view_in.on_value_change(switch_view)
     for element in (search_in, status_in, account_in, today_only, archived_in):
         element.on_value_change(reset_and_render)
     refresh_btn.on_click(render)
     render()
     state.task_center_refresh = refresh_and_focus
 
+    if initial_batch_id and initial_job_id:
+        def open_requested_review() -> None:
+            try:
+                open_review_workbench(
+                    state,
+                    service,
+                    str(initial_batch_id),
+                    int(initial_job_id),
+                    render,
+                    review_runtime=runtime,
+                    initial_mode="quick",
+                )
+            except (KeyError, ValueError) as exc:
+                ui.notify(
+                    f"无法打开指定审核文章：{exc}",
+                    type="negative",
+                    timeout=10000,
+                )
+
+        client_timer(0.15, open_requested_review, once=True)
+
     def refresh_running_batches() -> None:
         if runtime["has_active_batch"] and not runtime["review_open"]:
             render()
 
     client_timer(3.0, refresh_running_batches)
+
+
+def _ui_client_alive(owner_client: Any | None) -> bool:
+    """Return false once NiceGUI has deleted the page owning an async action."""
+
+    return owner_client is None or not bool(
+        getattr(owner_client, "is_deleted", False)
+    )
+
+
+def _set_retry_loading_safely(
+    button: Any,
+    value: bool,
+    *,
+    owner_client: Any | None,
+) -> None:
+    if not _ui_client_alive(owner_client):
+        return
+    try:
+        set_button_loading(button, value)
+    except RuntimeError:
+        # The client can disappear between the liveness check and element update.
+        return
+
+
+async def _retry_job_with_loading(
+    service: BatchService,
+    batch_id: str,
+    job_id: int,
+    button: Any,
+    *,
+    step: str = "auto",
+    model_id: str | None = None,
+    source_url: str | None = None,
+    raw_content: str | None = None,
+    owner_client: Any | None = None,
+) -> dict[str, Any]:
+    """Submit one recovery request while keeping its trigger state consistent."""
+
+    _set_retry_loading_safely(
+        button,
+        True,
+        owner_client=owner_client,
+    )
+    try:
+        return await run.io_bound(
+            lambda: service.retry_job(
+                batch_id,
+                job_id,
+                step=step,
+                model_id=model_id,
+                source_url=source_url,
+                raw_content=raw_content,
+            )
+        )
+    finally:
+        _set_retry_loading_safely(
+            button,
+            False,
+            owner_client=owner_client,
+        )
+
+
+def open_retry_job_dialog(
+    state: AppState,
+    service: BatchService,
+    item: dict[str, Any],
+    refresh: Callable[[], None],
+) -> None:
+    """Open explicit recovery controls for one failed inbox article."""
+
+    owner_client = ui.context.client
+    nested_job = (
+        dict(item.get("job") or {})
+        if isinstance(item.get("job"), dict)
+        else {}
+    )
+    batch_id = str(item.get("batch_id") or "")
+    job_id = int(item.get("job_id") or nested_job.get("id") or 0)
+    if not batch_id or job_id <= 0:
+        ui.notify("该失败记录缺少批次或文章标识，暂时无法恢复", type="negative")
+        return
+
+    step_options = {
+        "auto": "自动：从失败步骤恢复",
+        "ingest": "读取来源 / 原文",
+        "rewrite": "改写正文",
+        "title_optimize": "优化标题",
+        "render": "重新排版",
+        "images": "处理正文配图",
+        "inject": "写入公众号草稿箱",
+    }
+    model_options = {
+        "": "沿用公众号当前文章模型",
+        **state.model_options(include_default=False),
+    }
+
+    with ui.dialog() as dialog, ui.card().classes("q-pa-lg").style(
+        "width:min(720px,92vw);max-width:720px"
+    ):
+        ui.label("恢复失败文章").classes("text-h6 text-weight-bold")
+        ui.label(
+            "默认从系统识别的失败步骤继续；也可以指定步骤并临时替换本次恢复使用的输入。"
+        ).classes("muted")
+        step_in = ui.select(
+            options=step_options,
+            value="auto",
+            label="恢复步骤",
+        ).classes("w-full").props("outlined stack-label options-dense")
+        model_in = ui.select(
+            options=model_options,
+            value="",
+            label="临时文本模型（可选）",
+        ).classes("w-full").props("outlined stack-label options-dense")
+        state.register_model_select(
+            model_in,
+            purpose="text",
+            default_label="沿用公众号当前文章模型",
+            owner=dialog,
+        )
+        ui.label(
+            "临时模型只影响本次恢复中的正文改写和标题优化，不会修改公众号默认配置。"
+        ).classes("muted text-caption")
+        source_url_in = ui.input(
+            "替换来源链接（可选）",
+            value=str(item.get("source_url") or nested_job.get("source_url") or ""),
+        ).classes("w-full").props("outlined stack-label")
+        raw_content_in = ui.textarea(
+            "粘贴替换原文（可选）",
+            value="",
+        ).classes("w-full").props("outlined stack-label autogrow")
+
+        async def submit_retry() -> None:
+            try:
+                await _retry_job_with_loading(
+                    service,
+                    batch_id,
+                    job_id,
+                    retry_btn,
+                    step=str(step_in.value or "auto"),
+                    model_id=str(model_in.value or "").strip() or None,
+                    source_url=str(source_url_in.value or "").strip() or None,
+                    raw_content=str(raw_content_in.value or "").strip() or None,
+                    owner_client=owner_client,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not _ui_client_alive(owner_client):
+                    return
+                try:
+                    ui.notify(
+                        f"提交恢复失败：{sanitize_failure_text(exc)}",
+                        type="negative",
+                        timeout=10000,
+                    )
+                except RuntimeError:
+                    return
+                return
+            if not _ui_client_alive(owner_client):
+                return
+            try:
+                dialog.close()
+                ui.notify(
+                    "已提交恢复任务，将从所选步骤继续",
+                    type="positive",
+                )
+                refresh()
+            except RuntimeError:
+                return
+
+        with ui.row().classes("w-full justify-end q-mt-sm"):
+            ui.button("取消", on_click=dialog.close).props(
+                "flat color=grey-8 no-caps"
+            )
+            retry_btn = ui.button(
+                "开始恢复",
+                on_click=submit_retry,
+            ).props("unelevated color=teal-9 no-caps icon=restart_alt")
+    dialog.open()
+
+
+def _failure_action_retry_step(
+    action: str,
+    failure: dict[str, Any],
+    *,
+    fallback_step: str = "",
+) -> str | None:
+    explicit = {
+        "retry_ingest": "ingest",
+        "retry_rewrite": "rewrite",
+        "retry_title": "title_optimize",
+        "retry_render": "render",
+        "retry_images": "images",
+        "retry_inject": "inject",
+    }
+    if action in explicit:
+        return explicit[action]
+    if action != "retry_step":
+        return None
+    stage = str(failure.get("stage") or fallback_step or "").strip().lower()
+    return {
+        "ingesting": "ingest",
+        "rewriting": "rewrite",
+        "title": "title_optimize",
+        "title_optimizing": "title_optimize",
+        "rendering": "render",
+        "image": "images",
+        "injecting": "inject",
+    }.get(stage, stage if stage in {
+        "ingest",
+        "rewrite",
+        "title_optimize",
+        "render",
+        "images",
+        "inject",
+    } else "auto")
+
+
+def _settings_action_message(action: str) -> str:
+    return {
+        "open_account_settings": (
+            "请关闭当前任务弹窗，前往“设置 → 公众号 → 管理 → 基础信息”"
+            "更新凭证并测试连接。"
+        ),
+        "open_template_settings": (
+            "请关闭当前任务弹窗，前往“设置 → 公众号 → 管理 → 草稿模板”"
+            "重新选择或同步模板。"
+        ),
+    }.get(action, "")
+
+
+def _render_inbox_article_card(
+    state: AppState,
+    service: BatchService,
+    item: dict[str, Any],
+    refresh: Callable[[], None],
+    *,
+    review_runtime: dict[str, bool] | None,
+    on_show_batch: Callable[[str], None],
+) -> Any:
+    """Render one decision-oriented inbox row."""
+
+    owner_client = ui.context.client
+    nested_job = (
+        dict(item.get("job") or {})
+        if isinstance(item.get("job"), dict)
+        else {}
+    )
+    batch_id = str(item.get("batch_id") or "")
+    job_id = int(item.get("job_id") or nested_job.get("id") or 0)
+    status = str(item.get("status") or nested_job.get("status") or "")
+    review_status = str(
+        item.get("review_status")
+        or nested_job.get("review_status")
+        or "unviewed"
+    )
+    title = str(
+        item.get("title")
+        or nested_job.get("selected_title")
+        or "尚未选择标题"
+    )
+    account_name = str(
+        item.get("account_name")
+        or nested_job.get("account_name")
+        or "公众号"
+    )
+    failure_value = item.get("failure")
+    failure_recommendation = ""
+    failure_actions: list[str] = []
+    if isinstance(failure_value, dict):
+        failure = "：".join(
+            part
+            for part in (
+                str(failure_value.get("title") or "").strip(),
+                str(failure_value.get("reason") or "").strip(),
+            )
+            if part
+        )
+        failure_recommendation = str(
+            failure_value.get("recommendation") or ""
+        ).strip()
+        failure_actions = list(dict.fromkeys(
+            str(action).strip()
+            for action in list(failure_value.get("actions") or [])
+            if str(action).strip()
+        ))
+        if (
+            not failure_recommendation
+            and any(
+                action in {"replace_url", "paste_text"}
+                for action in failure_actions
+            )
+        ):
+            failure_recommendation = (
+                "可在“恢复选项”中替换来源链接或粘贴原文后再恢复。"
+            )
+    else:
+        failure = str(
+            failure_value
+            or nested_job.get("error")
+            or ""
+        )
+    source = str(
+        item.get("source")
+        or item.get("batch_topic")
+        or ""
+    )
+    source_url = str(item.get("source_url") or "")
+    body_chars = int(item.get("body_chars") or 0)
+    priority_reason = str(item.get("priority_reason") or "")
+    latest_review_summary = item.get("latest_review_summary")
+    if isinstance(latest_review_summary, dict):
+        latest_review_summary = (
+            latest_review_summary.get("conclusion")
+            or latest_review_summary.get("summary")
+            or ""
+        )
+    blocker_texts = [
+        str(blocker.get("message") or blocker.get("label") or blocker)
+        if isinstance(blocker, dict)
+        else str(blocker)
+        for blocker in list(item.get("blockers") or [])
+        if blocker
+    ]
+    is_reviewable = (
+        status == "ready_for_review"
+        and review_status != "confirmed"
+        and bool(batch_id)
+        and job_id > 0
+    )
+    badge_text = (
+        REVIEW_LABELS.get(review_status, review_status)
+        if status == "ready_for_review"
+        else (
+            "写入失败"
+            if str(item.get("step") or nested_job.get("step") or "")
+            == "inject"
+            else STATUS_LABEL.get(status, status)
+        )
+    )
+    badge_color = (
+        REVIEW_COLORS.get(review_status, "orange-8")
+        if status == "ready_for_review"
+        else _job_color(status)
+    )
+
+    async def submit_action_retry(
+        step: str,
+        button: Any,
+        *,
+        success_message: str,
+    ) -> None:
+        if step == "inject":
+            account_id = str(
+                item.get("account_id")
+                or nested_job.get("account_id")
+                or ""
+            ).strip()
+            if account_id:
+                try:
+                    reports = await run.io_bound(
+                        lambda: service.preflight(
+                            [account_id],
+                            force_wechat_check=True,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if has_ip_whitelist_issue(exc) and _ui_client_alive(
+                        owner_client
+                    ):
+                        show_ip_whitelist_guide([account_name])
+                        return
+                else:
+                    if has_ip_whitelist_issue(reports) and _ui_client_alive(
+                        owner_client
+                    ):
+                        show_ip_whitelist_guide([account_name])
+                        return
+        try:
+            await _retry_job_with_loading(
+                service,
+                batch_id,
+                job_id,
+                button,
+                step=step,
+                owner_client=owner_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _ui_client_alive(owner_client):
+                if has_ip_whitelist_issue(exc):
+                    show_ip_whitelist_guide([account_name])
+                    return
+                ui.notify(
+                    f"提交恢复失败：{sanitize_failure_text(exc)}",
+                    type="negative",
+                    timeout=10000,
+                )
+            return
+        if not _ui_client_alive(owner_client):
+            return
+        ui.notify(success_message, type="positive")
+        refresh()
+
+    async def check_relay_connection(button: Any) -> None:
+        _set_retry_loading_safely(
+            button,
+            True,
+            owner_client=owner_client,
+        )
+        try:
+            reports = await run.io_bound(
+                lambda: service.preflight(
+                    [str(item.get("account_id") or nested_job.get("account_id") or "")],
+                    force_wechat_check=True,
+                )
+            )
+            if not _ui_client_alive(owner_client):
+                return
+            report = dict(reports[0]) if reports else {}
+            if has_ip_whitelist_issue(report):
+                show_ip_whitelist_guide([account_name])
+                return
+            failed_checks = [
+                str(check.get("message") or check.get("label") or "")
+                for check in list(report.get("checks") or [])
+                if not bool(check.get("ok"))
+            ]
+            if bool(report.get("can_write")):
+                ui.notify("云端连接与公众号写入接口检测正常", type="positive")
+            else:
+                ui.notify(
+                    "连接检测未通过："
+                    + ("；".join(failed_checks) or "请检查公众号或中转配置"),
+                    type="warning",
+                    timeout=12000,
+                )
+        except Exception as exc:  # noqa: BLE001
+            if _ui_client_alive(owner_client):
+                if has_ip_whitelist_issue(exc):
+                    show_ip_whitelist_guide([account_name])
+                    return
+                ui.notify(
+                    f"连接检测失败：{sanitize_failure_text(exc)}",
+                    type="negative",
+                    timeout=10000,
+                )
+        finally:
+            _set_retry_loading_safely(
+                button,
+                False,
+                owner_client=owner_client,
+            )
+
+    def bind_retry_action(
+        button: Any,
+        step: str,
+        success_message: str,
+    ) -> None:
+        async def handle() -> None:
+            await submit_action_retry(
+                step,
+                button,
+                success_message=success_message,
+            )
+
+        button.on_click(handle)
+
+    def bind_relay_check(button: Any) -> None:
+        async def handle() -> None:
+            await check_relay_connection(button)
+
+        button.on_click(handle)
+
+    with ui.card().classes("w-full q-pa-md") as card:
+        with ui.row().classes("w-full items-start justify-between"):
+            with ui.column().classes("gap-1").style("min-width:0;flex:1"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.label(account_name).classes("text-weight-bold")
+                    ui.badge(badge_text).props(f"color={badge_color}")
+                ui.label(title).classes("text-subtitle1 text-weight-medium")
+                details = [
+                    f'批次 #{item.get("batch_display_id") or batch_id}',
+                    _format_time(item.get("created_at")),
+                ]
+                if body_chars:
+                    details.append(f"{body_chars} 字")
+                ui.label(" · ".join(details)).classes("muted text-caption")
+            if priority_reason:
+                ui.badge(priority_reason).props(
+                    "outline color=deep-orange-7"
+                )
+        if source:
+            ui.label(f"来源：{source}").classes("muted")
+        if source_url:
+            ui.link("打开来源", source_url, new_tab=True).classes(
+                "text-teal-9 text-caption"
+            )
+        ui.label(
+            f"最近 AI 评审：{latest_review_summary or '尚未评审'}"
+        ).classes("text-indigo-8 text-caption")
+        cover_status = str(item.get("cover_status") or "")
+        if cover_status:
+            ui.label(
+                "封面："
+                + {
+                    "ready": "已选择",
+                    "generated": "AI 封面待确认",
+                    "missing": "尚未选择",
+                }.get(cover_status, cover_status)
+            ).classes("muted text-caption")
+        if blocker_texts:
+            ui.label("阻塞项：" + "；".join(blocker_texts)).classes(
+                "text-warning text-caption"
+            )
+        if failure:
+            ui.label(
+                failure
+                if isinstance(failure_value, dict)
+                else _friendly_error(failure)
+            ).classes(
+                "text-negative text-caption"
+            )
+            if failure_recommendation:
+                ui.label(f"建议：{failure_recommendation}").classes(
+                    "text-warning text-caption"
+                )
+        recommended_action = str(item.get("recommended_action") or "").strip()
+        if recommended_action:
+            ui.label(f"推荐下一步：{recommended_action}").classes(
+                "text-teal-9 text-caption text-weight-medium"
+            )
+        if failure_actions:
+            known_actions = {
+                "replace_url",
+                "paste_text",
+                "retry_ingest",
+                "retry_rewrite",
+                "retry_title",
+                "retry_render",
+                "retry_images",
+                "retry_inject",
+                "retry_step",
+                "open_account_settings",
+                "open_template_settings",
+                "open_relay_settings",
+                "show_ip_whitelist_guide",
+                "check_relay",
+                "reconcile_draft",
+                "change_model",
+                "copy_error",
+            }
+            visible_actions = [
+                action for action in failure_actions if action in known_actions
+            ]
+            with ui.row().classes(
+                "w-full items-center gap-2 q-mt-xs failure-action-row"
+            ):
+                if any(
+                    action in {"replace_url", "paste_text"}
+                    for action in visible_actions
+                ):
+                    ui.button(
+                        "替换链接 / 粘贴正文",
+                        on_click=lambda: open_retry_job_dialog(
+                            state,
+                            service,
+                            item,
+                            refresh,
+                        ),
+                    ).props(
+                        "outline dense color=deep-orange-8 no-caps icon=edit_note"
+                    )
+                if "change_model" in visible_actions:
+                    ui.button(
+                        "更换模型后恢复",
+                        on_click=lambda: open_retry_job_dialog(
+                            state,
+                            service,
+                            item,
+                            refresh,
+                        ),
+                    ).props(
+                        "outline dense color=indigo-7 no-caps icon=memory"
+                    )
+                rendered_retry_steps: set[str] = set()
+                for action in visible_actions:
+                    retry_step = _failure_action_retry_step(
+                        action,
+                        dict(failure_value or {})
+                        if isinstance(failure_value, dict)
+                        else {},
+                        fallback_step=str(
+                            item.get("step") or nested_job.get("step") or ""
+                        ),
+                    )
+                    if not retry_step or retry_step in rendered_retry_steps:
+                        continue
+                    rendered_retry_steps.add(retry_step)
+                    retry_label = {
+                        "ingest": "仅重试抓取",
+                        "rewrite": "仅重试正文",
+                        "title_optimize": "仅重试标题",
+                        "render": "仅重试排版",
+                        "images": "仅重试配图",
+                        "inject": "仅重试写入",
+                        "auto": "从失败步骤重试",
+                    }.get(retry_step, "从失败步骤重试")
+                    action_button = ui.button(
+                        retry_label,
+                    ).props(
+                        "outline dense color=deep-orange-8 no-caps "
+                        "icon=restart_alt"
+                    )
+                    bind_retry_action(
+                        action_button,
+                        retry_step,
+                        f"已提交{retry_label}任务",
+                    )
+                for action in (
+                    "open_account_settings",
+                    "open_template_settings",
+                ):
+                    if action not in visible_actions:
+                        continue
+                    setting_label = {
+                        "open_account_settings": "查看公众号配置",
+                        "open_template_settings": "查看模板配置",
+                    }[action]
+                    ui.button(
+                        setting_label,
+                        on_click=lambda _=None, value=action: ui.notify(
+                            _settings_action_message(value),
+                            type="info",
+                            timeout=12000,
+                        ),
+                    ).props(
+                        "flat dense color=teal-9 no-caps icon=settings"
+                    )
+                if any(
+                    action in visible_actions
+                    for action in (
+                        "open_relay_settings",
+                        "show_ip_whitelist_guide",
+                    )
+                ):
+                    ui.button(
+                        "查看 IP 白名单配置教程",
+                        on_click=lambda: show_ip_whitelist_guide(
+                            [account_name]
+                        ),
+                    ).props(
+                        "outline dense color=deep-orange-8 no-caps "
+                        "icon=help_outline"
+                    )
+                if "check_relay" in visible_actions:
+                    relay_button = ui.button(
+                        "重新检测连接",
+                    ).props(
+                        "outline dense color=teal-9 no-caps icon=network_check"
+                    )
+                    bind_relay_check(relay_button)
+                if "reconcile_draft" in visible_actions:
+                    reconcile_button = ui.button(
+                        "安全对账草稿",
+                    ).props(
+                        "unelevated dense color=deep-orange-8 no-caps "
+                        "icon=sync_problem"
+                    )
+                    bind_retry_action(
+                        reconcile_button,
+                        "inject",
+                        "已提交安全对账；系统不会盲目重复写入草稿",
+                    )
+                if "copy_error" in visible_actions:
+                    copy_text = sanitize_failure_text(
+                        (
+                            failure_value.get("technical_summary")
+                            if isinstance(failure_value, dict)
+                            else ""
+                        )
+                        or nested_job.get("error")
+                        or failure
+                    )
+                    ui.button(
+                        "复制错误摘要",
+                        on_click=lambda _=None, value=copy_text: (
+                            ui.clipboard.write(value),
+                            ui.notify("错误摘要已复制", type="positive"),
+                        ),
+                    ).props(
+                        "flat dense color=grey-8 no-caps icon=content_copy"
+                    )
+        with ui.row().classes("w-full items-center justify-end q-mt-sm"):
+            if is_reviewable:
+                ui.button(
+                    "快速审核",
+                    on_click=lambda: open_review_workbench(
+                        state,
+                        service,
+                        batch_id,
+                        job_id,
+                        refresh,
+                        review_runtime=review_runtime,
+                        initial_mode="quick",
+                    ),
+                ).props(
+                    "unelevated color=teal-9 no-caps icon=rate_review"
+                )
+                ui.button(
+                    "深度编辑",
+                    on_click=lambda: open_review_workbench(
+                        state,
+                        service,
+                        batch_id,
+                        job_id,
+                        refresh,
+                        review_runtime=review_runtime,
+                        initial_mode="deep",
+                    ),
+                ).props(
+                    "outline color=teal-9 no-caps icon=edit_note"
+                )
+            else:
+                if status == "failed" and batch_id and job_id > 0:
+                    async def retry_from_failed_step() -> None:
+                        try:
+                            await _retry_job_with_loading(
+                                service,
+                                batch_id,
+                                job_id,
+                                retry_btn,
+                                step="auto",
+                                owner_client=owner_client,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            if not _ui_client_alive(owner_client):
+                                return
+                            try:
+                                ui.notify(
+                                    "提交恢复失败："
+                                    f"{sanitize_failure_text(exc)}",
+                                    type="negative",
+                                    timeout=10000,
+                                )
+                            except RuntimeError:
+                                return
+                            return
+                        if not _ui_client_alive(owner_client):
+                            return
+                        try:
+                            ui.notify(
+                                "已提交恢复任务，将从失败步骤继续",
+                                type="positive",
+                            )
+                            refresh()
+                        except RuntimeError:
+                            return
+
+                    retry_btn = ui.button(
+                        "从失败步骤重试",
+                        on_click=retry_from_failed_step,
+                    ).props(
+                        "unelevated color=deep-orange-8 no-caps "
+                        "icon=restart_alt"
+                    )
+                    ui.button(
+                        "恢复选项",
+                        on_click=lambda: open_retry_job_dialog(
+                            state,
+                            service,
+                            item,
+                            refresh,
+                        ),
+                    ).props(
+                        "outline color=deep-orange-8 no-caps icon=tune"
+                    )
+                ui.button(
+                    "查看所在批次",
+                    on_click=lambda: on_show_batch(batch_id),
+                ).props(
+                    "outline color=teal-9 no-caps icon=inventory_2"
+                )
+    return card
 
 
 def open_review_workbench(
@@ -209,7 +1374,35 @@ def open_review_workbench(
     on_change: Callable[[], None],
     *,
     review_runtime: dict[str, bool] | None = None,
+    initial_mode: str = "quick",
 ) -> None:
+    owner_client = ui.context.client
+    workbench_state = {"open": True}
+
+    def ui_alive() -> bool:
+        return not bool(getattr(owner_client, "is_deleted", False))
+
+    def workbench_alive() -> bool:
+        return ui_alive() and bool(workbench_state["open"])
+
+    async def scroll_to_workbench_result(
+        element: Any,
+        *,
+        block: str = "center",
+    ) -> None:
+        """Keep the workbench open and bring an async operation's result into view."""
+
+        await asyncio.sleep(0)
+        if not workbench_alive():
+            return
+        try:
+            element.run_method(
+                "scrollIntoView",
+                {"behavior": "smooth", "block": block},
+            )
+        except RuntimeError:
+            return
+
     service.mark_job_viewed(batch_id, job_id)
     batch = service.get_batch(batch_id, include_content=True)
     job = next(item for item in batch["jobs"] if int(item["id"]) == int(job_id))
@@ -227,6 +1420,7 @@ def open_review_workbench(
         "max-width:1180px;max-height:94vh;overflow-y:auto"
     ):
         def close_workbench() -> None:
+            workbench_state["open"] = False
             if review_runtime is not None:
                 review_runtime["review_open"] = False
             dialog.close()
@@ -248,6 +1442,21 @@ def open_review_workbench(
             note=f'正在审核：{job["account_name"]}',
             compact=True,
         )
+        mode_value = "deep" if initial_mode == "deep" else "quick"
+        review_mode = ui.toggle(
+            {
+                "quick": "快速审核",
+                "deep": "深度编辑",
+            },
+            value=mode_value,
+        ).props("no-caps color=teal-9")
+        quick_review_hint = ui.label(
+            "快速审核聚焦标题、评审与阻断摘要、当前封面、最终预览和确认；"
+            "切换深度编辑不会重建页面或丢失输入。"
+        ).classes("muted text-caption")
+        deep_review_controls: list[Any] = []
+        deep_review_actions: list[Any] = []
+        quick_review_actions: list[Any] = []
 
         title_options = clean_titles(job)
         selected_title = clean_candidate_text(
@@ -268,6 +1477,264 @@ def open_review_workbench(
             title_choice.on_value_change(
                 lambda event: setattr(title_in, "value", str(event.value or ""))
             )
+        quick_summary_host = ui.column().classes("w-full gap-2")
+        cover_preview_state = {
+            "media_id": "",
+            "url": "",
+            "loading": False,
+        }
+
+        def reveal_deep_review() -> None:
+            review_mode.value = "deep"
+            apply_review_mode("deep")
+            client_timer(
+                0.05,
+                lambda: review_jury_host.run_method(
+                    "scrollIntoView",
+                    {"behavior": "smooth", "block": "start"},
+                ),
+                once=True,
+            )
+
+        def render_quick_review_summary() -> None:
+            """Keep decision-critical context visible in quick review mode."""
+
+            quick_summary_host.clear()
+            try:
+                reviews = service.list_editorial_reviews(
+                    job_id=job_id,
+                    limit=1,
+                )
+            except Exception:  # noqa: BLE001
+                reviews = []
+            latest_review = dict(reviews[0]) if reviews else {}
+            review_result = dict(latest_review.get("result") or {})
+            review_summary = str(
+                review_result.get("conclusion")
+                or review_result.get("summary")
+                or ""
+            )
+            blocking_count = int(
+                latest_review.get("blocking_count") or 0
+            )
+            meta = dict(job.get("meta") or {})
+            quality = dict(meta.get("layout_quality") or {})
+            blockers = [
+                str(message)
+                for message in list(quality.get("errors") or [])
+                if message
+            ]
+            reminders = [
+                str(message)
+                for message in list(quality.get("warnings") or [])
+                if message
+            ]
+            if str(job.get("review_status") or "") == "needs_changes":
+                blockers.insert(0, "文章已标记为需要修改")
+            if job.get("error"):
+                blockers.append(_friendly_error(str(job["error"])))
+            cover_meta = dict(meta.get("generated_cover") or {})
+            cover_active = bool(
+                meta.get("generated_cover_active") and cover_meta
+            )
+            cover_preview_url = (
+                str(cover_meta.get("url") or "")
+                if cover_active
+                else str(cover_preview_state.get("url") or "")
+            )
+            generated_cover_path = Path(
+                str(cover_meta.get("local_path") or "")
+            )
+            with quick_summary_host:
+                with ui.card().classes("w-full q-pa-md").style(
+                    "border:1px solid #dbe8e4;box-shadow:none"
+                ):
+                    with ui.row().classes(
+                        "w-full items-start justify-between"
+                    ):
+                        with ui.column().classes("gap-0").style(
+                            "min-width:0;flex:1"
+                        ):
+                            ui.label("AI 评审摘要").classes(
+                                "text-weight-bold"
+                            )
+                            ui.label(
+                                review_summary
+                                if review_summary
+                                else "尚未进行 AI 评审"
+                            ).classes("muted")
+                            if blocking_count:
+                                ui.label(
+                                    f"AI 评审仍有 {blocking_count} 个阻断项"
+                                ).classes("text-warning text-caption")
+                        ui.button(
+                            (
+                                "查看完整评审"
+                                if latest_review
+                                else "手动开始 AI 评审"
+                            ),
+                            on_click=reveal_deep_review,
+                        ).props(
+                            "outline color=indigo-7 no-caps icon=rate_review"
+                        )
+                    ui.separator().classes("q-my-sm")
+                    with ui.row().classes("w-full items-center gap-3"):
+                        if cover_preview_url or (
+                            cover_active and generated_cover_path.is_file()
+                        ):
+                            preview_source: Any = None
+                            if cover_preview_url:
+                                preview_source = wechat_image_proxy_url(
+                                    cover_preview_url
+                                )
+                            elif generated_cover_path.is_file():
+                                preview_source = generated_cover_path
+                            if preview_source is not None:
+                                ui.image(preview_source).classes(
+                                    "rounded-borders"
+                                ).props("fit=cover no-spinner").style(
+                                    "width:180px;aspect-ratio:2.35/1"
+                                )
+                        elif bool(cover_preview_state.get("loading")):
+                            with ui.column().classes(
+                                "items-center justify-center rounded-borders bg-grey-2"
+                            ).style("width:180px;aspect-ratio:2.35/1"):
+                                ui.spinner("dots", size="sm", color="teal-9")
+                                ui.label("正在读取封面缩略图").classes(
+                                    "muted text-caption"
+                                )
+                        with ui.column().classes("gap-0"):
+                            ui.label("当前封面").classes("text-weight-bold")
+                            ui.label(
+                                (
+                                    "AI 封面已选择"
+                                    if cover_active
+                                    else (
+                                        (
+                                            "已选择公众号素材"
+                                            if cover_preview_url
+                                            else "封面已选择，缩略图暂不可用"
+                                        )
+                                        if job.get("thumb_media_id")
+                                        else "尚未选择封面"
+                                    )
+                                )
+                            ).classes(
+                                "text-positive"
+                                if job.get("thumb_media_id")
+                                else "text-warning"
+                            )
+                    ui.label(
+                        (
+                            "阻断摘要：无"
+                            if not blockers and not blocking_count
+                            else "阻断摘要："
+                            + "；".join(
+                                [
+                                    *blockers,
+                                    *(
+                                        [f"AI 评审 {blocking_count} 项"]
+                                        if blocking_count
+                                        else []
+                                    ),
+                                ]
+                            )
+                        )
+                    ).classes(
+                        "muted text-caption"
+                        if not blockers and not blocking_count
+                        else "text-warning text-caption"
+                    )
+                    ui.label(
+                        (
+                            "提醒摘要：无"
+                            if not reminders
+                            else "提醒摘要：" + "；".join(reminders)
+                        )
+                    ).classes(
+                        "muted text-caption"
+                        if not reminders
+                        else "text-amber-9 text-caption"
+                    )
+
+        async def load_selected_cover_preview(media_id: str) -> None:
+            preview_url = ""
+            try:
+                for offset in range(0, 500, 100):
+                    page = await run.io_bound(
+                        lambda current_offset=offset: service.list_cover_options(
+                            batch_id,
+                            job_id,
+                            limit=100,
+                            offset=current_offset,
+                        )
+                    )
+                    matched = next(
+                        (
+                            item
+                            for item in page
+                            if str(item.get("media_id") or "") == media_id
+                        ),
+                        None,
+                    )
+                    if matched:
+                        preview_url = str(matched.get("url") or "")
+                        break
+                    if len(page) < 100:
+                        break
+            except Exception:  # noqa: BLE001
+                preview_url = ""
+            if (
+                not workbench_alive()
+                or str(cover_preview_state.get("media_id") or "") != media_id
+            ):
+                return
+            cover_preview_state["url"] = preview_url.replace(
+                "http://mmbiz.qpic.cn/",
+                "https://mmbiz.qpic.cn/",
+            )
+            cover_preview_state["loading"] = False
+            render_quick_review_summary()
+
+        def schedule_selected_cover_preview() -> None:
+            media_id = str(job.get("thumb_media_id") or "")
+            meta = dict(job.get("meta") or {})
+            if bool(meta.get("generated_cover_active")):
+                cover_preview_state.update(
+                    media_id=media_id,
+                    url="",
+                    loading=False,
+                )
+                return
+            if not media_id:
+                cover_preview_state.update(
+                    media_id="",
+                    url="",
+                    loading=False,
+                )
+                return
+            if (
+                str(cover_preview_state.get("media_id") or "") == media_id
+                and (
+                    bool(cover_preview_state.get("url"))
+                    or bool(cover_preview_state.get("loading"))
+                )
+            ):
+                return
+            cover_preview_state.update(
+                media_id=media_id,
+                url="",
+                loading=True,
+            )
+            render_quick_review_summary()
+            client_timer(
+                0.05,
+                lambda: load_selected_cover_preview(media_id),
+                once=True,
+            )
+
+        render_quick_review_summary()
+        schedule_selected_cover_preview()
         subtitle_options = clean_subtitles(job)
         selected_subtitle = clean_candidate_text(
             str(job.get("selected_subtitle") or "")
@@ -278,7 +1745,7 @@ def open_review_workbench(
             f"更多优化：副标题与摘要（{len(subtitle_options)} 个副标题候选）",
             icon="tune",
             value=False,
-        ).classes("w-full"):
+        ).classes("w-full") as subtitle_editor:
             if subtitle_options:
                 ui.label("副标题候选（单选，也可以在下方直接修改）").classes(
                     "text-weight-medium"
@@ -315,9 +1782,14 @@ def open_review_workbench(
             digest_in = ui.textarea(
                 "摘要", value=str(job.get("digest") or "")
             ).classes("w-full").props("outlined rows=3 stack-label")
+        deep_review_controls.append(subtitle_editor)
         body_in = ui.textarea(
             "正文纯文本", value=str(job.get("body") or "")
         ).classes("w-full").props("outlined rows=18 stack-label")
+        deep_review_controls.append(body_in)
+
+        async def scroll_to_updated_article() -> None:
+            await scroll_to_workbench_result(body_in, block="start")
 
         def editor_has_unsaved_changes(*, include_body: bool = True) -> bool:
             current_subtitle = str(job.get("selected_subtitle") or "").strip()
@@ -348,18 +1820,22 @@ def open_review_workbench(
             )
             return False
 
-        build_review_jury_panel(
-            service=service,
-            batch_id=batch_id,
-            job_id=job_id,
-            job=job,
-            require_saved_editor=require_saved_editor,
-            on_job_updated=lambda updated: apply_updated_job(
-                updated,
-                refresh_images=True,
-                refresh_cover=True,
-            ),
-        )
+        with ui.column().classes("w-full gap-2") as review_jury_host:
+            build_review_jury_panel(
+                service=service,
+                batch_id=batch_id,
+                job_id=job_id,
+                job=job,
+                require_saved_editor=require_saved_editor,
+                on_job_updated=lambda updated: apply_updated_job(
+                    updated,
+                    refresh_images=True,
+                    refresh_cover=True,
+                ),
+                on_article_updated=scroll_to_updated_article,
+                is_workbench_alive=workbench_alive,
+            )
+        deep_review_controls.append(review_jury_host)
 
         def current_paragraphs() -> list[str]:
             return [
@@ -374,7 +1850,9 @@ def open_review_workbench(
                 for index, text in enumerate(current_paragraphs())
             }
 
-        with ui.expansion("AI 二次修改正文（按段）", value=False).classes("w-full"):
+        with ui.expansion(
+            "AI 二次修改正文（按段）", value=False
+        ).classes("w-full") as paragraph_editor:
             ui.label(
                 "选择不满意的段落并说明修改要求。系统只替换这一段，其他正文和已审核图片保持不变。"
             ).classes("muted")
@@ -439,13 +1917,26 @@ def open_review_workbench(
                             instruction=str(paragraph_instruction.value or ""),
                         )
                     )
+                    if not workbench_alive():
+                        return
                     apply_updated_job(updated, refresh_images=False)
                     paragraph_instruction.value = ""
                     ui.notify("所选段落已按要求二次改写，文章需要重新确认", type="positive")
+                    await scroll_to_workbench_result(
+                        selected_paragraph_preview,
+                        block="center",
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    ui.notify(f"段落重新生成失败：{exc}", type="negative", timeout=10000)
+                    if workbench_alive():
+                        ui.notify(
+                            "段落重新生成失败："
+                            f"{sanitize_failure_text(exc)}",
+                            type="negative",
+                            timeout=10000,
+                        )
                 finally:
-                    set_button_loading(regenerate_btn, False)
+                    if workbench_alive():
+                        set_button_loading(regenerate_btn, False)
 
             with ui.row().classes("items-center"):
                 ui.button("上移", on_click=lambda: move_paragraph(-1)).props("outline dense no-caps")
@@ -459,11 +1950,9 @@ def open_review_workbench(
             ui.label(
                 "模型会同时参考标题、前后文和原段落；修改前版本会自动保存，可在历史版本中恢复。"
             ).classes("muted")
+        deep_review_controls.append(paragraph_editor)
 
         inline_assets = list((job.get("meta") or {}).get("inline_images") or [])
-        inline_warnings = list(
-            (job.get("meta") or {}).get("inline_image_warnings") or []
-        )
         with ui.expansion(
             f"正文生图 · 已生成 {len(inline_assets)} 张",
             icon="auto_awesome",
@@ -473,6 +1962,7 @@ def open_review_workbench(
                 "系统按正文小标题识别论点，将图片插在每个论点最后一个段落之后。"
             ).classes("muted")
             inline_content = ui.column().classes("w-full gap-2")
+            inline_card_by_index: dict[int, Any] = {}
 
             def render_inline_assets() -> None:
                 assets = list((job.get("meta") or {}).get("inline_images") or [])
@@ -480,6 +1970,7 @@ def open_review_workbench(
                     (job.get("meta") or {}).get("inline_image_warnings") or []
                 )
                 inline_expansion.set_text(f"正文生图 · 已生成 {len(assets)} 张")
+                inline_card_by_index.clear()
                 inline_content.clear()
                 with inline_content:
                     for warning in warnings:
@@ -493,14 +1984,16 @@ def open_review_workbench(
                         return
                     with ui.grid(columns=3).classes("w-full gap-3 q-mt-sm"):
                         for asset in assets:
-                            with ui.card().classes("w-full q-pa-sm").style(
+                            image_index = int(
+                                asset.get("index")
+                                or asset.get("image_index")
+                                or 0
+                            )
+                            image_card = ui.card().classes("w-full q-pa-sm").style(
                                 "min-width:0"
-                            ):
-                                image_index = int(
-                                    asset.get("index")
-                                    or asset.get("image_index")
-                                    or 0
-                                )
+                            )
+                            inline_card_by_index[image_index] = image_card
+                            with image_card:
                                 image_url = str(asset.get("url") or "")
                                 if image_url:
                                     ui.image(
@@ -574,22 +2067,34 @@ def open_review_workbench(
                                                 instruction=request,
                                             )
                                         )
+                                        if not workbench_alive():
+                                            return
                                         ui.notify(
                                             f"正文配图 {selected_index} 已按要求重新生成，其他图片保持不变",
                                             type="positive",
                                             timeout=10000,
                                         )
                                     except Exception as exc:  # noqa: BLE001
-                                        ui.notify(
-                                            f"单图重新生成失败，原图片已保留：{exc}",
-                                            type="negative",
-                                            timeout=15000,
-                                        )
+                                        if workbench_alive():
+                                            ui.notify(
+                                                "单图重新生成失败，原图片已保留："
+                                                f"{sanitize_failure_text(exc)}",
+                                                type="negative",
+                                                timeout=15000,
+                                            )
                                     finally:
-                                        set_button_loading(action_button, False)
+                                        if workbench_alive():
+                                            set_button_loading(action_button, False)
                                     if updated_job is not None:
                                         apply_updated_job(
                                             updated_job, refresh_images=True
+                                        )
+                                        await scroll_to_workbench_result(
+                                            inline_card_by_index.get(
+                                                selected_index,
+                                                inline_content,
+                                            ),
+                                            block="center",
                                         )
 
                                 async def remove_one_image(
@@ -608,19 +2113,29 @@ def open_review_workbench(
                                                 batch_id, job_id, selected_index
                                             )
                                         )
+                                        if not workbench_alive():
+                                            return
                                         ui.notify(
                                             "已移除所选正文配图",
                                             type="positive",
                                         )
                                     except Exception as exc:  # noqa: BLE001
-                                        ui.notify(
-                                            f"移除失败：{exc}", type="negative"
-                                        )
+                                        if workbench_alive():
+                                            ui.notify(
+                                                "移除失败："
+                                                f"{sanitize_failure_text(exc)}",
+                                                type="negative",
+                                            )
                                     finally:
-                                        set_button_loading(action_button, False)
+                                        if workbench_alive():
+                                            set_button_loading(action_button, False)
                                     if updated_job is not None:
                                         apply_updated_job(
                                             updated_job, refresh_images=True
+                                        )
+                                        await scroll_to_workbench_result(
+                                            inline_content,
+                                            block="start",
                                         )
 
                                 image_revision_btn.on_click(regenerate_one_image)
@@ -648,6 +2163,8 @@ def open_review_workbench(
                     updated = await run.io_bound(
                         lambda: service.regenerate_inline_images(batch_id, job_id)
                     )
+                    if not workbench_alive():
+                        return
                     generated = list((updated.get("meta") or {}).get("inline_images") or [])
                     warnings = list(
                         (updated.get("meta") or {}).get("inline_image_warnings") or []
@@ -663,10 +2180,20 @@ def open_review_workbench(
                         refresh_images=True,
                         refresh_cover=True,
                     )
+                    await scroll_to_workbench_result(
+                        inline_content,
+                        block="start",
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    ui.notify(f"正文生图失败：{exc}", type="negative", timeout=15000)
+                    if workbench_alive():
+                        ui.notify(
+                            f"正文生图失败：{sanitize_failure_text(exc)}",
+                            type="negative",
+                            timeout=15000,
+                        )
                 finally:
-                    set_button_loading(inline_image_btn, False)
+                    if workbench_alive():
+                        set_button_loading(inline_image_btn, False)
 
             inline_image_btn = ui.button(
                 "生成 / 重新生成正文配图",
@@ -678,12 +2205,13 @@ def open_review_workbench(
                 "整批重新生成会调用多次生图接口；单张修改只调用一次。这里是按描述重新生成，"
                 "不是在原图像素上局部修图。"
             ).classes("muted")
+        deep_review_controls.append(inline_expansion)
 
         with ui.expansion(
             "封面主图",
             icon="panorama",
             value=False,
-        ).classes("w-full"):
+        ).classes("w-full") as cover_editor:
             ui.label(
                 "AI 封面同时参考当前标题、正文主题和核心论点，并作为该公众号的永久图片素材上传。"
             ).classes("muted")
@@ -776,16 +2304,28 @@ def open_review_workbench(
                             instruction=str(cover_instruction.value or ""),
                         )
                     )
+                    if not workbench_alive():
+                        return
                     generated = dict((updated.get("meta") or {}).get("generated_cover") or {})
                     if not generated:
                         warning = str((updated.get("meta") or {}).get("cover_image_warning") or "")
                         raise RuntimeError(warning or "生图智能体没有返回可用封面")
                     apply_updated_job(updated, refresh_cover=True)
                     ui.notify("AI 封面已生成并设为当前封面", type="positive", timeout=10000)
+                    await scroll_to_workbench_result(
+                        cover_preview_container,
+                        block="center",
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    ui.notify(f"封面生成失败：{exc}", type="negative", timeout=15000)
+                    if workbench_alive():
+                        ui.notify(
+                            f"封面生成失败：{sanitize_failure_text(exc)}",
+                            type="negative",
+                            timeout=15000,
+                        )
                 finally:
-                    set_button_loading(generate_cover_btn, False)
+                    if workbench_alive():
+                        set_button_loading(generate_cover_btn, False)
 
             generate_cover_btn = ui.button(
                 "生成 / 重新生成封面主图",
@@ -794,6 +2334,7 @@ def open_review_workbench(
             ui.label(
                 "生成会调用一次生图接口并可能产生费用；更换最终标题后建议重新生成。"
             ).classes("muted")
+        deep_review_controls.append(cover_editor)
 
         current_cover = str(job.get("thumb_media_id") or "")
         cover_in = ui.select(
@@ -805,7 +2346,11 @@ def open_review_workbench(
             "已选择当前封面" if current_cover else "尚未选择封面"
         ).classes("muted")
         cover_gallery = ui.grid(columns=4).classes("w-full gap-3")
+        deep_review_controls.extend(
+            (cover_in, selected_cover_label, cover_gallery)
+        )
         cover_items: list[dict[str, str]] = []
+        cover_card_by_media_id: dict[str, Any] = {}
         cover_page_size = 24
 
         def select_cover(media_id: str, name: str) -> None:
@@ -824,6 +2369,7 @@ def open_review_workbench(
                 options,
                 value=cover_in.value if cover_in.value in options else None,
             )
+            cover_card_by_media_id.clear()
             cover_gallery.clear()
             with cover_gallery:
                 for index, item in enumerate(cover_items, 1):
@@ -832,7 +2378,11 @@ def open_review_workbench(
                     image_url = str(item.get("url") or "").replace(
                         "http://mmbiz.qpic.cn/", "https://mmbiz.qpic.cn/"
                     )
-                    with ui.card().classes("w-full q-pa-sm").style("min-width:0"):
+                    cover_card = ui.card().classes("w-full q-pa-sm").style(
+                        "min-width:0"
+                    )
+                    cover_card_by_media_id[media_id] = cover_card
+                    with cover_card:
                         if image_url:
                             ui.image(wechat_image_proxy_url(image_url)).classes(
                                 "w-full rounded-borders"
@@ -865,21 +2415,40 @@ def open_review_workbench(
                         offset=start,
                     )
                 )
+                if not workbench_alive():
+                    return
                 if reset:
                     cover_items.clear()
                 known = {str(item["media_id"]) for item in cover_items}
-                cover_items.extend(
+                new_items = [
                     item for item in page if str(item["media_id"]) not in known
-                )
+                ]
+                cover_items.extend(new_items)
                 render_cover_gallery()
                 more_covers_btn.set_visibility(len(page) == cover_page_size)
                 ui.notify(
                     f"已显示 {len(cover_items)} 张该公众号封面素材", type="positive"
                 )
+                await scroll_to_workbench_result(
+                    (
+                        cover_card_by_media_id.get(
+                            str(new_items[0]["media_id"]),
+                            cover_gallery,
+                        )
+                        if not reset and new_items
+                        else cover_gallery
+                    ),
+                    block="start" if reset else "center",
+                )
             except Exception as exc:  # noqa: BLE001
-                ui.notify(f"读取封面失败：{exc}", type="negative")
+                if workbench_alive():
+                    ui.notify(
+                        f"读取封面失败：{sanitize_failure_text(exc)}",
+                        type="negative",
+                    )
             finally:
-                set_button_loading(active_button, False)
+                if workbench_alive():
+                    set_button_loading(active_button, False)
 
         async def reload_covers() -> None:
             await load_covers(reset=True)
@@ -887,7 +2456,7 @@ def open_review_workbench(
         async def load_more_covers() -> None:
             await load_covers(reset=False)
 
-        with ui.row().classes("items-center"):
+        with ui.row().classes("items-center") as cover_actions:
             cover_btn = ui.button(
                 "读取该公众号封面素材", on_click=reload_covers
             ).props("outline dense color=teal-9 no-caps icon=image")
@@ -895,8 +2464,11 @@ def open_review_workbench(
                 "加载更多封面", on_click=load_more_covers
             ).props("flat dense color=teal-9 no-caps icon=expand_more")
             more_covers_btn.set_visibility(False)
+        deep_review_controls.append(cover_actions)
 
-        with ui.expansion("历史版本", value=False).classes("w-full"):
+        with ui.expansion(
+            "历史版本", value=False
+        ).classes("w-full") as history_editor:
             version_in = ui.select(
                 options={},
                 value=None,
@@ -914,16 +2486,24 @@ def open_review_workbench(
                             batch_id, job_id, int(version_in.value)
                         )
                     )
+                    if not workbench_alive():
+                        return
                     apply_updated_job(
                         updated,
                         refresh_images=True,
                         refresh_cover=True,
                     )
                     ui.notify("已恢复历史版本，文章需要重新确认", type="positive")
+                    await scroll_to_updated_article()
                 except Exception as exc:  # noqa: BLE001
-                    ui.notify(f"恢复失败：{exc}", type="negative")
+                    if workbench_alive():
+                        ui.notify(
+                            f"恢复失败：{sanitize_failure_text(exc)}",
+                            type="negative",
+                        )
                 finally:
-                    set_button_loading(restore_btn, False)
+                    if workbench_alive():
+                        set_button_loading(restore_btn, False)
 
             restore_btn = ui.button("恢复此版本", on_click=restore_version).props(
                 "outline color=teal-9 no-caps icon=history"
@@ -948,11 +2528,14 @@ def open_review_workbench(
                     restore_btn.disable()
 
             refresh_version_options()
+        deep_review_controls.append(history_editor)
 
         with ui.expansion("排版质检与最终 HTML 预览", value=True).classes("w-full"):
             quality_summary = ui.label().classes("muted")
             quality_messages = ui.column().classes("w-full gap-1")
-            preview_container = ui.element("div").classes("preview-frame w-full")
+            preview_container = ui.element("div").classes(
+                "preview-frame review-phone-preview w-full"
+            )
 
             def render_quality_preview() -> None:
                 quality = (job.get("meta") or {}).get("layout_quality") or {}
@@ -1024,6 +2607,8 @@ def open_review_workbench(
                 render_cover_preview()
             render_quality_preview()
             refresh_version_options()
+            render_quick_review_summary()
+            schedule_selected_cover_preview()
 
         async def save_and_render() -> None:
             set_button_loading(save_btn, True)
@@ -1047,16 +2632,28 @@ def open_review_workbench(
                 updated = await run.io_bound(
                     lambda: service.rerender_job(batch_id, job_id)
                 )
+                if not workbench_alive():
+                    return
                 apply_updated_job(
                     updated,
                     refresh_images=True,
                     refresh_cover=True,
                 )
                 ui.notify("修改已保存并重新排版", type="positive")
+                await scroll_to_workbench_result(
+                    preview_container,
+                    block="start",
+                )
             except Exception as exc:  # noqa: BLE001
-                ui.notify(f"保存失败：{exc}", type="negative", timeout=10000)
+                if workbench_alive():
+                    ui.notify(
+                        f"保存失败：{sanitize_failure_text(exc)}",
+                        type="negative",
+                        timeout=10000,
+                    )
             finally:
-                set_button_loading(save_btn, False)
+                if workbench_alive():
+                    set_button_loading(save_btn, False)
 
         async def confirm() -> None:
             set_button_loading(confirm_btn, True)
@@ -1082,11 +2679,14 @@ def open_review_workbench(
                 latest = await run.io_bound(
                     lambda: service.get_batch(batch_id, include_content=False)
                 )
+                if not workbench_alive():
+                    return
                 following = next_review_job(
                     list(latest.get("jobs") or []), current_job_id=job_id
                 )
                 if following is None and review_runtime is not None:
                     review_runtime["review_open"] = False
+                workbench_state["open"] = False
                 dialog.close()
                 on_change()
                 if following is not None:
@@ -1109,42 +2709,84 @@ def open_review_workbench(
                 else:
                     ui.notify("全部文章已确认，可以写入草稿箱", type="positive")
             except Exception as exc:  # noqa: BLE001
-                ui.notify(f"确认失败：{exc}", type="negative", timeout=10000)
+                if workbench_alive():
+                    ui.notify(
+                        f"确认失败：{sanitize_failure_text(exc)}",
+                        type="negative",
+                        timeout=10000,
+                    )
             finally:
-                set_button_loading(confirm_btn, False)
+                if workbench_alive():
+                    set_button_loading(confirm_btn, False)
 
         def needs_changes() -> None:
-            service.request_job_changes(batch_id, job_id)
-            ui.notify("已标记为需要修改", type="warning")
-            if review_runtime is not None:
-                review_runtime["review_open"] = False
-            dialog.close()
-            on_change()
+            updated = service.request_job_changes(batch_id, job_id)
+            job["review_status"] = str(
+                updated.get("review_status") or "needs_changes"
+            )
+            review_mode.value = "deep"
+            apply_review_mode("deep")
+            render_quick_review_summary()
+            ui.notify(
+                "已标记为需要修改，并切换到原位深度编辑",
+                type="warning",
+            )
 
-        following_at_open = next_review_job(
-            list(batch.get("jobs") or []), current_job_id=job_id
-        )
+        def apply_review_mode(mode: str) -> None:
+            """Switch modes in place so controls, input values and scroll survive."""
+
+            show_deep_editor = mode == "deep"
+            for control in deep_review_controls:
+                control.set_visibility(show_deep_editor)
+            for control in deep_review_actions:
+                control.set_visibility(show_deep_editor)
+            for control in quick_review_actions:
+                control.set_visibility(not show_deep_editor)
+            quick_review_hint.set_visibility(not show_deep_editor)
+
+        def switch_review_mode(event: Any) -> None:
+            mode = str(event.value or "quick")
+            apply_review_mode(mode)
+            if mode == "quick":
+                render_quick_review_summary()
+
         with ui.row().classes("review-action-bar w-full justify-end q-mt-md"):
-            with ui.button("更多", icon="more_horiz").props(
+            more_btn = ui.button("更多", icon="more_horiz").props(
                 "flat color=grey-8 no-caps"
-            ):
+            )
+            with more_btn:
                 with ui.menu():
                     ui.menu_item("标记为需要修改", on_click=needs_changes)
             save_btn = ui.button("保存文章修改", on_click=save_and_render).props(
                 "outline color=teal-9 no-caps"
             )
+            needs_changes_btn = ui.button(
+                "需要修改",
+                on_click=needs_changes,
+            ).props(
+                "unelevated color=deep-orange-8 no-caps icon=edit_note"
+            )
             confirm_btn = ui.button(
-                "确认此文章并继续下一篇"
-                if following_at_open is not None
-                else "确认此文章",
+                "确认此文章",
                 on_click=confirm,
             ).props(
                 "unelevated color=teal-9 no-caps icon=check"
             )
+        deep_review_actions.extend((more_btn, save_btn))
+        quick_review_actions.append(needs_changes_btn)
+        review_mode.on_value_change(switch_review_mode)
+        apply_review_mode(mode_value)
     if review_runtime is not None:
+        def sync_review_open_state(event: Any) -> None:
+            is_open = bool(event.value)
+            workbench_state["open"] = is_open
+            review_runtime["review_open"] = is_open
+
+        dialog.on_value_change(sync_review_open_state)
+    else:
         dialog.on_value_change(
-            lambda event: review_runtime.__setitem__(
-                "review_open", bool(event.value)
+            lambda event: workbench_state.__setitem__(
+                "open", bool(event.value)
             )
         )
     dialog.open()
@@ -1160,9 +2802,55 @@ def _render_batch_card(
     focused: bool = False,
     auto_expand: bool = False,
 ) -> Any:
+    owner_client = ui.context.client
     progress = batch.get("progress") or {}
     jobs = list(batch.get("jobs") or [])
     topic = str(batch.get("topic") or "").strip() or _batch_topic(jobs)
+
+    async def retry_failed_jobs_in_place(button: Any) -> None:
+        failed_jobs = [
+            job for job in jobs if str(job.get("status") or "") == "failed"
+        ]
+        _set_retry_loading_safely(
+            button,
+            True,
+            owner_client=owner_client,
+        )
+        accepted = 0
+        errors: list[str] = []
+        try:
+            accepted, errors = await run.io_bound(
+                lambda: _submit_failed_job_retries(
+                    service,
+                    str(batch["id"]),
+                    failed_jobs,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors = [sanitize_failure_text(exc)]
+        finally:
+            _set_retry_loading_safely(
+                button,
+                False,
+                owner_client=owner_client,
+            )
+        if not _ui_client_alive(owner_client):
+            return
+        if accepted:
+            ui.notify(
+                f"已按失败步骤原地恢复 {accepted} 篇文章",
+                type="positive" if not errors else "warning",
+            )
+        if errors:
+            ui.notify(
+                "部分文章未能提交恢复：" + "；".join(errors),
+                type="warning",
+                timeout=12000,
+            )
+        if review_runtime is not None:
+            review_runtime["focus_batch_id"] = str(batch["id"])
+        refresh()
+
     with ui.expansion(value=focused or auto_expand).classes("card w-full") as expansion:
         with expansion.add_slot("header"):
             with ui.row().classes("w-full items-center justify-between"):
@@ -1250,9 +2938,14 @@ def _render_batch_card(
             ui.label(review_message).classes(review_class)
             with ui.row().classes("items-center"):
                 if failed_count > 0:
-                    ui.button("仅重试失败公众号", on_click=lambda: _run_action(
-                        lambda: service.retry_failed(str(batch["id"])), refresh, "已创建失败重试批次"
-                    )).props("outline dense color=orange-8 no-caps")
+                    retry_failed_btn = ui.button(
+                        "仅重试失败公众号",
+                        on_click=lambda: retry_failed_jobs_in_place(
+                            retry_failed_btn
+                        ),
+                    ).props(
+                        "outline dense color=orange-8 no-caps icon=restart_alt"
+                    )
                 ui.button("按原设置重新生成", on_click=lambda: _run_action(
                     lambda: service.copy_batch(str(batch["id"])), refresh, "已复制并开始新批次"
                 )).props("flat dense color=teal-9 no-caps")
@@ -1286,15 +2979,48 @@ def _render_batch_card(
     return expansion
 
 
+def _submit_failed_job_retries(
+    service: BatchService,
+    batch_id: str,
+    failed_jobs: list[dict[str, Any]],
+) -> tuple[int, list[str]]:
+    """Claim each failed article in place without creating a compatibility batch."""
+
+    accepted = 0
+    errors: list[str] = []
+    for failed_job in failed_jobs:
+        try:
+            service.retry_job(
+                batch_id,
+                int(failed_job["id"]),
+                step="auto",
+            )
+            accepted += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                f'{failed_job.get("account_name") or "公众号"}：'
+                f"{sanitize_failure_text(exc)}"
+            )
+    return accepted, errors
+
+
 def confirm_batch_write(
     service: BatchService, batch: dict[str, Any], refresh: Callable[[], None]
 ) -> None:
-    names = [
-        str(job.get("account_name") or "")
+    targets = [
+        dict(job)
         for job in batch.get("jobs") or []
         if job.get("status") == "ready_for_review"
         and job.get("review_status") == "confirmed"
     ]
+    names = [str(job.get("account_name") or "") for job in targets]
+    account_ids = list(
+        dict.fromkeys(
+            str(job.get("account_id") or "").strip()
+            for job in targets
+            if str(job.get("account_id") or "").strip()
+        )
+    )
     with ui.dialog() as dialog, ui.card():
         ui.label(f"确认写入 {len(names)} 篇文章？").classes("text-h6 text-weight-bold")
         ui.label(f"将写入 {len(names)} 个公众号：{'、'.join(names)}")
@@ -1307,6 +3033,17 @@ def confirm_batch_write(
                 f"正在同时写入 {len(names)} 个公众号草稿箱，请稍候…",
             )
             try:
+                if account_ids:
+                    reports = await run.io_bound(
+                        lambda: service.preflight(
+                            account_ids,
+                            force_wechat_check=True,
+                        )
+                    )
+                    if has_ip_whitelist_issue(reports):
+                        dialog.close()
+                        show_ip_whitelist_guide(names)
+                        return
                 result = await run.io_bound(
                     lambda: service.inject_batch(str(batch["id"]))
                 )
@@ -1319,6 +3056,12 @@ def confirm_batch_write(
                 failed = sum(
                     1 for job in result_jobs if str(job.get("status") or "") == "failed"
                 )
+                ip_failed_names = [
+                    str(job.get("account_name") or "")
+                    for job in result_jobs
+                    if str(job.get("status") or "") == "failed"
+                    and has_ip_whitelist_issue(job)
+                ]
                 if failed:
                     ui.notify(
                         f"草稿写入完成：成功 {written} 篇，失败 {failed} 篇，可在本批次重试",
@@ -1328,9 +3071,19 @@ def confirm_batch_write(
                 else:
                     ui.notify(f"已写入 {written} 个公众号草稿箱", type="positive")
                 dialog.close()
+                if ip_failed_names:
+                    show_ip_whitelist_guide(ip_failed_names)
                 refresh()
             except Exception as exc:  # noqa: BLE001
-                ui.notify(f"写入失败：{exc}", type="negative", timeout=10000)
+                if has_ip_whitelist_issue(exc):
+                    dialog.close()
+                    show_ip_whitelist_guide(names)
+                    return
+                ui.notify(
+                    f"写入失败：{sanitize_failure_text(exc)}",
+                    type="negative",
+                    timeout=10000,
+                )
             finally:
                 set_button_loading(button, False)
 
@@ -1348,7 +3101,11 @@ def _run_action(action: Callable[[], Any], refresh: Callable[[], None], message:
         ui.notify(message, type="positive")
         refresh()
     except Exception as exc:  # noqa: BLE001
-        ui.notify(str(exc), type="negative", timeout=10000)
+        ui.notify(
+            sanitize_failure_text(exc),
+            type="negative",
+            timeout=10000,
+        )
 
 
 def _matches_filters(
@@ -1444,10 +3201,17 @@ def _duration(start: Any, end: Any) -> str:
 
 def _friendly_error(message: str) -> str:
     lower = message.lower()
-    if "40125" in message or "invalid appsecret" in lower:
-        return "公众号 AppSecret 无效，请到“设置 → 公众号”更新凭证"
-    if "10054" in message:
-        return "微信服务器临时断开连接，系统已重试；可点击“仅重试失败公众号”"
     if "429" in message or "overload" in lower or "过载" in message:
         return "模型服务繁忙，请稍后重试或更换模型"
+    wechat_markers = (
+        "wechat api",
+        "wechat gateway",
+        "40125",
+        "40164",
+        "invalid appsecret",
+        "invalid appid",
+        "10054",
+    )
+    if any(marker in lower for marker in wechat_markers):
+        return friendly_wechat_error(message)
     return message

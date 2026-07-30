@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,6 +18,9 @@ from app.feishu.tool_executor import CONFIRMATION_REQUIREMENTS, FeishuToolExecut
 EXTENDED_TOOL_NAMES = {
     "preflight_accounts",
     "list_batches",
+    "list_review_inbox",
+    "get_article_attempts",
+    "retry_article_step",
     "retry_failed_batch",
     "copy_batch",
     "archive_batch",
@@ -58,10 +62,8 @@ EXTENDED_TOOL_NAMES = {
     "list_models",
     "test_model",
     "generate_model_test_image",
-    "save_model",
     "get_account_config",
     "set_account_model",
-    "save_official_account",
     "test_account_connection",
     "set_official_account_enabled",
     "delete_official_account",
@@ -70,9 +72,6 @@ EXTENDED_TOOL_NAMES = {
     "update_topic_state",
     "load_more_followed_articles",
     "get_wechat_backend_status",
-    "test_wechat_backend_login",
-    "save_wechat_backend_login",
-    "clear_wechat_backend_login",
     "set_model_enabled",
     "delete_model",
     "get_feishu_runtime_status",
@@ -95,6 +94,7 @@ EXTENDED_TOOL_NAMES = {
 # actions before their handler is dispatched.  This prevents a newly added
 # handler from accidentally omitting its own confirmation check.
 CONFIRMATION_EXAMPLES = {
+    "retry_article_step": "确认从失败步骤重试文章",
     "retry_failed_batch": "确认重试失败公众号",
     "copy_batch": "确认复制批次重新生成",
     "archive_batch": "确认归档当前批次",
@@ -115,12 +115,8 @@ CONFIRMATION_EXAMPLES = {
     "delete_topic_source": "确认删除选题来源",
     "delete_prompt_template": "确认删除提示词模板",
     "bind_account_prompt_template": "确认更换公众号提示词模板",
-    "save_model": "确认保存模型密钥配置",
     "set_account_model": "确认更换公众号模型",
-    "save_official_account": "确认保存公众号密钥配置",
     "delete_official_account": "确认删除自有公众号",
-    "save_wechat_backend_login": "确认保存微信公众号后台登录态",
-    "clear_wechat_backend_login": "确认清除微信公众号后台登录态",
     "delete_model": "确认删除模型",
     "generate_model_test_image": "确认生成模型测试图",
     "save_editorial_review_profile": "确认保存 AI 评审方案",
@@ -131,6 +127,14 @@ CONFIRMATION_EXAMPLES = {
     "smart_rewrite_from_editorial_review": "确认智能修改原文",
     "apply_editorial_review_application": "确认应用 AI 修改稿",
     "resolve_editorial_review_issue": "确认更新 AI 评审核实结果",
+}
+
+FORBIDDEN_REMOTE_SECRET_TOOLS = {
+    "save_model",
+    "save_official_account",
+    "test_wechat_backend_login",
+    "save_wechat_backend_login",
+    "clear_wechat_backend_login",
 }
 
 
@@ -196,6 +200,13 @@ def test_extended_tool_is_whitelisted_and_has_handler(tool: str) -> None:
     assert callable(getattr(FeishuToolExecutor, f"_tool_{tool}", None))
 
 
+def test_retry_failed_batch_uses_in_place_job_retry() -> None:
+    source = inspect.getsource(FeishuToolExecutor._tool_retry_failed_batch)
+
+    assert "self.service.retry_job(" in source
+    assert "self.service.retry_failed(" not in source
+
+
 def test_executor_confirmation_requirements_are_declared_in_tool_catalog() -> None:
     """The planner and deterministic executor must advertise the same guard."""
 
@@ -213,6 +224,27 @@ def test_executor_rejects_unregistered_tool_even_if_handler_is_injected() -> Non
 
     with pytest.raises(ValueError, match="未授权"):
         run_tool(executor, "unregistered", batch_id=None)
+
+
+@pytest.mark.parametrize("tool", sorted(FORBIDDEN_REMOTE_SECRET_TOOLS))
+def test_feishu_cannot_read_or_write_sensitive_configuration(tool: str) -> None:
+    assert tool not in TOOL_SPECS
+    assert tool not in ALLOWED_TOOLS
+
+    executor, _replies = make_executor()
+    with pytest.raises(ValueError, match="未授权"):
+        run_tool(
+            executor,
+            tool,
+            {
+                "api_key": "sk-must-stay-local",
+                "app_secret": "wechat-must-stay-local",
+                "token": "token-must-stay-local",
+                "cookie": "cookie-must-stay-local",
+            },
+            text="确认保存",
+            batch_id=None,
+        )
 
 
 @pytest.mark.parametrize("tool,confirmation", sorted(CONFIRMATION_EXAMPLES.items()))
@@ -1024,3 +1056,121 @@ def test_topic_source_read_tools_use_topic_source_service() -> None:
     assert sources.calls == [("list", True), ("refresh", ["source-1"])]
     assert "36氪" in replies[0]
     assert "3" in replies[1]
+
+
+def test_review_inbox_and_step_retry_tools_share_batch_service() -> None:
+    class RecoveryService:
+        db = MemoryContextDb()
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        @staticmethod
+        def list_accounts() -> list[dict[str, Any]]:
+            return []
+
+        def list_review_inbox(self, **filters: Any) -> dict[str, Any]:
+            self.calls.append(("inbox", filters))
+            return {
+                "counts": {
+                    "review": 2,
+                    "write_failed": 1,
+                    "generation_failed": 1,
+                    "today_completed": 3,
+                },
+                "items": [
+                    {
+                        "batch_id": "batch-9",
+                        "batch_display_id": "20260728-01",
+                        "job_id": 12,
+                        "account_name": "蓝血研究",
+                        "title": "经营系统如何落地",
+                        "body_chars": 2300,
+                        "priority_reason": "超过24小时未审核",
+                        "blockers": ["待核实一处事实"],
+                    }
+                ],
+                "next_cursor": None,
+            }
+
+        def list_job_attempts(
+            self, batch_id: str, job_id: int
+        ) -> list[dict[str, Any]]:
+            self.calls.append(("attempts", batch_id, job_id))
+            return [
+                {
+                    "stage": "rewrite",
+                    "attempt_no": 2,
+                    "status": "failed",
+                    "error_code": "rewrite.invalid_argument",
+                    "started_at": "2026-07-28T09:00:00+00:00",
+                    "completed_at": "2026-07-28T09:00:30+00:00",
+                }
+            ]
+
+        def retry_job(self, batch_id: str, job_id: int, **options: Any) -> dict[str, Any]:
+            self.calls.append(("retry", batch_id, job_id, options))
+            return {
+                "status": "accepted",
+                "job": {
+                    "id": job_id,
+                    "account_name": "蓝血研究",
+                    "status": "rewriting",
+                },
+            }
+
+    service = RecoveryService()
+    executor, replies = make_executor(service)
+
+    run_tool(
+        executor,
+        "list_review_inbox",
+        {"bucket": "review", "limit": 10},
+        batch_id=None,
+    )
+    run_tool(
+        executor,
+        "get_article_attempts",
+        {"batch_id": "batch-9", "job_id": 12},
+    )
+    run_tool(
+        executor,
+        "retry_article_step",
+        {
+            "batch_id": "batch-9",
+            "job_id": 12,
+            "step": "rewrite",
+            "model_id": "model-backup",
+        },
+        text=CONFIRMATION_EXAMPLES["retry_article_step"],
+    )
+
+    assert service.calls == [
+        (
+            "inbox",
+            {
+                "bucket": "review",
+                "account_id": None,
+                "limit": 10,
+                "cursor": None,
+            },
+        ),
+        ("attempts", "batch-9", 12),
+        (
+            "retry",
+            "batch-9",
+            12,
+            {
+                "step": "rewrite",
+                "model_id": "model-backup",
+                "source_url": None,
+                "raw_content": None,
+            },
+        ),
+    ]
+    assert "待我审核收件箱" in replies[0]
+    assert "经营系统如何落地" in replies[0]
+    assert "待核实一处事实" in replies[0]
+    assert "rewrite.invalid_argument" in replies[1]
+    assert "2026-07-28T09:00:30+00:00" in replies[1]
+    assert "恢复请求已提交" in replies[-1]

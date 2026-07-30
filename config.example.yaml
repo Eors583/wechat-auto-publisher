@@ -6,6 +6,14 @@ wechat:
   need_open_comment: 0
   only_fans_can_comment: 0
 
+# 微信官方 API 固定出口。启用后，access_token、素材、图片和草稿请求都会
+# 通过同一个 HTTPS 网关发出；文章抓取、模型和飞书请求不受影响。
+wechat_relay:
+  enabled: false
+  gateway_url: https://bluebloodlab.cn/wechat-relay
+  username: ${WECHAT_RELAY_USERNAME}
+  password: ${WECHAT_RELAY_PASSWORD}
+
 ai:
   # 可选: deepseek | qwen | moonshot | zhipu | manus | gemini | openai
   primary: manus
@@ -152,6 +160,12 @@ publish:
 
 db:
   path: data/app.db
+  # 生产环境优先通过 DATABASE_URL 环境变量配置 PostgreSQL。
+  # url: postgresql://wechat_app:password@127.0.0.1:5432/wechat_publisher
+
+auth:
+  # HTTP API 是否强制使用登录会话或兼容 API Token。
+  required: true
 
 data_dir: data
 
@@ -164,6 +178,7 @@ api:
 
 # 飞书配置优先从桌面端“飞书接入”页面读取；以下字段仅用于无界面部署兜底。
 feishu:
+  # 可由 FEISHU_ENABLED 严格覆盖；支持 true/false、1/0、yes/no、on/off。
   enabled: false
   app_id: ${FEISHU_APP_ID}
   app_secret: ${FEISHU_APP_SECRET}
@@ -173,7 +188,8 @@ feishu:
   allowed_open_ids: []
   allowed_chat_ids: []
   default_account_ids: []
-  agent_model_id: config:moonshot
+  # 留空时必须在飞书接入页面从已配置的文本模型中选择。
+  agent_model_id: ""
 
 topics:
   keywords_file: data/keywords.txt

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
+import threading
 import time
 from typing import Any
 
@@ -18,6 +20,52 @@ from . import (
 )
 
 logger = logging.getLogger(__name__)
+
+_request_gate_lock = threading.Lock()
+_next_request_at: dict[tuple[str, str, str], float] = {}
+
+
+class ManusTransportError(RuntimeError):
+    """A Manus network failure with explicit whole-task retry semantics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_to_restart_task: bool,
+    ) -> None:
+        self.safe_to_restart_task = bool(safe_to_restart_task)
+        super().__init__(message)
+
+
+def _credential_scope(api_base: str, api_key: str) -> str:
+    """Build a non-sensitive process-local rate-limit scope."""
+
+    value = f"{api_base.rstrip('/')}|{api_key}".encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
+
+
+def _wait_for_request_slot(
+    *,
+    api_base: str,
+    api_key: str,
+    endpoint: str,
+    min_interval: float,
+) -> None:
+    """Space calls sharing one Manus credential without serializing task work."""
+
+    interval = max(0.0, float(min_interval))
+    if interval <= 0:
+        return
+    key = (_credential_scope(api_base, api_key), endpoint, "v2")
+    while True:
+        with _request_gate_lock:
+            now = time.monotonic()
+            wait_seconds = max(0.0, _next_request_at.get(key, 0.0) - now)
+            if wait_seconds <= 0:
+                _next_request_at[key] = now + interval
+                return
+        time.sleep(wait_seconds)
 
 
 class ManusAPIError(RuntimeError):
@@ -64,6 +112,8 @@ class ManusAPIError(RuntimeError):
 def is_non_retryable_manus_error(exc: BaseException | str) -> bool:
     """Recognize permanent Manus request errors, including legacy wrappers."""
 
+    if isinstance(exc, ManusTransportError):
+        return not exc.safe_to_restart_task
     if isinstance(exc, ManusAPIError):
         return not exc.retryable
     message = str(exc).casefold()
@@ -87,12 +137,20 @@ class ManusClient:
         model: str = "manus-1.6",
         timeout: float = 600.0,
         poll_interval: float = 2.0,
+        create_min_interval: float = 6.25,
+        poll_min_interval: float = 0.7,
+        transport_retries: int = 4,
     ) -> None:
         self.api_key = api_key
         self.api_base = api_base.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.poll_interval = poll_interval
+        # Manus v2 applies rate limits per user.  Stagger task creation while
+        # keeping already-created tasks running concurrently.
+        self.create_min_interval = max(0.0, float(create_min_interval))
+        self.poll_min_interval = max(0.0, float(poll_min_interval))
+        self.transport_retries = max(1, int(transport_retries))
 
     def rewrite(self, prompt: str) -> RewriteResult:
         single_pass_prompt = (
@@ -303,13 +361,65 @@ class ManusClient:
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        response = client.request(
-            method,
-            f"{self.api_base}{path}",
-            headers=headers,
-            json=json_body,
-            params=params,
+        normalized_method = str(method or "GET").upper()
+        endpoint = path.rsplit("/", 1)[-1]
+        min_interval = (
+            self.create_min_interval
+            if endpoint == "task.create"
+            else (
+                self.poll_min_interval
+                if endpoint == "task.listMessages"
+                else 0.0
+            )
         )
+        max_attempts = self.transport_retries if normalized_method == "GET" else 1
+        response: httpx.Response | Any | None = None
+        for attempt in range(1, max_attempts + 1):
+            _wait_for_request_slot(
+                api_base=self.api_base,
+                api_key=self.api_key,
+                endpoint=endpoint,
+                min_interval=min_interval,
+            )
+            try:
+                response = client.request(
+                    normalized_method,
+                    f"{self.api_base}{path}",
+                    headers=headers,
+                    json=json_body,
+                    params=params,
+                )
+                break
+            except httpx.TransportError as exc:
+                if attempt < max_attempts:
+                    delay = min(2 ** (attempt - 1), 8)
+                    logger.warning(
+                        "Manus %s transport interrupted; reconnecting the same "
+                        "request in %ss (%s/%s)",
+                        endpoint,
+                        delay,
+                        attempt,
+                        max_attempts,
+                    )
+                    time.sleep(delay)
+                    continue
+                # A failed GET is safe to repeat inside this method, but once
+                # exhausted the surrounding rewrite must not create a new
+                # Manus task: the existing asynchronous task may still finish.
+                # POST failures are also uncertain because the server may have
+                # accepted task.create before the connection was lost.
+                raise ManusTransportError(
+                    (
+                        f"Manus {endpoint} 网络连接中断，已重连 "
+                        f"{max_attempts} 次仍未恢复：{exc}"
+                    ),
+                    safe_to_restart_task=False,
+                ) from exc
+        if response is None:  # pragma: no cover - defensive invariant
+            raise ManusTransportError(
+                f"Manus {endpoint} 未返回响应",
+                safe_to_restart_task=False,
+            )
         try:
             data = response.json()
         except ValueError as exc:

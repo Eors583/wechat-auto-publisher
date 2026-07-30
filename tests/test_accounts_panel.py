@@ -17,6 +17,7 @@ class _AccountState:
         self.db = _AccountDB()
         self.reload_count = 0
         self.account_refresh_count = 0
+        self.model_registrations: list[dict[str, Any]] = []
 
     def reload_config(self) -> dict[str, Any]:
         self.reload_count += 1
@@ -25,8 +26,20 @@ class _AccountState:
     def refresh_account_selects(self) -> None:
         self.account_refresh_count += 1
 
-    def model_options(self, *, include_default: bool = True) -> dict[str, str]:
+    def model_options(
+        self,
+        *,
+        include_default: bool = True,
+        purpose: str = "text",
+        **_kwargs: Any,
+    ) -> dict[str, str]:
+        if purpose == "image":
+            return {}
         return {"model-1": "文章模型"}
+
+    def register_model_select(self, select: Any, **kwargs: Any) -> Any:
+        self.model_registrations.append({"select": select, **kwargs})
+        return select
 
 
 class _ReviewService:
@@ -70,6 +83,21 @@ def _direct_parent_visible(element: Any) -> bool:
     parent_slot = element.parent_slot
     parent = getattr(parent_slot, "parent", None)
     return bool(getattr(parent, "visible", True))
+
+
+def _click_button(label: str) -> None:
+    button = next(
+        element
+        for element in ui.context.client.elements.values()
+        if type(element).__name__ == "Button"
+        and getattr(element, "text", None) == label
+    )
+    listener = next(
+        item
+        for item in button._event_listeners.values()
+        if item.type == "click"
+    )
+    listener.handler(None)
 
 
 def test_account_card_is_simple_by_default_but_builds_advanced_controls(
@@ -181,3 +209,64 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
         )
     finally:
         ui.context.client.remove_all_elements()
+
+
+def test_account_can_be_added_before_a_model_is_configured(
+    monkeypatch: Any,
+) -> None:
+    state = _AccountState()
+    state.model_options = lambda **_kwargs: {}
+    monkeypatch.setattr(desktop, "state", state)
+    monkeypatch.setattr(desktop, "BatchService", _ReviewService)
+    monkeypatch.setattr(
+        desktop,
+        "CreationPlanService",
+        _CreationPlanService,
+    )
+    monkeypatch.setattr(desktop, "public_accounts", lambda _db: [])
+    monkeypatch.setattr(
+        desktop,
+        "public_prompt_templates",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        desktop,
+        "enabled_profile_options",
+        lambda _service: {"review-profile": "专业深度型"},
+    )
+
+    try:
+        desktop._build_accounts_panel()
+        _click_button("添加公众号")
+        elements = _elements()
+        model_select = next(
+            element
+            for element in elements
+            if type(element).__name__ == "Select"
+            and str(getattr(element, "_props", {}).get("label") or "")
+            == "该公众号使用的文章模型（可选）"
+        )
+        save_button = next(
+            element
+            for element in elements
+            if type(element).__name__ == "Button"
+            and getattr(element, "text", None) == "保存"
+        )
+    finally:
+        ui.context.client.remove_all_elements()
+
+    assert model_select.value == ""
+    assert getattr(model_select, "options", {}).get("") == "暂不绑定模型（可稍后选择）"
+    assert not bool(getattr(save_button, "_props", {}).get("disable"))
+    assert state.model_registrations == [
+        {
+            "select": model_select,
+            "purpose": "text",
+            "default_label": "暂不绑定模型（可稍后选择）",
+            "owner": next(
+                element
+                for element in elements
+                if type(element).__name__ == "Dialog"
+            ),
+        }
+    ]

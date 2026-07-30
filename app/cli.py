@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from app.ai import TITLE_CANDIDATE_COUNT, clean_candidate_list
-from app.config import load_config
+from app.config import database_target, load_config
 from app.db import Database
 from app.pipeline import Pipeline
 from app.providers.topic import from_keyword_file, from_manual
@@ -107,7 +107,7 @@ def list_jobs(
 ) -> None:
     """列出最近任务。"""
     cfg = load_config(config)
-    db = Database(cfg["_db_path"])
+    db = Database(database_target(cfg))
     jobs = db.list_jobs(limit=limit)
     table = Table(title="Jobs")
     table.add_column("ID")
@@ -209,7 +209,7 @@ def show(
 ) -> None:
     """查看单个任务详情。"""
     cfg = load_config(config)
-    job = Database(cfg["_db_path"]).get_job(job_id)
+    job = Database(database_target(cfg)).get_job(job_id)
     if not job:
         raise typer.BadParameter(f"Job not found: {job_id}")
     _print_job(job, verbose=True)
