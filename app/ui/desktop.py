@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlencode
 
 from nicegui import run, ui
 
@@ -90,6 +91,36 @@ logger = logging.getLogger(__name__)
 state: AppState | None = None
 
 
+_PREFLIGHT_REPAIR_ACTIONS: dict[str, tuple[str, str]] = {
+    "account": ("account", "配置公众号"),
+    "model": ("account", "绑定文章模型"),
+    "wechat": ("account", "检查公众号凭证"),
+    "draft": ("account", "检查草稿权限"),
+    "material": ("images", "配置封面素材"),
+    "cover": ("images", "选择有效封面"),
+    "template": ("template", "打开模板管理"),
+    "inline_images": ("images", "配置正文生图"),
+}
+
+
+def _preflight_repair_action(check_key: str) -> tuple[str, str]:
+    return _PREFLIGHT_REPAIR_ACTIONS.get(
+        str(check_key or "").strip(),
+        ("account", "打开公众号配置"),
+    )
+
+
+def _preflight_repair_url(account_id: str, check_key: str) -> str:
+    action, _ = _preflight_repair_action(check_key)
+    return "/?" + urlencode(
+        {
+            "view": "config",
+            "repair": action,
+            "account_id": str(account_id or "").strip(),
+        }
+    )
+
+
 def create_desktop_app() -> None:
     from app.ui.styles import APP_CSS, HEAD_HTML
 
@@ -114,6 +145,12 @@ def create_desktop_app() -> None:
     open_requested_config = (
         str(query_params.get("view") or "").strip().lower() == "config"
     )
+    requested_config_repair = str(
+        query_params.get("repair") or ""
+    ).strip().lower()
+    requested_config_account_id = str(
+        query_params.get("account_id") or ""
+    ).strip()
     open_requested_admin = (
         str(query_params.get("view") or "").strip().lower() == "admin"
     )
@@ -350,12 +387,16 @@ def create_desktop_app() -> None:
                         settings_models
                         if open_requested_admin and settings_models is not None
                         else settings_help
-                        if open_requested_config
+                        if open_requested_config and not requested_config_repair
                         else settings_accounts
                     ),
                 ).classes("w-full bg-transparent"):
                     with ui.tab_panel(settings_accounts):
-                        refresh_accounts_panel = _build_accounts_panel(page_state)
+                        refresh_accounts_panel = _build_accounts_panel(
+                            page_state,
+                            initial_account_id=requested_config_account_id,
+                            initial_action=requested_config_repair,
+                        )
                     if settings_models is not None:
                         with ui.tab_panel(settings_models):
                             build_model_management_panel(page_state)
@@ -1192,25 +1233,61 @@ def _build_wizard(
                 ui.notify("发布环境检查通过", type="positive")
                 return True
 
+            repair_target: dict[str, str] = {}
+            first_failed_check: tuple[str, str] | None = None
+
             with (
                 ui.dialog() as dialog,
                 ui.card().classes("w-full").style("max-width:760px"),
             ):
+                def request_repair(account_id: str, check_key: str) -> None:
+                    repair_target.update(
+                        account_id=str(account_id),
+                        check_key=str(check_key),
+                    )
+                    dialog.submit(False)
+
                 ui.label("发布环境检查发现问题").classes("text-h6 text-weight-bold")
                 for report in reports:
+                    report_account_id = str(report.get("account_id") or "")
                     with ui.element("div").classes("card w-full"):
                         ui.label(str(report.get("account_name") or "公众号")).classes(
                             "text-weight-bold"
                         )
                         for check in report.get("checks") or []:
-                            ui.label(
-                                ("✓ " if check.get("ok") else "✕ ")
-                                + str(check.get("name") or "")
-                                + "："
-                                + str(check.get("message") or "")
-                            ).classes(
-                                "text-positive" if check.get("ok") else "text-negative"
-                            )
+                            check_ok = bool(check.get("ok"))
+                            check_key = str(check.get("key") or "account")
+                            if not check_ok and first_failed_check is None:
+                                first_failed_check = (
+                                    report_account_id,
+                                    check_key,
+                                )
+                            with ui.row().classes(
+                                "w-full items-center justify-between gap-3"
+                            ):
+                                ui.label(
+                                    ("✓ " if check_ok else "✕ ")
+                                    + str(check.get("name") or "")
+                                    + "："
+                                    + str(check.get("message") or "")
+                                ).classes(
+                                    "text-positive"
+                                    if check_ok
+                                    else "text-negative"
+                                ).style("min-width:0;flex:1")
+                                if not check_ok:
+                                    _, repair_label = _preflight_repair_action(
+                                        check_key
+                                    )
+                                    ui.button(
+                                        repair_label,
+                                        on_click=lambda _=None,
+                                        aid=report_account_id,
+                                        key=check_key: request_repair(aid, key),
+                                    ).props(
+                                        "outline dense color=teal-9 no-caps "
+                                        "icon=build"
+                                    )
                 can_generate = all(item.get("can_generate") for item in reports)
                 ui.label(
                     "可以仅生成文章并进入审核，但配置修复前无法写入草稿箱。"
@@ -1218,15 +1295,28 @@ def _build_wizard(
                     else "至少一个公众号的模型不可用，无法开始生成。"
                 ).classes("text-warning")
                 with ui.row().classes("w-full justify-end"):
-                    ui.button(
-                        "修复配置后再开始", on_click=lambda: dialog.submit(False)
-                    ).props("flat no-caps")
+                    if first_failed_check is not None:
+                        first_account_id, first_check_key = first_failed_check
+                        ui.button(
+                            "前往修复配置",
+                            on_click=lambda _=None,
+                            aid=first_account_id,
+                            key=first_check_key: request_repair(aid, key),
+                        ).props("flat color=teal-9 no-caps icon=settings")
                     if can_generate:
                         ui.button(
                             "仅生成文章",
                             on_click=lambda: dialog.submit(True),
                         ).props("unelevated color=orange-8 no-caps")
-            return bool(await dialog)
+            decision = bool(await dialog)
+            if repair_target and ui_alive():
+                ui.navigate.to(
+                    _preflight_repair_url(
+                        repair_target["account_id"],
+                        repair_target["check_key"],
+                    )
+                )
+            return decision
 
         async def start_rewrite() -> None:
             nonlocal active_batch_service, active_batch_id
@@ -1634,6 +1724,9 @@ def _build_wizard(
 
 def _build_accounts_panel(
     state: AppState | None = None,
+    *,
+    initial_account_id: str = "",
+    initial_action: str = "",
 ) -> Callable[[], None]:
     state = state or globals().get("state") or AppState()
     current_config = state.reload_config()
@@ -2921,6 +3014,20 @@ def _build_accounts_panel(
                     manage_btn.on_click(toggle_management)
 
     render_accounts()
+    if initial_account_id:
+
+        async def open_initial_configuration() -> None:
+            action = str(initial_action or "account").strip().lower()
+            if action == "template":
+                await open_template_manager(initial_account_id)
+            elif action == "images":
+                open_inline_image_manager(initial_account_id)
+            elif action == "layout":
+                open_layout_editor(initial_account_id)
+            else:
+                open_editor(initial_account_id)
+
+        client_timer(0.15, open_initial_configuration, once=True)
     return render_accounts
 
 
