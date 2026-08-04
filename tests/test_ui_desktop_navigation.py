@@ -85,6 +85,15 @@ def test_primary_navigation_is_reduced_to_four_clear_entries() -> None:
     assert "数据概览" not in labels
 
 
+def test_generation_can_move_to_the_background_task_center() -> None:
+    source = inspect.getsource(desktop._build_wizard)  # noqa: SLF001
+
+    assert 'ui.button("进入后台处理")' in source
+    assert "def open_background_generation()" in source
+    assert "tabs.set_value(tab_jobs)" in source
+    assert "state.task_center_refresh(active_batch_id)" in source
+
+
 def test_workbench_contains_compact_entry_points_without_legacy_topic_toggle(
     monkeypatch: Any,
 ) -> None:

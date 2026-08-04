@@ -54,6 +54,8 @@ def build_review_jury_panel(
     on_job_updated: Callable[[dict[str, Any]], None],
     on_article_updated: Callable[[], Awaitable[None]] | None = None,
     is_workbench_alive: Callable[[], bool] | None = None,
+    on_background_review: Callable[..., bool] | None = None,
+    on_enter_background: Callable[[], None] | None = None,
 ) -> None:
     """Render the manual AI editorial jury inside the shared review workbench.
 
@@ -923,6 +925,34 @@ def build_review_jury_panel(
             if not list(styles_in.value or []):
                 ui.notify("请至少选择一种目标风格", type="warning")
                 return
+            review_config = collect_config()
+            profile_id = str(profile_in.value or "") or None
+
+            def run_review() -> dict[str, Any]:
+                return service.run_editorial_review(
+                    batch_id,
+                    job_id,
+                    profile_id=profile_id,
+                    config=review_config,
+                )
+
+            if on_background_review is not None:
+                started = on_background_review(
+                    batch_id=batch_id,
+                    job_id=job_id,
+                    account_name=str(job.get("account_name") or "当前公众号"),
+                    operation=run_review,
+                )
+                if started:
+                    ui.notify(
+                        "AI 评审已转入后台，可继续处理其他文章；右侧可查看进度。",
+                        type="positive",
+                        timeout=8000,
+                    )
+                    if on_enter_background is not None:
+                        on_enter_background()
+                return
+
             set_button_loading(
                 start_btn,
                 True,
@@ -931,12 +961,7 @@ def build_review_jury_panel(
             completed_review: dict[str, Any] | None = None
             try:
                 review = await run.io_bound(
-                    lambda: service.run_editorial_review(
-                        batch_id,
-                        job_id,
-                        profile_id=str(profile_in.value or "") or None,
-                        config=collect_config(),
-                    )
+                    run_review
                 )
                 if not ui_alive():
                     return
@@ -962,9 +987,9 @@ def build_review_jury_panel(
                     await scroll_to_review_result()
 
         start_btn = ui.button(
-            "开始 AI 评审",
+            "转入后台评审" if on_background_review is not None else "开始 AI 评审",
             on_click=start_review,
-        ).props("unelevated color=indigo-7 no-caps icon=rate_review")
+        ).props("unelevated color=indigo-7 no-caps icon=move_to_inbox")
         ui.label(
             "评审和生成修改稿会调用该公众号绑定的文本模型，可能产生模型费用。"
         ).classes("muted text-caption")

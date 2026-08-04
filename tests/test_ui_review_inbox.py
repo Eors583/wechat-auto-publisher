@@ -409,7 +409,9 @@ def test_review_workbench_is_quick_by_default_and_deep_edit_is_in_place() -> Non
     assert "control.set_visibility(show_deep_editor)" in mode_source
     assert "render_quick_review_summary()" in mode_source
     assert "尚未进行 AI 评审" in mode_source
-    assert "手动开始 AI 评审" in mode_source
+    assert "手动开始 AI 评审" not in mode_source
+    assert 'if latest_review:' in mode_source
+    assert '"查看完整评审"' in mode_source
     assert "当前封面" in mode_source
     assert "阻断摘要" in mode_source
 
@@ -433,6 +435,19 @@ def test_quick_review_uses_phone_viewport_and_loads_material_cover_preview() -> 
     assert "service.list_cover_options(" in source
     assert "wechat_image_proxy_url(" in source
     assert "正在读取封面缩略图" in source
+
+
+def test_task_center_exposes_background_generation_and_review_progress() -> None:
+    source = inspect.getsource(tasks.build_tasks_panel)
+    styles = STYLES.read_text(encoding="utf-8")
+
+    assert "background-activity-dock" in source
+    assert "start_background_review" in source
+    assert "AI 正在评审文章" in source
+    assert "后台生成中" in source
+    assert "查看详情" in source
+    assert "ui.linear_progress(" in source
+    assert ".background-activity-dock" in styles
 
 
 def test_structured_failure_actions_have_only_known_operator_handlers() -> None:

@@ -323,6 +323,178 @@ def build_tasks_panel(
         "visible_limit": 30,
         "inbox_bucket": "review",
     }
+    owner_client = ui.context.client
+    background_reviews: dict[str, dict[str, Any]] = {}
+    background_activity_host = ui.column().classes("background-activity-dock")
+
+    def client_alive() -> bool:
+        return not bool(getattr(owner_client, "is_deleted", False))
+
+    def open_activity_detail(batch_id: str, job_id: int | None = None) -> None:
+        if job_id:
+            ui.navigate.to(
+                f"/?view=review&batch_id={batch_id}&job_id={int(job_id)}"
+            )
+            return
+        show_batch(batch_id)
+
+    def render_background_activity() -> None:
+        if not client_alive():
+            return
+        background_activity_host.clear()
+        activities: list[dict[str, Any]] = []
+        try:
+            for batch in service.list_batches(limit=20):
+                jobs = list(batch.get("jobs") or [])
+                active_jobs = [
+                    item
+                    for item in jobs
+                    if str(item.get("status") or "")
+                    not in {
+                        "ready_for_review",
+                        "drafted",
+                        "published",
+                        "failed",
+                        "cancelled",
+                    }
+                ]
+                if not active_jobs:
+                    continue
+                progress = dict(batch.get("progress") or {})
+                total = max(1, int(progress.get("total") or len(jobs) or 1))
+                completed = int(progress.get("completed") or 0)
+                activities.append(
+                    {
+                        "kind": "generation",
+                        "title": str(batch.get("topic") or "文章生成"),
+                        "status": "后台生成中",
+                        "progress": min(0.95, max(0.05, completed / total)),
+                        "batch_id": str(batch["id"]),
+                        "job_id": None,
+                    }
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            running_reviews = [
+                review
+                for review in service.list_editorial_reviews(limit=30)
+                if str(review.get("status") or "") in {"running", "rewriting"}
+            ]
+        except Exception:  # noqa: BLE001
+            running_reviews = []
+        persisted_jobs = {int(item.get("job_id") or 0) for item in running_reviews}
+        for review in running_reviews:
+            activities.append(
+                {
+                    "kind": "review",
+                    "title": f'{review.get("profile_name") or "AI 评审"}',
+                    "status": "AI 正在评审文章",
+                    "progress": 0.55,
+                    "batch_id": str(review.get("batch_id") or ""),
+                    "job_id": int(review.get("job_id") or 0),
+                }
+            )
+        for entry in background_reviews.values():
+            entry_status = str(entry.get("status") or "")
+            if (
+                entry_status == "running"
+                and int(entry.get("job_id") or 0) in persisted_jobs
+            ):
+                continue
+            rendered = dict(entry)
+            rendered["status"] = {
+                "running": "AI 正在评审文章",
+                "completed": "AI 评审已完成",
+                "failed": "AI 评审失败，可查看详情后重试",
+            }.get(entry_status, entry_status)
+            activities.append(rendered)
+
+        if not activities:
+            background_activity_host.set_visibility(False)
+            return
+        background_activity_host.set_visibility(True)
+        with background_activity_host:
+            ui.label("后台任务").classes("text-subtitle1 text-weight-bold")
+            for activity in activities[:4]:
+                with ui.card().classes("w-full q-pa-sm background-activity-card"):
+                    ui.label(str(activity["title"])).classes(
+                        "text-weight-bold ellipsis"
+                    )
+                    ui.label(str(activity["status"])).classes(
+                        "muted text-caption"
+                    )
+                    ui.linear_progress(
+                        value=float(activity.get("progress") or 0.1)
+                    ).props("color=teal-8 track-color=teal-1 rounded")
+                    ui.button(
+                        "查看详情",
+                        on_click=lambda _=None, item=dict(activity): open_activity_detail(
+                            str(item.get("batch_id") or ""),
+                            int(item.get("job_id") or 0) or None,
+                        ),
+                    ).props("flat dense color=teal-9 no-caps icon=open_in_new")
+
+    def start_background_review(
+        *,
+        batch_id: str,
+        job_id: int,
+        account_name: str,
+        operation: Callable[[], dict[str, Any]],
+    ) -> bool:
+        key = f"review:{batch_id}:{int(job_id)}"
+        existing = background_reviews.get(key)
+        if existing and str(existing.get("status") or "") == "running":
+            ui.notify("这篇文章已经在后台评审中", type="warning")
+            return False
+        entry: dict[str, Any] = {
+            "kind": "review",
+            "title": f"{account_name} · AI 评审",
+            "status": "running",
+            "progress": 0.12,
+            "batch_id": str(batch_id),
+            "job_id": int(job_id),
+        }
+        background_reviews[key] = entry
+        render_background_activity()
+
+        async def execute() -> None:
+            try:
+                result = await run.io_bound(operation)
+                entry.update(
+                    status="completed",
+                    progress=1.0,
+                    review_id=str(result.get("id") or ""),
+                )
+                if client_alive():
+                    ui.notify(
+                        f"{account_name}的 AI 评审已完成",
+                        type="positive",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                entry.update(
+                    status="failed",
+                    progress=1.0,
+                    error=sanitize_failure_text(exc),
+                )
+                if client_alive():
+                    ui.notify(
+                        f"AI 评审失败：{entry['error']}",
+                        type="negative",
+                        timeout=12000,
+                    )
+            finally:
+                if client_alive():
+                    render_background_activity()
+                    render()
+
+        entry["task"] = asyncio.create_task(execute())
+        return True
+
+    runtime["start_background_review"] = start_background_review
+    render_background_activity()
+    client_timer(2.0, render_background_activity, immediate=False)
 
     def show_batch(batch_id: str) -> None:
         runtime["focus_batch_id"] = str(batch_id)
@@ -1571,16 +1743,13 @@ def open_review_workbench(
                                 ui.label(
                                     f"AI 评审仍有 {blocking_count} 个阻断项"
                                 ).classes("text-warning text-caption")
-                        ui.button(
-                            (
-                                "查看完整评审"
-                                if latest_review
-                                else "手动开始 AI 评审"
-                            ),
-                            on_click=reveal_deep_review,
-                        ).props(
-                            "outline color=indigo-7 no-caps icon=rate_review"
-                        )
+                        if latest_review:
+                            ui.button(
+                                "查看完整评审",
+                                on_click=reveal_deep_review,
+                            ).props(
+                                "outline color=indigo-7 no-caps icon=rate_review"
+                            )
                     ui.separator().classes("q-my-sm")
                     with ui.row().classes("w-full items-center gap-3"):
                         if cover_preview_url or (
@@ -1825,6 +1994,11 @@ def open_review_workbench(
             return False
 
         with ui.column().classes("w-full gap-2") as review_jury_host:
+            background_review = (
+                review_runtime.get("start_background_review")
+                if review_runtime is not None
+                else None
+            )
             build_review_jury_panel(
                 service=service,
                 batch_id=batch_id,
@@ -1838,6 +2012,10 @@ def open_review_workbench(
                 ),
                 on_article_updated=scroll_to_updated_article,
                 is_workbench_alive=workbench_alive,
+                on_background_review=(
+                    background_review if callable(background_review) else None
+                ),
+                on_enter_background=close_workbench,
             )
         deep_review_controls.append(review_jury_host)
 

@@ -526,6 +526,37 @@ body, .q-page, .nicegui-content {
   background: linear-gradient(180deg, rgba(255,255,255,0), #fff 22%);
 }
 
+.background-activity-dock {
+  position: fixed;
+  top: 92px;
+  right: 18px;
+  z-index: 2200;
+  width: min(340px, calc(100vw - 28px));
+  max-height: calc(100vh - 116px);
+  padding: 12px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255,255,255,.97);
+  box-shadow: 0 18px 50px rgba(16,34,27,.16);
+  backdrop-filter: blur(14px);
+}
+.background-activity-card {
+  border: 1px solid var(--line);
+  box-shadow: none;
+}
+
+@media (max-width: 760px) {
+  .background-activity-dock {
+    top: auto;
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    width: auto;
+    max-height: 42vh;
+  }
+}
+
 .q-field--outlined .q-field__control {
   border-radius: 11px !important;
   background: rgba(255,255,255,0.96);

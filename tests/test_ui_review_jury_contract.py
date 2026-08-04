@@ -103,6 +103,20 @@ def test_completed_review_immediately_scrolls_to_inline_result() -> None:
     ), "successful review completion must immediately reveal and scroll to the inline result"
 
 
+def test_review_can_enter_background_without_the_blocking_overlay() -> None:
+    start_review = _function("start_review", async_function=True)
+    literals = _string_literals(start_review)
+    call_names = {
+        _call_name(call)
+        for call in ast.walk(start_review)
+        if isinstance(call, ast.Call)
+    }
+
+    assert "AI 评审已转入后台，可继续处理其他文章；右侧可查看进度。" in literals
+    assert "on_background_review" in call_names
+    assert "on_enter_background" in call_names
+
+
 def test_review_result_is_inline_and_does_not_create_a_result_dialog() -> None:
     """The conclusion belongs to the current review page, not a nested modal."""
 

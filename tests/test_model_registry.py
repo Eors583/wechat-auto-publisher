@@ -177,6 +177,32 @@ def test_manus_connection_probe_allows_async_task_completion(
     assert captured["prompt"] == "只回复 OK"
 
 
+def test_manus_text_client_keeps_a_long_async_task_window(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db = Database(tmp_path / "manus-review-timeout.db")
+    model_id = save_model(
+        db,
+        name="Manus review",
+        provider_type=MANUS,
+        api_base="https://api.manus.ai",
+        model="manus-1.6",
+        api_key="manus-private-key",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeManusClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("app.ai.manus.ManusClient", FakeManusClient)
+
+    build_text_client(db, {"ai": {}}, model_id)
+
+    assert captured["timeout"] == 600.0
+
+
 def test_account_has_one_model_and_injects_its_own_credentials(tmp_path) -> None:
     db = Database(tmp_path / "app.db")
     model_id = save_model(

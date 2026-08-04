@@ -372,11 +372,18 @@ def build_text_client(
         key = decrypt_api_key(str(record.get("api_key_encrypted") or ""))
 
     if provider == "manus" or provider_type == MANUS:
+        # Manus runs a remote asynchronous task. Editorial reviews and long
+        # generations regularly need more than the generic HTTP-style 120s
+        # window, while the remote task is still legitimately ``running``.
+        manus_timeout = max(
+            600.0,
+            float(record.get("timeout_seconds") or 600),
+        )
         return ManusClient(
             api_key=key,
             api_base=str(record.get("api_base") or "https://api.manus.ai"),
             model=str(record.get("model") or "manus-1.6"),
-            timeout=float(record.get("timeout_seconds") or 120),
+            timeout=manus_timeout,
         )
     if provider_type == GEMINI:
         return GeminiClient(

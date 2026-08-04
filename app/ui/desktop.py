@@ -1278,6 +1278,10 @@ def _build_wizard(
                 "unelevated color=red-7 no-caps icon=stop_circle"
             )
             stop_btn.set_visibility(False)
+            background_btn = ui.button("进入后台处理").props(
+                "outline color=teal-9 no-caps icon=move_to_inbox"
+            )
+            background_btn.set_visibility(False)
 
         def show_rewrite_action(*, running: bool) -> None:
             """Keep start/stop in one visual slot; never show both together."""
@@ -1285,14 +1289,31 @@ def _build_wizard(
                 return
             start_btn.set_visibility(not running)
             stop_btn.set_visibility(running)
+            background_btn.set_visibility(running)
             if running:
                 stop_btn.enable()
+                if active_batch_id:
+                    background_btn.enable()
+                else:
+                    background_btn.disable()
             else:
                 start_btn.enable()
 
         active_batch_service: BatchService | None = None
         active_batch_id: str | None = None
         active_stop_requested = False
+
+        def open_background_generation() -> None:
+            if not active_batch_id:
+                ui.notify("生成任务仍在初始化，请稍候", type="warning")
+                return
+            tabs.set_value(tab_jobs)
+
+            def focus_created_batch() -> None:
+                if callable(state.task_center_refresh):
+                    state.task_center_refresh(active_batch_id)
+
+            client_timer(0.08, focus_created_batch, once=True)
 
         def append_log(msg: str) -> None:
             if not ui_alive():
@@ -1584,6 +1605,7 @@ def _build_wizard(
                     )
                 )
                 active_batch_id = str(created_batch["id"])
+                background_btn.enable()
                 if active_stop_requested:
                     created_batch = await run.io_bound(
                         lambda: active_batch_service.cancel_batch(active_batch_id)
@@ -1854,6 +1876,7 @@ def _build_wizard(
                 show_rewrite_action(running=False)
 
         start_btn.on_click(start_rewrite)
+        background_btn.on_click(open_background_generation)
 
 
 def _build_accounts_panel(
