@@ -143,8 +143,9 @@ PostgreSQL dump 已通过 `pg_restore -l` 读取验证；两个 ZIP 均通过 CR
 - GitHub 分支：`codex/production-git-deploy`。
 - PostgreSQL 迁移与用户隔离主体提交：`5faec520873a1c973a875dc898d8148aa7293f28`。
 - 公网审核链接修复提交：`5bdf471f515365bac4ee6864a1960e90e2e75f92`。
+- 部署记录同步提交：`e42c957230aeb74e47477d133b16d6630f1d7192`；该提交只更新文档，应用源码与 `5bdf471` 一致。
 - GitHub Draft PR：<https://github.com/Eors583/wechat-auto-publisher/pull/1>。
-- 生产当前 release：`/opt/wechat-publisher/releases/git-5bdf471f5153`。
+- 生产当前 release：`/opt/wechat-publisher/releases/git-e42c957230ae`。
 - 服务器继续采用裸 Git 镜像、不可变 release 目录和 `current` 原子软链接切换；没有在生产目录直接修改源码。
 - 第二个小版本发布时服务器到 GitHub 的 HTTPS 链路超时，因此从本地将同一 Git 提交直接推送到服务器裸仓库，再让既有发布脚本以 `SKIP_GIT_FETCH=true` 构建和切换；提交 SHA 与 GitHub 分支一致，发布方式仍保留完整 Git 版本记录。
 
@@ -177,7 +178,7 @@ PostgreSQL dump 已通过 `pg_restore -l` 读取验证；两个 ZIP 均通过 CR
 
 ### 服务与公网验收
 
-最终生产镜像为 `wechat-auto-publisher:git-5bdf471f5153`。PostgreSQL、API、用户端和管理端四个容器均运行正常，API 容器健康状态为 `healthy`。以下入口实际返回 200：
+最终生产镜像为 `wechat-auto-publisher:git-e42c957230ae`，其中应用源码与已验收的 `5bdf471` 完全一致。PostgreSQL、API、用户端和管理端四个容器均运行正常，API 容器健康状态为 `healthy`。以下入口实际返回 200：
 
 - 用户端：<http://47.99.126.8/>；
 - 管理端：<http://47.99.126.8/admin/>；
