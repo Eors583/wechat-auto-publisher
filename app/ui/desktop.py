@@ -348,30 +348,49 @@ def create_desktop_app() -> None:
             tab_jobs = ui.tab("任务中心")
             tab_settings = ui.tab("设置")
 
+        initial_tab = (
+            tab_jobs
+            if open_requested_review
+            else tab_settings
+            if open_requested_config or open_requested_admin
+            else tab_wizard
+        )
         panels = ui.tab_panels(
             tabs,
-            value=(
-                tab_jobs
-                if open_requested_review
-                else tab_settings
-                if open_requested_config or open_requested_admin
-                else tab_wizard
-            ),
+            value=initial_tab,
         ).classes("w-full bg-transparent")
         with panels:
             with ui.tab_panel(tab_wizard).classes("wizard-panel"):
-                _build_wizard(tabs, tab_topics, tab_jobs, state=page_state)
+                wizard_host = ui.column().classes("w-full")
             with ui.tab_panel(tab_topics):
-                build_topic_center(page_state, tabs, tab_wizard)
+                topics_host = ui.column().classes("w-full")
             with ui.tab_panel(tab_jobs):
-                task_panel_kwargs: dict[str, Any] = {}
-                if open_requested_review:
-                    task_panel_kwargs.update(
-                        initial_batch_id=requested_batch_id,
-                        initial_job_id=requested_job_id,
-                    )
-                build_tasks_panel(page_state, **task_panel_kwargs)
+                jobs_host = ui.column().classes("w-full")
             with ui.tab_panel(tab_settings):
+                settings_host = ui.column().classes("w-full")
+
+        mounted_tabs: set[str] = set()
+
+        def mount_wizard() -> None:
+            with wizard_host:
+                _build_wizard(tabs, tab_topics, tab_jobs, state=page_state)
+
+        def mount_topics() -> None:
+            with topics_host:
+                build_topic_center(page_state, tabs, tab_wizard)
+
+        def mount_jobs() -> None:
+            task_panel_kwargs: dict[str, Any] = {}
+            if open_requested_review:
+                task_panel_kwargs.update(
+                    initial_batch_id=requested_batch_id,
+                    initial_job_id=requested_job_id,
+                )
+            with jobs_host:
+                build_tasks_panel(page_state, **task_panel_kwargs)
+
+        def mount_settings() -> None:
+            with settings_host:
                 settings_tabs = (
                     ui.tabs()
                     .classes("workspace-tabs w-full")
@@ -422,6 +441,25 @@ def create_desktop_app() -> None:
                                 service=onboarding_service,
                             )
                         _build_help_panel()
+
+        tab_mounts = {
+            str(tab_wizard.props["name"]): mount_wizard,
+            str(tab_topics.props["name"]): mount_topics,
+            str(tab_jobs.props["name"]): mount_jobs,
+            str(tab_settings.props["name"]): mount_settings,
+        }
+
+        def mount_tab(tab: Any) -> None:
+            tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+            if tab_name in mounted_tabs:
+                return
+            tab_mounts[tab_name]()
+            mounted_tabs.add(tab_name)
+
+        # Only the requested panel contributes elements to the initial
+        # NiceGUI payload. Hidden workspaces are built on their first visit.
+        mount_tab(initial_tab)
+        tabs.on_value_change(lambda event: mount_tab(event.value))
 
 
 def _build_wizard(

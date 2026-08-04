@@ -59,10 +59,8 @@ def test_shared_review_link_routes_directly_to_the_one_workbench() -> None:
     task_source = inspect.getsource(tasks.build_tasks_panel)
 
     assert 'query_params.get("view")' in desktop_source
-    assert "tab_jobs\n                if open_requested_review" in desktop_source
-    assert (
-        "else tab_settings\n                if open_requested_config" in desktop_source
-    )
+    assert "tab_jobs\n            if open_requested_review" in desktop_source
+    assert "else tab_settings\n            if open_requested_config" in desktop_source
     assert "else tab_wizard" in desktop_source
     assert "initial_batch_id=requested_batch_id" in desktop_source
     assert "initial_job_id=requested_job_id" in desktop_source

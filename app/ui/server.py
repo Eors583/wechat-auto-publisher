@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import os
 
-from nicegui import ui
+from nicegui import app, ui
+from starlette.responses import PlainTextResponse
 
 from app.config import database_target, load_config
 from app.ui.desktop import create_desktop_app
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots_txt() -> PlainTextResponse:
+    """Keep crawlers away from the authenticated internal application."""
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
 
 def main() -> None:

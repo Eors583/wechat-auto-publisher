@@ -381,7 +381,7 @@ class EditorialReviewService:
             unsafe = [
                 item
                 for item in selected_ids
-                if not bool(by_id[item].get("can_auto_apply"))
+                if not _issue_can_auto_apply(by_id[item])
             ]
             if unsafe:
                 raise ValueError(
@@ -1429,11 +1429,10 @@ def normalize_review_result(
             role_id in {"fact_checker", "compliance_expert"}
             or fact_or_compliance_signal
         )
-        can_auto_apply = (
-            bool(role.get("may_rewrite"))
-            and not advisory_only
-            and item.get("can_auto_apply") is not False
-        )
+        # The model describes the issue; it must not decide whether the UI is
+        # allowed to offer an edit action.  That permission comes from the
+        # normalized role and our fact/compliance safety classification.
+        can_auto_apply = bool(role.get("may_rewrite")) and not advisory_only
         blocks_draft = (
             severity == "high"
             and advisory_only
@@ -1822,6 +1821,19 @@ def _has_explicit_fact_risk(text: str) -> bool:
             "无法核实",
             "疑似编造",
             "关键数字错误",
+        )
+    )
+
+
+def _issue_can_auto_apply(issue: dict[str, Any]) -> bool:
+    """Accept safe legacy editorial issues that were stored with a false flag."""
+    role_id = str(issue.get("role_id") or "")
+    return (
+        role_id not in {"fact_checker", "compliance_expert"}
+        and not bool(issue.get("blocks_draft"))
+        and (
+            bool(issue.get("can_auto_apply"))
+            or bool((REVIEW_ROLES.get(role_id) or {}).get("may_rewrite"))
         )
     )
 

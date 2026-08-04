@@ -6,6 +6,7 @@ from typing import Any
 from nicegui import run, ui
 
 from app.config import load_config
+from app.editorial_review import REVIEW_ROLES
 from app.services.batches import BatchService
 from app.ui.lifecycle import client_timer
 from app.ui.state import set_button_loading
@@ -28,6 +29,19 @@ RESOLUTION_LABELS = {
     "resolved": "已核实",
     "waived": "已接受风险",
 }
+
+
+def _issue_can_auto_apply(issue: dict[str, Any]) -> bool:
+    """Keep old reviews usable after auto-edit permission became role-owned."""
+    role_id = str(issue.get("role_id") or "")
+    return (
+        role_id not in {"fact_checker", "compliance_expert"}
+        and not bool(issue.get("blocks_draft"))
+        and (
+            bool(issue.get("can_auto_apply"))
+            or bool((REVIEW_ROLES.get(role_id) or {}).get("may_rewrite"))
+        )
+    )
 
 
 def build_review_jury_panel(
@@ -714,7 +728,7 @@ def build_review_jury_panel(
                 issue_group = ""
                 for issue in issues:
                     issue_id = str(issue.get("id") or "")
-                    can_auto_apply = bool(issue.get("can_auto_apply"))
+                    can_auto_apply = _issue_can_auto_apply(issue)
                     resolution = str(issue.get("resolution") or "open")
                     next_group = "editorial" if can_auto_apply else "safety"
                     if next_group != issue_group:
@@ -748,7 +762,7 @@ def build_review_jury_panel(
                                     ).props("color=green-7")
                             if can_auto_apply:
                                 selected = ui.checkbox(
-                                    "接受这条改进意见",
+                                    "勾选并交给 AI 改写",
                                     value=issue_id
                                     in runtime["selected_issue_ids"],
                                 )

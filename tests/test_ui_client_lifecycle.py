@@ -207,16 +207,6 @@ def test_create_desktop_app_uses_one_private_state_per_page_and_shares_it_with_p
     monkeypatch.setattr(desktop.ui, "add_head_html", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(desktop.ui, "add_css", lambda *_args, **_kwargs: None)
 
-    expected_panels = {
-        "wizard",
-        "topics",
-        "tasks",
-        "accounts",
-        "models",
-        "plans",
-        "feishu",
-    }
-
     try:
         desktop.create_desktop_app()
         first_page_calls = list(panel_calls)
@@ -230,8 +220,8 @@ def test_create_desktop_app_uses_one_private_state_per_page_and_shares_it_with_p
 
     assert len(created_states) == 2
     assert created_states[0] is not created_states[1]
-    assert {name for name, _state in first_page_calls} == expected_panels
-    assert {name for name, _state in second_page_calls} == expected_panels
+    assert {name for name, _state in first_page_calls} == {"wizard"}
+    assert {name for name, _state in second_page_calls} == {"wizard"}
     assert all(state is created_states[0] for _name, state in first_page_calls)
     assert all(state is created_states[1] for _name, state in second_page_calls)
-    assert plan_refresh_callbacks == account_refresh_callbacks
+    assert plan_refresh_callbacks == account_refresh_callbacks == []

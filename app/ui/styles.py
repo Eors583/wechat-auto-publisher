@@ -1,9 +1,8 @@
 """Desktop UI visual theme."""
 
 HEAD_HTML = """
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+<meta name="description" content="公众号智能运营助手：从选题、AI 创作和评审到微信公众号草稿，一站式完成内容生产。">
+<script>document.documentElement.lang = 'zh-CN';</script>
 """
 
 APP_CSS = """
@@ -51,7 +50,7 @@ body, .q-page, .nicegui-content {
     radial-gradient(760px 340px at 100% 0%, rgba(92,138,123,0.09) 0%, transparent 58%),
     linear-gradient(180deg, var(--bg1) 0%, var(--bg0) 100%) !important;
   color: var(--ink);
-  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   min-height: 100vh;
 }
 
@@ -64,7 +63,6 @@ body, .q-page, .nicegui-content {
   width: min(100%, 1240px);
   margin: 0 auto;
   padding: 24px 28px 52px;
-  animation: fade-up 0.35s ease both;
 }
 
 .hero {
@@ -287,7 +285,6 @@ body, .q-page, .nicegui-content {
   margin: 0;
   box-shadow: var(--shadow);
   backdrop-filter: blur(12px);
-  animation: fade-up 0.4s ease both;
   min-width: 0;
   transition: border-color .2s ease, box-shadow .2s ease;
 }

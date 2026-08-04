@@ -37,7 +37,7 @@ def _text_values() -> list[str]:
     return values
 
 
-def test_settings_exposes_five_clear_product_entries(
+def test_settings_entries_do_not_inflate_the_initial_workbench_payload(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(
@@ -73,7 +73,7 @@ def test_settings_exposes_five_clear_product_entries(
         ui.context.client.remove_all_elements()
 
     for label in ("公众号", "模型管理", "创作方案", "飞书", "系统设置"):
-        assert label in texts
+        assert label not in texts
     for obsolete in ("文本模型", "提示词模板", "评审方案"):
         assert obsolete not in texts
     assert "微信公众号云中转" not in texts

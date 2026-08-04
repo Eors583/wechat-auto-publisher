@@ -1009,6 +1009,27 @@ def test_engagement_optimization_rewrites_the_article_as_a_whole() -> None:
     assert "事实" in prompt and "核心观点" in prompt
 
 
+def test_editorial_role_owns_auto_apply_permission_even_if_model_says_false() -> None:
+    result = normalize_review_result(
+        {
+            "overall_score": 60,
+            "issues": [
+                {
+                    "role_id": "chief_editor",
+                    "category": "标题",
+                    "severity": "medium",
+                    "problem": "标题不够具体",
+                    "suggestion": "改成更具体的利益点",
+                    "can_auto_apply": False,
+                }
+            ],
+        },
+        config=normalize_review_config({"role_ids": ["chief_editor"]}),
+    )
+
+    assert result["issues"][0]["can_auto_apply"] is True
+
+
 def test_fact_and_compliance_signals_cannot_hide_under_other_roles(
     tmp_path, monkeypatch
 ) -> None:

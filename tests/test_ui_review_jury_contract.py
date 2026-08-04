@@ -207,7 +207,7 @@ def test_review_result_is_conclusion_plus_selectable_improvement_items() -> None
     assert any(
         call.args
         and isinstance(call.args[0], ast.Constant)
-        and call.args[0].value == "接受这条改进意见"
+        and call.args[0].value == "勾选并交给 AI 改写"
         for call in checkboxes
     ), "each safe suggestion must expose an explicit accept checkbox"
 
