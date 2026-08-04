@@ -47,7 +47,9 @@ services:
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
       FEISHU_ENABLED: ${FEISHU_ENABLED:-false}
       WECHAT_RELAY_ENABLED: "false"
-      WECHAT_PUBLISHER_PUBLIC_UI_URL: http://47.99.126.8:18775
+      # Review links returned by the API/Feishu must use the public Nginx
+      # entrance, not the container's host port (which should stay private).
+      WECHAT_PUBLISHER_PUBLIC_UI_URL: ${WECHAT_PUBLISHER_PUBLIC_UI_URL:-http://47.99.126.8}
       PYTHONUNBUFFERED: "1"
     volumes:
       - app_data:/app/data
