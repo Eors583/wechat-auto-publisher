@@ -79,7 +79,7 @@ begin
     WizardForm.StatusLabel.Caption := '正在验证安装包运行环境…';
     if (not Exec(
       ExpandConstant('{app}\{#MyAppExeName}'),
-      '--self-test',
+      '--self-test --remote-url {#MyRemoteUrl}',
       ExpandConstant('{app}'),
       SW_HIDE,
       ewWaitUntilTerminated,

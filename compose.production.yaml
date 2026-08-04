@@ -13,9 +13,9 @@ services:
   postgres:
     image: docker.m.daocloud.io/library/postgres:17-alpine
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -41,9 +41,10 @@ services:
       - --port
       - "18766"
     environment: &app_environment
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
       AUTH_REQUIRED: "true"
-      AUTH_STORAGE_SECRET: ${AUTH_STORAGE_SECRET}
+      AUTH_STORAGE_SECRET: ${AUTH_STORAGE_SECRET:?AUTH_STORAGE_SECRET is required}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
       FEISHU_ENABLED: ${FEISHU_ENABLED:-false}
       WECHAT_RELAY_ENABLED: "false"
       WECHAT_PUBLISHER_PUBLIC_UI_URL: http://47.99.126.8:18775

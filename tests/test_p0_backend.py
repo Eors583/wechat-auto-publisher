@@ -19,7 +19,15 @@ from app.services.model_readiness import active_model_auth_failure_ids
 
 
 def _config(tmp_path) -> dict[str, Any]:
-    return {**load_config(), "_db_path": str(tmp_path / "p0.db")}
+    return {
+        **load_config(),
+        "_db_path": str(tmp_path / "p0.db"),
+        "api": {"token": "p0-test-token"},
+    }
+
+
+def _api_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer p0-test-token"}
 
 
 def _account(db: Database, account_id: str, *, priority: int = 0) -> None:
@@ -283,7 +291,10 @@ def test_api_sanitizes_domain_exception_details(tmp_path, monkeypatch) -> None:
         create_api_app(config, service, start_feishu=False)
     )
 
-    response = client.get("/api/v1/review-inbox")
+    response = client.get(
+        "/api/v1/review-inbox",
+        headers=_api_headers(),
+    )
 
     assert response.status_code == 400
     assert "SECRET-API-TOKEN" not in response.text
@@ -1235,14 +1246,22 @@ def test_p0_api_routes_delegate_to_shared_service(tmp_path) -> None:
     with TestClient(app) as client:
         inbox = client.get(
             "/api/v1/review-inbox"
-            "?bucket=write_failed&search=quarterly&limit=10"
+            "?bucket=write_failed&search=quarterly&limit=10",
+            headers=_api_headers(),
         )
-        attempts = client.get("/api/v1/batches/b1/jobs/7/attempts")
+        attempts = client.get(
+            "/api/v1/batches/b1/jobs/7/attempts",
+            headers=_api_headers(),
+        )
         retried = client.post(
             "/api/v1/batches/b1/jobs/7/retry",
+            headers=_api_headers(),
             json={"step": "render"},
         )
-        health = client.get("/api/v1/wechat/connection-health")
+        health = client.get(
+            "/api/v1/wechat/connection-health",
+            headers=_api_headers(),
+        )
     assert inbox.status_code == 200
     assert inbox.json()["bucket"] == "write_failed"
     assert inbox.json()["search"] == "quarterly"

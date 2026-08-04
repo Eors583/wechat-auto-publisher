@@ -5,6 +5,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -14,7 +15,6 @@ from app.db_backend import (
     is_postgres_url,
     postgres_integrity_errors,
 )
-
 
 JOB_STATUSES = (
     "pending",
@@ -41,6 +41,37 @@ STEPS = (
 
 _PROCESS_OWNER_SESSION_ID = f"process-{uuid.uuid4().hex}"
 _INTEGRITY_ERRORS = (sqlite3.IntegrityError, *postgres_integrity_errors())
+_ACTIVE_OWNER_USER_ID: ContextVar[str] = ContextVar(
+    "wechat_publisher_owner_user_id",
+    default="",
+)
+_CUSTOMER_SETTING_KEYS = {
+    "onboarding.guide",
+    "ui.last_target_account_ids",
+    "wechat_backend_search",
+}
+
+
+def _sqlite_test_mode_enabled() -> bool:
+    return str(
+        os.getenv("WECHAT_PUBLISHER_ALLOW_SQLITE_FOR_TESTS") or ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _is_customer_setting(key: str) -> bool:
+    clean = str(key or "").strip()
+    return clean in _CUSTOMER_SETTING_KEYS or clean.startswith("ui.")
+
+
+@contextmanager
+def customer_data_scope(user_id: str | None) -> Iterator[None]:
+    """Scope shared API service objects to one authenticated customer."""
+
+    token = _ACTIVE_OWNER_USER_ID.set(str(user_id or "").strip())
+    try:
+        yield
+    finally:
+        _ACTIVE_OWNER_USER_ID.reset(token)
 
 
 def _utc_now() -> str:
@@ -53,9 +84,15 @@ class Database:
         path: str | Path,
         *,
         owner_session_id: str | None = None,
+        owner_user_id: str | None = None,
     ) -> None:
         self.path = str(path)
         self.backend = "postgresql" if is_postgres_url(self.path) else "sqlite"
+        if self.backend == "sqlite" and not _sqlite_test_mode_enabled():
+            raise RuntimeError(
+                "应用已切换为 PostgreSQL-only；请配置 DATABASE_URL。"
+                "SQLite 仅允许在隔离自动化测试中使用。"
+            )
         self.database_url = self.path if self.backend == "postgresql" else ""
         self.owner_session_id = (
             str(owner_session_id or "").strip()
@@ -64,9 +101,54 @@ class Database:
             ).strip()
             or _PROCESS_OWNER_SESSION_ID
         )
+        # ``owner_user_id`` scopes all customer-owned records. Platform
+        # configuration (models, relay and administrator settings) deliberately
+        # remains unscoped. An empty value is kept for migration/admin tooling.
+        self._owner_user_id = str(owner_user_id or "").strip()
         if self.backend == "sqlite":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+
+    def for_user(self, user_id: str | None) -> Database:
+        """Return an independent database handle scoped to one login account."""
+
+        return Database(
+            self.path,
+            owner_session_id=self.owner_session_id,
+            owner_user_id=str(user_id or "").strip(),
+        )
+
+    def set_owner_user(self, user_id: str | None) -> None:
+        self._owner_user_id = str(user_id or "").strip()
+
+    @property
+    def owner_user_id(self) -> str:
+        return self._owner_user_id or _ACTIVE_OWNER_USER_ID.get()
+
+    def _owner_clause(
+        self,
+        column: str = "owner_user_id",
+        *,
+        prefix: str = "WHERE",
+    ) -> tuple[str, list[Any]]:
+        if not self.owner_user_id:
+            return "", []
+        return f"{prefix} {column} = ?", [self.owner_user_id]
+
+    def _assert_write_owner(
+        self,
+        conn: Any,
+        table_name: str,
+        record_id: str,
+    ) -> None:
+        if not self.owner_user_id:
+            return
+        row = conn.execute(
+            f"SELECT owner_user_id FROM {table_name} WHERE id = ?",
+            (str(record_id),),
+        ).fetchone()
+        if row and str(row["owner_user_id"] or "") != self.owner_user_id:
+            raise ValueError("该配置不属于当前登录账号")
 
     @contextmanager
     def connect(self) -> Iterator[Any]:
@@ -99,6 +181,7 @@ class Database:
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending',
                     step TEXT NOT NULL DEFAULT 'ingest',
                     topic TEXT,
@@ -164,6 +247,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS prompt_templates (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL,
                     purpose TEXT NOT NULL DEFAULT 'image',
                     content TEXT NOT NULL,
@@ -174,6 +258,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS official_accounts (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL,
                     app_id TEXT NOT NULL,
                     app_secret_encrypted TEXT NOT NULL,
@@ -187,6 +272,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS batches (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     display_id TEXT,
                     status TEXT NOT NULL DEFAULT 'pending',
                     topic TEXT,
@@ -256,6 +342,15 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, key),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS job_versions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id INTEGER NOT NULL,
@@ -273,6 +368,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS editorial_review_profiles (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL,
                     description TEXT,
                     config_json TEXT NOT NULL DEFAULT '{}',
@@ -292,6 +388,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS creation_plans (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
                     article_prompt_template_id TEXT,
@@ -375,6 +472,8 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS topic_sources (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
+                    source_key TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     config_json TEXT NOT NULL DEFAULT '{}',
@@ -404,6 +503,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS followed_accounts (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL,
                     wechat_id TEXT,
                     official_account_id TEXT,
@@ -424,10 +524,11 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS followed_articles (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     followed_account_id TEXT,
                     account_name TEXT,
                     title TEXT NOT NULL,
-                    url TEXT NOT NULL UNIQUE,
+                    url TEXT NOT NULL,
                     published_at TEXT,
                     discovered_at TEXT NOT NULL,
                     cover_url TEXT,
@@ -440,6 +541,7 @@ class Database:
                     rewritten_batch_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    UNIQUE(owner_user_id, url),
                     FOREIGN KEY (followed_account_id) REFERENCES followed_accounts(id) ON DELETE SET NULL
                 );
 
@@ -531,6 +633,75 @@ class Database:
                     ON draft_deliveries(status, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_user
                     ON user_sessions(user_id, expires_at);
+                """
+            )
+            # Customer-owned records are scoped to the login account. Existing
+            # installations receive an empty owner first; the default
+            # administrator claims those rows after authentication is seeded.
+            for table_name in (
+                "official_accounts",
+                "jobs",
+                "prompt_templates",
+                "creation_plans",
+                "editorial_review_profiles",
+                "batches",
+                "topic_sources",
+                "followed_accounts",
+                "followed_articles",
+            ):
+                columns = {
+                    str(row["name"])
+                    for row in conn.execute(
+                        f"PRAGMA table_info({table_name})"
+                    ).fetchall()
+                }
+                if "owner_user_id" not in columns:
+                    conn.execute(
+                        f"ALTER TABLE {table_name} "
+                        "ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''"
+                    )
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table_name}_owner "
+                    f"ON {table_name}(owner_user_id)"
+                )
+            if self.backend == "postgresql":
+                conn.execute(
+                    """
+                    ALTER TABLE followed_articles
+                    DROP CONSTRAINT IF EXISTS followed_articles_url_key
+                    """
+                )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_followed_articles_owner_url
+                ON followed_articles(owner_user_id, url)
+                """
+            )
+            topic_source_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(topic_sources)"
+                ).fetchall()
+            }
+            if "source_key" not in topic_source_columns:
+                conn.execute(
+                    """
+                    ALTER TABLE topic_sources
+                    ADD COLUMN source_key TEXT NOT NULL DEFAULT ''
+                    """
+                )
+            conn.execute(
+                """
+                UPDATE topic_sources
+                SET source_key = id
+                WHERE source_key IS NULL OR source_key = ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_topic_sources_owner_source_key
+                ON topic_sources(owner_user_id, source_key)
                 """
             )
             # Lightweight migration for databases created before per-account layouts.
@@ -898,11 +1069,12 @@ class Database:
             cur = conn.execute(
                 """
                 INSERT INTO jobs (
-                    status, step, topic, source, source_url, raw_content, mode,
+                    owner_user_id, status, step, topic, source, source_url, raw_content, mode,
                     meta_json, created_at, updated_at
-                ) VALUES (?, 'ingest', ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, 'ingest', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    self.owner_user_id,
                     "pending",
                     topic,
                     source,
@@ -918,13 +1090,24 @@ class Database:
 
     def get_job(self, job_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            sql = "SELECT * FROM jobs WHERE id = ?"
+            params: list[Any] = [job_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             return self._row_to_job(row) if row else None
 
     def list_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:
+            owner_clause = "WHERE owner_user_id = ?" if self.owner_user_id else ""
+            params: list[Any] = []
+            if self.owner_user_id:
+                params.append(self.owner_user_id)
+            params.append(limit)
             rows = conn.execute(
-                "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
+                f"SELECT * FROM jobs {owner_clause} ORDER BY id DESC LIMIT ?",
+                params,
             ).fetchall()
             return [self._row_to_job(r) for r in rows]
 
@@ -1350,8 +1533,9 @@ class Database:
                     SELECT COUNT(*) AS value
                     FROM batches
                     WHERE substr(created_at, 1, 10) = ?
+                      AND (? = '' OR owner_user_id = ?)
                     """,
-                    (now[:10],),
+                    (now[:10], self.owner_user_id, self.owner_user_id),
                 ).fetchone()["value"]
                 or 0
             )
@@ -1359,15 +1543,16 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO batches (
-                    id, display_id, status, topic, source_mode,
+                    id, owner_user_id, display_id, status, topic, source_mode,
                     reference_urls_json, required_facts, rewrite_intensity,
                     source_url, raw_content,
                     requested_by, chat_id, error, parent_batch_id,
                     archived_at, created_at, updated_at
-                ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
                 """,
                 (
                     batch_id,
+                    self.owner_user_id,
                     display_id,
                     topic,
                     source_mode,
@@ -1416,16 +1601,24 @@ class Database:
             updates.append("error = ?")
             values.append(error)
         values.append(batch_id)
+        if self.owner_user_id:
+            values.append(self.owner_user_id)
         with self.connect() as conn:
+            where = "id = ?"
+            if self.owner_user_id:
+                where += " AND owner_user_id = ?"
             conn.execute(
-                f"UPDATE batches SET {', '.join(updates)} WHERE id = ?", values
+                f"UPDATE batches SET {', '.join(updates)} WHERE {where}", values
             )
 
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM batches WHERE id = ?", (batch_id,)
-            ).fetchone()
+            sql = "SELECT * FROM batches WHERE id = ?"
+            params: list[Any] = [batch_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             if not row:
                 return None
             batch = dict(row)
@@ -1450,10 +1643,18 @@ class Database:
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            where = "" if include_archived else "WHERE archived_at IS NULL"
+            clauses: list[str] = []
+            params: list[Any] = []
+            if not include_archived:
+                clauses.append("archived_at IS NULL")
+            if self.owner_user_id:
+                clauses.append("owner_user_id = ?")
+                params.append(self.owner_user_id)
+            where = "WHERE " + " AND ".join(clauses) if clauses else ""
+            params.append(max(1, int(limit)))
             rows = conn.execute(
                 f"SELECT id FROM batches {where} ORDER BY created_at DESC LIMIT ?",
-                (max(1, int(limit)),),
+                params,
             ).fetchall()
         return [batch for row in rows if (batch := self.get_batch(str(row["id"])))]
 
@@ -1467,15 +1668,30 @@ class Database:
         viewed_at = now if review_status in {"viewed", "confirmed", "needs_changes"} else None
         confirmed_at = now if review_status == "confirmed" else None
         with self.connect() as conn:
+            owner_clause = ""
+            params: list[Any] = [
+                review_status,
+                viewed_at,
+                confirmed_at,
+                batch_id,
+                int(job_id),
+            ]
+            if self.owner_user_id:
+                owner_clause = (
+                    " AND EXISTS (SELECT 1 FROM batches b "
+                    "WHERE b.id = batch_jobs.batch_id AND b.owner_user_id = ?)"
+                )
+                params.append(self.owner_user_id)
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE batch_jobs
                 SET review_status = ?,
                     viewed_at = COALESCE(viewed_at, ?),
                     confirmed_at = ?
                 WHERE batch_id = ? AND job_id = ?
+                {owner_clause}
                 """,
-                (review_status, viewed_at, confirmed_at, batch_id, int(job_id)),
+                params,
             )
             if not cursor.rowcount:
                 raise KeyError(f"任务不属于该批次：{job_id}")
@@ -1533,6 +1749,8 @@ class Database:
             if scope_parts
             else ""
         )
+        owner_clause = " AND b.owner_user_id = ?" if self.owner_user_id else ""
+        owner_params: list[Any] = [self.owner_user_id] if self.owner_user_id else []
         with self.connect() as conn:
             row = conn.execute(
                 f"""
@@ -1559,6 +1777,7 @@ class Database:
                 JOIN jobs j ON j.id = bj.job_id
                 JOIN batches b ON b.id = bj.batch_id
                 WHERE b.archived_at IS NULL
+                {owner_clause}
                 {account_clause}
                 {search_clause}
                 {scope_clause}
@@ -1566,6 +1785,7 @@ class Database:
                 (
                     day_start,
                     day_end,
+                    *owner_params,
                     *account_params,
                     *search_params,
                     *scope_params,
@@ -1660,6 +1880,8 @@ class Database:
             if scope_parts
             else ""
         )
+        owner_clause = " AND b.owner_user_id = ?" if self.owner_user_id else ""
+        owner_params: list[Any] = [self.owner_user_id] if self.owner_user_id else []
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
@@ -1701,6 +1923,7 @@ class Database:
                     LIMIT 1
                 )
                 WHERE b.archived_at IS NULL
+                  {owner_clause}
                   AND {clauses[normalized_bucket]}
                   {account_clause}
                   {search_clause}
@@ -1723,6 +1946,7 @@ class Database:
                     day_end,
                     overdue,
                     scheduled_day,
+                    *owner_params,
                     *filter_params,
                     overdue,
                     max(1, min(int(limit), 200)),
@@ -2232,6 +2456,8 @@ class Database:
             return False
 
     def get_setting(self, key: str) -> str | None:
+        if self.owner_user_id and _is_customer_setting(key):
+            return self.get_user_setting(key)
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT value FROM app_settings WHERE key = ?", (key,)
@@ -2239,6 +2465,9 @@ class Database:
             return str(row["value"]) if row else None
 
     def set_setting(self, key: str, value: str) -> None:
+        if self.owner_user_id and _is_customer_setting(key):
+            self.set_user_setting(key, value)
+            return
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2250,6 +2479,124 @@ class Database:
                 """,
                 (key, value, _utc_now()),
             )
+
+    def get_user_setting(self, key: str) -> str | None:
+        """Read a setting belonging to the current login account."""
+
+        if not self.owner_user_id:
+            return self.get_setting(key)
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT value
+                FROM user_settings
+                WHERE user_id = ? AND key = ?
+                """,
+                (self.owner_user_id, str(key)),
+            ).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_user_setting(self, key: str, value: str) -> None:
+        """Persist a setting for the current login account."""
+
+        if not self.owner_user_id:
+            self.set_setting(key, value)
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_settings (user_id, key, value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                (self.owner_user_id, str(key), str(value), _utc_now()),
+            )
+
+    def claim_legacy_customer_data(self, user_id: str) -> None:
+        """Assign pre-login customer data to the default administrator.
+
+        Business records and customer settings use separate migration markers.
+        This keeps upgrades idempotent while allowing installations which have
+        already claimed business rows to still migrate legacy user settings.
+        """
+
+        clean_user_id = str(user_id or "").strip()
+        if not clean_user_id:
+            return
+        with self.connect() as conn:
+            if self.backend == "postgresql":
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    (8_104_721_907_352,),
+                )
+            owner_marker_key = "migration.customer_data_owner.v1"
+            owner_migrated = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                (owner_marker_key,),
+            ).fetchone()
+            if not owner_migrated:
+                for table_name in (
+                    "official_accounts",
+                    "jobs",
+                    "prompt_templates",
+                    "creation_plans",
+                    "editorial_review_profiles",
+                    "batches",
+                    "topic_sources",
+                    "followed_accounts",
+                    "followed_articles",
+                ):
+                    conn.execute(
+                        f"UPDATE {table_name} SET owner_user_id = ? "
+                        "WHERE owner_user_id IS NULL OR owner_user_id = ''",
+                        (clean_user_id,),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at
+                    """,
+                    (owner_marker_key, clean_user_id, _utc_now()),
+                )
+
+            settings_marker_key = "migration.customer_settings_owner.v1"
+            settings_migrated = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                (settings_marker_key,),
+            ).fetchone()
+            if not settings_migrated:
+                now = _utc_now()
+                legacy_settings = conn.execute(
+                    "SELECT key, value FROM app_settings"
+                ).fetchall()
+                for legacy in legacy_settings:
+                    key = str(legacy["key"])
+                    if not _is_customer_setting(key):
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO user_settings (
+                            user_id, key, value, updated_at
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(user_id, key) DO NOTHING
+                        """,
+                        (clean_user_id, key, str(legacy["value"]), now),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at
+                    """,
+                    (settings_marker_key, clean_user_id, now),
+                )
 
     # ------------------------------------------------------------------
     # Users and login sessions
@@ -2538,6 +2885,9 @@ class Database:
         with self.connect() as conn:
             clauses: list[str] = []
             params: list[Any] = []
+            if self.owner_user_id:
+                clauses.append("owner_user_id = ?")
+                params.append(self.owner_user_id)
             if purpose:
                 clauses.append("purpose = ?")
                 params.append(purpose)
@@ -2551,19 +2901,25 @@ class Database:
 
     def get_prompt_template(self, template_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM prompt_templates WHERE id = ?", (template_id,)
-            ).fetchone()
+            sql = "SELECT * FROM prompt_templates WHERE id = ?"
+            params: list[Any] = [template_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def upsert_prompt_template(self, template: dict[str, Any]) -> None:
         now = _utc_now()
         with self.connect() as conn:
+            self._assert_write_owner(
+                conn, "prompt_templates", str(template["id"])
+            )
             conn.execute(
                 """
                 INSERT INTO prompt_templates (
-                    id, name, purpose, content, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, owner_user_id, name, purpose, content, enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     purpose=excluded.purpose,
@@ -2573,6 +2929,8 @@ class Database:
                 """,
                 (
                     template["id"],
+                    self.owner_user_id
+                    or str(template.get("owner_user_id") or "").strip(),
                     template["name"],
                     template.get("purpose", "image"),
                     template["content"],
@@ -2584,36 +2942,51 @@ class Database:
 
     def delete_prompt_template(self, template_id: str) -> None:
         with self.connect() as conn:
-            conn.execute("DELETE FROM prompt_templates WHERE id = ?", (template_id,))
+            sql = "DELETE FROM prompt_templates WHERE id = ?"
+            params: list[Any] = [template_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            conn.execute(sql, params)
 
     def list_creation_plans(
         self, *, enabled_only: bool = False
     ) -> list[dict[str, Any]]:
         with self.connect() as conn:
             sql = "SELECT * FROM creation_plans"
+            clauses: list[str] = []
+            params: list[Any] = []
+            if self.owner_user_id:
+                clauses.append("owner_user_id = ?")
+                params.append(self.owner_user_id)
             if enabled_only:
-                sql += " WHERE enabled = 1"
+                clauses.append("enabled = 1")
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY created_at, name"
-            return [dict(row) for row in conn.execute(sql).fetchall()]
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
     def get_creation_plan(self, plan_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM creation_plans WHERE id = ?",
-                (plan_id,),
-            ).fetchone()
+            sql = "SELECT * FROM creation_plans WHERE id = ?"
+            params: list[Any] = [plan_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def upsert_creation_plan(self, plan: dict[str, Any]) -> None:
         now = _utc_now()
         with self.connect() as conn:
+            self._assert_write_owner(conn, "creation_plans", str(plan["id"]))
             conn.execute(
                 """
                 INSERT INTO creation_plans (
-                    id, name, description, article_prompt_template_id,
+                    id, owner_user_id, name, description, article_prompt_template_id,
                     image_prompt_template_id, editorial_review_profile_id,
                     layout_json, image_settings_json, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
@@ -2627,6 +3000,8 @@ class Database:
                 """,
                 (
                     plan["id"],
+                    self.owner_user_id
+                    or str(plan.get("owner_user_id") or "").strip(),
                     plan["name"],
                     plan.get("description") or "",
                     plan.get("article_prompt_template_id") or None,
@@ -2652,42 +3027,60 @@ class Database:
 
     def delete_creation_plan(self, plan_id: str) -> None:
         with self.connect() as conn:
-            conn.execute("DELETE FROM creation_plans WHERE id = ?", (plan_id,))
+            sql = "DELETE FROM creation_plans WHERE id = ?"
+            params: list[Any] = [plan_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            conn.execute(sql, params)
 
     def list_account_creation_plan_defaults(
         self, *, plan_id: str | None = None
     ) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            if plan_id is None:
-                rows = conn.execute(
-                    "SELECT * FROM account_creation_plan_defaults"
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM account_creation_plan_defaults
-                    WHERE creation_plan_id = ?
-                    """,
-                    (plan_id,),
-                ).fetchall()
+            clauses: list[str] = []
+            params: list[Any] = []
+            if plan_id is not None:
+                clauses.append("d.creation_plan_id = ?")
+                params.append(plan_id)
+            if self.owner_user_id:
+                clauses.append("a.owner_user_id = ?")
+                params.append(self.owner_user_id)
+            sql = """
+                SELECT d.*
+                FROM account_creation_plan_defaults d
+                JOIN official_accounts a ON a.id = d.account_id
+            """
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
+            rows = conn.execute(sql, params).fetchall()
             return [dict(row) for row in rows]
 
     def get_account_creation_plan_default(
         self, account_id: str
     ) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM account_creation_plan_defaults
-                WHERE account_id = ?
-                """,
-                (account_id,),
-            ).fetchone()
+            sql = """
+                SELECT d.*
+                FROM account_creation_plan_defaults d
+                JOIN official_accounts a ON a.id = d.account_id
+                WHERE d.account_id = ?
+            """
+            params: list[Any] = [account_id]
+            if self.owner_user_id:
+                sql += " AND a.owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def set_account_creation_plan_default(
         self, account_id: str, creation_plan_id: str
     ) -> None:
+        if self.owner_user_id:
+            if not self.get_official_account(account_id):
+                raise ValueError("公众号不存在")
+            if not self.get_creation_plan(creation_plan_id):
+                raise ValueError("创作方案不存在")
         now = _utc_now()
         with self.connect() as conn:
             conn.execute(
@@ -2711,12 +3104,22 @@ class Database:
         clauses: list[str] = []
         params: list[Any] = []
         if creation_plan_id is not None:
-            clauses.append("creation_plan_id = ?")
+            clauses.append("t.creation_plan_id = ?")
             params.append(creation_plan_id)
         if account_id is not None:
-            clauses.append("account_id = ?")
+            clauses.append("t.account_id = ?")
             params.append(account_id)
-        sql = "SELECT * FROM creation_plan_account_templates"
+        sql = """
+            SELECT t.*
+            FROM creation_plan_account_templates t
+            JOIN official_accounts a ON a.id = t.account_id
+            JOIN creation_plans p ON p.id = t.creation_plan_id
+        """
+        if self.owner_user_id:
+            clauses.append("a.owner_user_id = ?")
+            params.append(self.owner_user_id)
+            clauses.append("p.owner_user_id = ?")
+            params.append(self.owner_user_id)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY created_at, account_id"
@@ -2727,18 +3130,28 @@ class Database:
         self, creation_plan_id: str, account_id: str
     ) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM creation_plan_account_templates
-                WHERE creation_plan_id = ? AND account_id = ?
-                """,
-                (creation_plan_id, account_id),
-            ).fetchone()
+            sql = """
+                SELECT t.*
+                FROM creation_plan_account_templates t
+                JOIN official_accounts a ON a.id = t.account_id
+                JOIN creation_plans p ON p.id = t.creation_plan_id
+                WHERE t.creation_plan_id = ? AND t.account_id = ?
+            """
+            params: list[Any] = [creation_plan_id, account_id]
+            if self.owner_user_id:
+                sql += " AND a.owner_user_id = ? AND p.owner_user_id = ?"
+                params.extend((self.owner_user_id, self.owner_user_id))
+            row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def upsert_creation_plan_account_template(
         self, binding: dict[str, Any]
     ) -> None:
+        if self.owner_user_id:
+            if not self.get_official_account(str(binding["account_id"])):
+                raise ValueError("公众号不存在")
+            if not self.get_creation_plan(str(binding["creation_plan_id"])):
+                raise ValueError("创作方案不存在")
         now = _utc_now()
         with self.connect() as conn:
             conn.execute(
@@ -2781,6 +3194,10 @@ class Database:
     def delete_creation_plan_account_template(
         self, creation_plan_id: str, account_id: str
     ) -> None:
+        if self.owner_user_id and not self.get_creation_plan_account_template(
+            creation_plan_id, account_id
+        ):
+            return
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2793,16 +3210,26 @@ class Database:
     def list_official_accounts(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         with self.connect() as conn:
             sql = "SELECT * FROM official_accounts"
+            clauses: list[str] = []
+            params: list[Any] = []
+            if self.owner_user_id:
+                clauses.append("owner_user_id = ?")
+                params.append(self.owner_user_id)
             if enabled_only:
-                sql += " WHERE enabled = 1"
+                clauses.append("enabled = 1")
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY created_at, name"
-            return [dict(row) for row in conn.execute(sql).fetchall()]
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
     def get_official_account(self, account_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM official_accounts WHERE id = ?", (account_id,)
-            ).fetchone()
+            sql = "SELECT * FROM official_accounts WHERE id = ?"
+            params: list[Any] = [account_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def upsert_official_account(self, account: dict[str, Any]) -> None:
@@ -2822,12 +3249,15 @@ class Database:
             or 0
         )
         with self.connect() as conn:
+            self._assert_write_owner(
+                conn, "official_accounts", str(account["id"])
+            )
             conn.execute(
                 """
                 INSERT INTO official_accounts (
-                    id, name, app_id, app_secret_encrypted, model_id, layout_json,
+                    id, owner_user_id, name, app_id, app_secret_encrypted, model_id, layout_json,
                     review_priority, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     app_id=excluded.app_id,
@@ -2840,6 +3270,8 @@ class Database:
                 """,
                 (
                     account["id"],
+                    self.owner_user_id
+                    or str(account.get("owner_user_id") or "").strip(),
                     account["name"],
                     account["app_id"],
                     account["app_secret_encrypted"],
@@ -2867,31 +3299,47 @@ class Database:
             self.invalidate_wechat_connection_health(str(account["id"]))
 
     def delete_official_account(self, account_id: str) -> None:
+        if self.owner_user_id and not self.get_official_account(account_id):
+            return
         with self.connect() as conn:
             conn.execute(
                 "DELETE FROM wechat_connection_health WHERE account_id = ?",
                 (account_id,),
             )
-            conn.execute("DELETE FROM official_accounts WHERE id = ?", (account_id,))
+            sql = "DELETE FROM official_accounts WHERE id = ?"
+            params: list[Any] = [account_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            conn.execute(sql, params)
 
     def list_editorial_review_profiles(
         self, enabled_only: bool = False
     ) -> list[dict[str, Any]]:
         with self.connect() as conn:
             sql = "SELECT * FROM editorial_review_profiles"
+            clauses: list[str] = []
+            params: list[Any] = []
+            if self.owner_user_id:
+                clauses.append("owner_user_id = ?")
+                params.append(self.owner_user_id)
             if enabled_only:
-                sql += " WHERE enabled = 1"
+                clauses.append("enabled = 1")
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY created_at, name"
-            return [dict(row) for row in conn.execute(sql).fetchall()]
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
     def get_editorial_review_profile(
         self, profile_id: str
     ) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM editorial_review_profiles WHERE id = ?",
-                (profile_id,),
-            ).fetchone()
+            sql = "SELECT * FROM editorial_review_profiles WHERE id = ?"
+            params: list[Any] = [profile_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def upsert_editorial_review_profile(self, profile: dict[str, Any]) -> None:
@@ -2900,11 +3348,14 @@ class Database:
         if config is None:
             config = _loads_json(profile.get("config_json"), {})
         with self.connect() as conn:
+            self._assert_write_owner(
+                conn, "editorial_review_profiles", str(profile["id"])
+            )
             conn.execute(
                 """
                 INSERT INTO editorial_review_profiles (
-                    id, name, description, config_json, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, owner_user_id, name, description, config_json, enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
@@ -2914,6 +3365,8 @@ class Database:
                 """,
                 (
                     profile["id"],
+                    self.owner_user_id
+                    or str(profile.get("owner_user_id") or "").strip(),
                     profile["name"],
                     profile.get("description") or "",
                     json.dumps(config or {}, ensure_ascii=False),
@@ -2924,6 +3377,8 @@ class Database:
             )
 
     def delete_editorial_review_profile(self, profile_id: str) -> None:
+        if self.owner_user_id and not self.get_editorial_review_profile(profile_id):
+            return
         with self.connect() as conn:
             conn.execute(
                 "DELETE FROM editorial_review_profiles WHERE id = ?",
@@ -3263,32 +3718,75 @@ class Database:
     def list_topic_sources(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         with self.connect() as conn:
             sql = "SELECT * FROM topic_sources"
+            clauses: list[str] = []
+            params: list[Any] = []
+            if self.owner_user_id:
+                clauses.append("owner_user_id = ?")
+                params.append(self.owner_user_id)
             if enabled_only:
-                sql += " WHERE enabled = 1"
+                clauses.append("enabled = 1")
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY created_at, name"
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [self._topic_source_row(row) for row in rows]
 
     def get_topic_source(self, source_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM topic_sources WHERE id = ?", (source_id,)
-            ).fetchone()
+            sql = "SELECT * FROM topic_sources WHERE id = ?"
+            params: list[Any] = [str(source_id)]
+            if self.owner_user_id:
+                sql = (
+                    "SELECT * FROM topic_sources "
+                    "WHERE owner_user_id = ? AND (id = ? OR source_key = ?)"
+                )
+                params = [
+                    self.owner_user_id,
+                    str(source_id),
+                    str(source_id),
+                ]
+            row = conn.execute(sql, params).fetchone()
         return self._topic_source_row(row) if row else None
 
     def upsert_topic_source(self, source: dict[str, Any]) -> None:
         now = _utc_now()
+        requested_id = str(source["id"])
+        source_key = str(source.get("source_key") or requested_id).strip()
+        if not source_key:
+            raise ValueError("选题来源标识不能为空")
         config = source.get("config")
         if config is None:
             config = _loads_json(source.get("config_json"), {})
         with self.connect() as conn:
+            storage_id = requested_id
+            if self.owner_user_id:
+                existing = conn.execute(
+                    """
+                    SELECT id, source_key
+                    FROM topic_sources
+                    WHERE owner_user_id = ?
+                      AND (id = ? OR source_key = ?)
+                    """,
+                    (self.owner_user_id, requested_id, source_key),
+                ).fetchone()
+                if existing:
+                    storage_id = str(existing["id"])
+                    source_key = str(existing["source_key"] or source_key)
+                else:
+                    storage_id = "ts_" + uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"wechat-publisher:topic-source:"
+                        f"{self.owner_user_id}:{source_key}",
+                    ).hex
+            self._assert_write_owner(conn, "topic_sources", storage_id)
             conn.execute(
                 """
                 INSERT INTO topic_sources (
-                    id, name, source_type, config_json, enabled,
-                    last_synced_at, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
+                    id, owner_user_id, source_key, name, source_type,
+                    config_json, enabled, last_synced_at, last_error,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_user_id, source_key) DO UPDATE SET
                     name=excluded.name,
                     source_type=excluded.source_type,
                     config_json=excluded.config_json,
@@ -3296,7 +3794,10 @@ class Database:
                     updated_at=excluded.updated_at
                 """,
                 (
-                    source["id"],
+                    storage_id,
+                    self.owner_user_id
+                    or str(source.get("owner_user_id") or "").strip(),
+                    source_key,
                     source["name"],
                     source["source_type"],
                     json.dumps(config or {}, ensure_ascii=False),
@@ -3316,21 +3817,42 @@ class Database:
         synced_at: str | None = None,
     ) -> None:
         now = synced_at or _utc_now()
+        storage_id = str(source_id)
+        if self.owner_user_id:
+            source = self.get_topic_source(source_id)
+            if not source:
+                return
+            storage_id = str(source["id"])
         with self.connect() as conn:
-            conn.execute(
-                """
+            sql = """
                 UPDATE topic_sources
                 SET last_synced_at = ?, last_error = ?, updated_at = ?
                 WHERE id = ?
-                """,
-                (now, error, now, source_id),
-            )
+            """
+            params: list[Any] = [now, error, now, storage_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            conn.execute(sql, params)
 
     def delete_topic_source(self, source_id: str) -> None:
+        storage_id = str(source_id)
+        if self.owner_user_id:
+            source = self.get_topic_source(source_id)
+            if not source:
+                return
+            storage_id = str(source["id"])
         with self.connect() as conn:
-            conn.execute("DELETE FROM topic_sources WHERE id = ?", (source_id,))
+            sql = "DELETE FROM topic_sources WHERE id = ?"
+            params: list[Any] = [storage_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            conn.execute(sql, params)
 
     def upsert_topic_item(self, item: dict[str, Any]) -> None:
+        if self.owner_user_id and not self.get_topic_source(str(item["source_id"])):
+            raise ValueError("选题来源不存在")
         now = _utc_now()
         with self.connect() as conn:
             conn.execute(
@@ -3374,8 +3896,16 @@ class Database:
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
+        if self.owner_user_id:
+            clauses.append("ts.owner_user_id = ?")
+            params.append(self.owner_user_id)
         if source_ids:
-            clauses.append("ti.source_id IN (" + ",".join("?" for _ in source_ids) + ")")
+            placeholders = ",".join("?" for _ in source_ids)
+            clauses.append(
+                f"(ti.source_id IN ({placeholders}) "
+                f"OR ts.source_key IN ({placeholders}))"
+            )
+            params.extend(source_ids)
             params.extend(source_ids)
         if since:
             clauses.append("COALESCE(ti.published_at, ti.created_at) >= ?")
@@ -3405,14 +3935,19 @@ class Database:
         """Return one topic item together with its source metadata."""
 
         with self.connect() as conn:
+            owner_clause = " AND ts.owner_user_id = ?" if self.owner_user_id else ""
             row = conn.execute(
-                """
+                f"""
                 SELECT ti.*, ts.name AS source_name, ts.source_type
                 FROM topic_items ti
                 JOIN topic_sources ts ON ts.id = ti.source_id
                 WHERE ti.id = ?
+                {owner_clause}
                 """,
-                (item_id,),
+                (
+                    item_id,
+                    *([self.owner_user_id] if self.owner_user_id else []),
+                ),
             ).fetchone()
         return self._topic_item_row(row) if row else None
 
@@ -3423,6 +3958,8 @@ class Database:
         favorite: bool | None = None,
         used: bool | None = None,
     ) -> None:
+        if self.owner_user_id and not self.get_topic_item(item_id):
+            return
         updates = ["updated_at = ?"]
         values: list[Any] = [_utc_now()]
         if favorite is not None:
@@ -3440,17 +3977,27 @@ class Database:
     def list_followed_accounts(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         with self.connect() as conn:
             sql = "SELECT * FROM followed_accounts"
+            clauses: list[str] = []
+            params: list[Any] = []
+            if self.owner_user_id:
+                clauses.append("owner_user_id = ?")
+                params.append(self.owner_user_id)
             if enabled_only:
-                sql += " WHERE enabled = 1"
+                clauses.append("enabled = 1")
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY name"
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [self._followed_account_row(row) for row in rows]
 
     def get_followed_account(self, account_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM followed_accounts WHERE id = ?", (account_id,)
-            ).fetchone()
+            sql = "SELECT * FROM followed_accounts WHERE id = ?"
+            params: list[Any] = [account_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
         return self._followed_account_row(row) if row else None
 
     def upsert_followed_account(self, account: dict[str, Any]) -> None:
@@ -3462,13 +4009,16 @@ class Database:
         if keywords is None:
             keywords = _loads_json(account.get("keywords_json"), [])
         with self.connect() as conn:
+            self._assert_write_owner(
+                conn, "followed_accounts", str(account["id"])
+            )
             conn.execute(
                 """
                 INSERT INTO followed_accounts (
-                    id, name, wechat_id, official_account_id, category, tags_json, fetch_method,
+                    id, owner_user_id, name, wechat_id, official_account_id, category, tags_json, fetch_method,
                     sample_url, source_url, keywords_json, is_owned, enabled,
                     refresh_hours, last_synced_at, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     wechat_id=excluded.wechat_id,
@@ -3485,7 +4035,10 @@ class Database:
                     updated_at=excluded.updated_at
                 """,
                 (
-                    account["id"], account["name"], account.get("wechat_id") or "",
+                    account["id"],
+                    self.owner_user_id
+                    or str(account.get("owner_user_id") or "").strip(),
+                    account["name"], account.get("wechat_id") or "",
                     account.get("official_account_id") or "",
                     account.get("category") or "",
                     json.dumps(tags or [], ensure_ascii=False),
@@ -3504,6 +4057,14 @@ class Database:
         duplicate_ids = [item for item in duplicate_ids if item and item != keep_id]
         if not duplicate_ids:
             return
+        if self.owner_user_id:
+            if not self.get_followed_account(keep_id):
+                raise ValueError("关注公众号不存在")
+            duplicate_ids = [
+                item for item in duplicate_ids if self.get_followed_account(item)
+            ]
+            if not duplicate_ids:
+                return
         placeholders = ",".join("?" for _ in duplicate_ids)
         with self.connect() as conn:
             conn.execute(
@@ -3531,6 +4092,8 @@ class Database:
     def update_followed_account_sync(
         self, account_id: str, *, error: str = "", synced_at: str | None = None
     ) -> None:
+        if self.owner_user_id and not self.get_followed_account(account_id):
+            return
         now = synced_at or _utc_now()
         with self.connect() as conn:
             conn.execute(
@@ -3544,20 +4107,38 @@ class Database:
 
     def delete_followed_account(self, account_id: str) -> None:
         with self.connect() as conn:
-            conn.execute("DELETE FROM followed_accounts WHERE id = ?", (account_id,))
+            sql = "DELETE FROM followed_accounts WHERE id = ?"
+            params: list[Any] = [account_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            conn.execute(sql, params)
 
     def upsert_followed_article(self, article: dict[str, Any]) -> None:
+        followed_account_id = str(article.get("followed_account_id") or "").strip()
+        if (
+            self.owner_user_id
+            and followed_account_id
+            and not self.get_followed_account(followed_account_id)
+        ):
+            raise ValueError("关注公众号不存在")
+        stored_id = str(article["id"])
+        if self.owner_user_id:
+            stored_id = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{self.owner_user_id}|{stored_id}",
+            ).hex[:24]
         now = _utc_now()
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO followed_articles (
-                    id, followed_account_id, account_name, title, url,
+                    id, owner_user_id, followed_account_id, account_name, title, url,
                     published_at, discovered_at, cover_url, summary,
                     source_channel, external_key, is_read, is_favorite,
                     is_ignored, rewritten_batch_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
                     followed_account_id=COALESCE(excluded.followed_account_id, followed_articles.followed_account_id),
                     account_name=COALESCE(NULLIF(excluded.account_name, ''), followed_articles.account_name),
                     title=COALESCE(NULLIF(excluded.title, ''), followed_articles.title),
@@ -3570,7 +4151,10 @@ class Database:
                     updated_at=excluded.updated_at
                 """,
                 (
-                    article["id"], article.get("followed_account_id"),
+                    stored_id,
+                    self.owner_user_id
+                    or str(article.get("owner_user_id") or "").strip(),
+                    article.get("followed_account_id"),
                     article.get("account_name") or "", article["title"], article["url"],
                     article.get("published_at"), article.get("discovered_at") or now,
                     article.get("cover_url") or "", article.get("summary") or "",
@@ -3584,16 +4168,22 @@ class Database:
 
     def get_followed_article(self, article_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM followed_articles WHERE id = ?", (article_id,)
-            ).fetchone()
+            sql = "SELECT * FROM followed_articles WHERE id = ?"
+            params: list[Any] = [article_id]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None
 
     def get_followed_article_by_url(self, url: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM followed_articles WHERE url = ?", (url,)
-            ).fetchone()
+            sql = "SELECT * FROM followed_articles WHERE url = ?"
+            params: list[Any] = [url]
+            if self.owner_user_id:
+                sql += " AND owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None
 
     def get_followed_article_by_identity(
@@ -3607,22 +4197,36 @@ class Database:
         with self.connect() as conn:
             row = None
             if followed_account_id and external_key:
+                owner_clause = (
+                    " AND owner_user_id = ?" if self.owner_user_id else ""
+                )
+                params: list[Any] = [followed_account_id, external_key]
+                if self.owner_user_id:
+                    params.append(self.owner_user_id)
                 row = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM followed_articles
                     WHERE followed_account_id = ? AND external_key = ?
+                    {owner_clause}
                     ORDER BY created_at ASC LIMIT 1
                     """,
-                    (followed_account_id, external_key),
+                    params,
                 ).fetchone()
             if row is None and followed_account_id and title and published_at:
+                owner_clause = (
+                    " AND owner_user_id = ?" if self.owner_user_id else ""
+                )
+                params = [followed_account_id, title, published_at]
+                if self.owner_user_id:
+                    params.append(self.owner_user_id)
                 row = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM followed_articles
                     WHERE followed_account_id = ? AND title = ? AND published_at = ?
+                    {owner_clause}
                     ORDER BY created_at ASC LIMIT 1
                     """,
-                    (followed_account_id, title, published_at),
+                    params,
                 ).fetchone()
         return dict(row) if row else None
 
@@ -3641,6 +4245,9 @@ class Database:
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
+        if self.owner_user_id:
+            clauses.append("owner_user_id = ?")
+            params.append(self.owner_user_id)
         if account_ids:
             clauses.append("followed_account_id IN (" + ",".join("?" for _ in account_ids) + ")")
             params.extend(account_ids)
@@ -3680,6 +4287,8 @@ class Database:
         is_ignored: bool | None = None,
         rewritten_batch_id: str | None = None,
     ) -> None:
+        if self.owner_user_id and not self.get_followed_article(article_id):
+            return
         updates = ["updated_at = ?"]
         values: list[Any] = [_utc_now()]
         for column, value in (
@@ -3702,6 +4311,7 @@ class Database:
     @staticmethod
     def _topic_source_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
+        data["source_key"] = str(data.get("source_key") or data.get("id") or "")
         data["config"] = _loads_json(data.get("config_json"), {})
         return data
 

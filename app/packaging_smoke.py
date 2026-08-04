@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -9,9 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import ProxyHandler, build_opener
 
 from app.config import database_target, load_config, project_root
+from app.db_backend import is_postgres_url
 
 
 def _open_local_url(url: str, *, timeout: float = 2.0) -> Any:
@@ -28,6 +31,49 @@ def _api_route_paths(application: Any) -> set[str]:
         for route in application.routes
         if (path := getattr(route, "path", None))
     }
+
+
+def _packaging_remote_url(argv: list[str] | None = None) -> str:
+    """Return the hosted UI configured for a thin production client."""
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    value = ""
+    if "--remote-url" in arguments:
+        index = arguments.index("--remote-url")
+        if index + 1 >= len(arguments):
+            raise ValueError("--remote-url requires an HTTP(S) URL")
+        value = str(arguments[index + 1] or "").strip()
+    if not value:
+        value = str(os.getenv("WECHAT_PUBLISHER_REMOTE_URL") or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("远程工作台必须使用完整的 HTTP 或 HTTPS 地址")
+    return value.rstrip("/")
+
+
+def _runtime_storage_contract(config: dict[str, Any], remote_url: str) -> str:
+    """Validate the selected runtime without opening or creating a database."""
+
+    if remote_url:
+        import webview
+
+        if not callable(getattr(webview, "create_window", None)):
+            raise RuntimeError("远程桌面 WebView 组件不可用")
+        return f"remote-client={remote_url}"
+
+    target = database_target(config)
+    if not is_postgres_url(target):
+        raise RuntimeError("本地后端运行模式只支持 PostgreSQL")
+    import psycopg
+
+    if not callable(getattr(psycopg, "connect", None)):
+        raise RuntimeError("PostgreSQL 驱动不可用")
+    parsed = urlparse(target)
+    if not parsed.hostname or not parsed.path.strip("/"):
+        raise RuntimeError("PostgreSQL 连接地址缺少主机或数据库名")
+    return f"postgresql={parsed.hostname}/{parsed.path.strip('/')}"
 
 
 def run_packaging_self_test() -> dict[str, Any]:
@@ -55,46 +101,23 @@ def run_packaging_self_test() -> dict[str, Any]:
             )
 
     config_holder: dict[str, Any] = {}
+    remote_holder: dict[str, str] = {}
 
     def load_runtime_config() -> str:
         config_holder.update(load_config())
-        return str(config_holder["_root"])
+        remote_holder["url"] = _packaging_remote_url()
+        mode = "remote-client" if remote_holder["url"] else "postgresql-backend"
+        return f"root={config_holder['_root']} mode={mode}"
 
     check("runtime_config", load_runtime_config)
 
-    def database_schema() -> str:
-        from app.db import Database
-
-        database = Database(database_target(config_holder))
-        with database.connect() as connection:
-            tables = {
-                str(row["name"])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
-            account_columns = {
-                str(row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(official_accounts)"
-                ).fetchall()
-            }
-        required_tables = {
-            "job_attempts",
-            "draft_deliveries",
-            "wechat_connection_health",
-        }
-        missing = sorted(required_tables - tables)
-        if missing:
-            raise RuntimeError(f"P0 数据表缺失：{missing}")
-        if "review_priority" not in account_columns:
-            raise RuntimeError("公众号审核优先级字段缺失")
-        return (
-            f"accounts={len(database.list_official_accounts())} "
-            f"p0_tables={len(required_tables)}"
-        )
-
-    check("database_schema", database_schema)
+    check(
+        "runtime_storage",
+        lambda: _runtime_storage_contract(
+            config_holder,
+            remote_holder.get("url", ""),
+        ),
+    )
 
     def render_template() -> str:
         from app.render import TemplateRenderer
@@ -113,28 +136,14 @@ def run_packaging_self_test() -> dict[str, Any]:
     check("article_template", render_template)
 
     def api_routes() -> str:
-        from app.api.server import create_api_app
+        from app.api.server import create_api_app, main
 
-        application = create_api_app(config_holder, start_feishu=False)
-        # NiceGUI/FastAPI can add internal router sentinels without a ``path``
-        # attribute. They are not HTTP endpoints and must not fail the frozen
-        # installation self-test.
-        paths = _api_route_paths(application)
-        required = {
-            "/health",
-            "/api/v1/accounts",
-            "/api/v1/batches",
-            "/api/v1/review-inbox",
-            "/api/v1/onboarding/status",
-            "/api/v1/batches/{batch_id}/jobs/{job_id}/retry",
-            "/api/v1/batches/{batch_id}/jobs/{job_id}/attempts",
-            "/api/v1/wechat/connection-health",
-            "/api/v1/topics/hot",
-        }
-        missing = sorted(required - paths)
-        if missing:
-            raise RuntimeError(f"API 路由缺失：{missing}")
-        return f"routes={len(paths)}"
+        if not callable(create_api_app) or not callable(main):
+            raise RuntimeError("API 服务入口不完整")
+        # Application construction runs database migrations. An offline
+        # installer check must never mutate a database, and a remote desktop
+        # client does not own a database in the first place.
+        return "factory+entrypoint"
 
     check("api_and_feishu_runtime", api_routes)
 
@@ -211,6 +220,8 @@ def run_packaging_self_test() -> dict[str, Any]:
     def frozen_ui_home() -> str:
         if not bool(getattr(sys, "frozen", False)):
             return "source-mode skipped"
+        if remote_holder.get("url"):
+            return "remote-client skipped"
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             listener.bind(("127.0.0.1", 0))
             port = int(listener.getsockname()[1])

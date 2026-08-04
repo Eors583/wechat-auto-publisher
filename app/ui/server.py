@@ -4,10 +4,12 @@ import os
 
 from nicegui import ui
 
+from app.config import database_target, load_config
 from app.ui.desktop import create_desktop_app
 
 
 def main() -> None:
+    database_target(load_config())
     ui.run(
         root=create_desktop_app,
         host="0.0.0.0",

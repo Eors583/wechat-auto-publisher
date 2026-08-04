@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import json
 
+from app.accounts import (
+    IMPORTED_BENCHMARK_ACCOUNT_ID,
+    IMPORTED_DEFAULT_ACCOUNT_ID,
+    apply_account_selection,
+    ensure_account_layouts_initialized,
+    ensure_config_account_imported,
+    ensure_config_accounts_imported,
+    public_accounts,
+    save_account,
+    save_account_layout,
+)
 from app.ai.failover import FailoverRewriter
+from app.ai.image_providers import IMAGE_MINIMAX
 from app.ai.model_registry import (
     MANUS,
     OPENAI_COMPATIBLE,
@@ -12,21 +24,11 @@ from app.ai.model_registry import (
     decrypt_api_key,
     public_models,
     save_model,
+)
+from app.ai.model_registry import (
     test_model_connection as probe_model_connection,
 )
-from app.ai.image_providers import IMAGE_MINIMAX
 from app.db import Database
-from app.accounts import (
-    IMPORTED_BENCHMARK_ACCOUNT_ID,
-    IMPORTED_DEFAULT_ACCOUNT_ID,
-    apply_account_selection,
-    ensure_config_account_imported,
-    ensure_config_accounts_imported,
-    ensure_account_layouts_initialized,
-    public_accounts,
-    save_account,
-    save_account_layout,
-)
 
 
 def test_model_crud_keeps_api_key_private(tmp_path) -> None:
@@ -58,6 +60,23 @@ def test_model_crud_keeps_api_key_private(tmp_path) -> None:
     updated = db.get_ai_model(model_id)
     assert updated is not None
     assert decrypt_api_key(updated["api_key_encrypted"]) == "sk-private-value"
+
+
+def test_server_credential_key_uses_portable_authenticated_encryption(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CREDENTIAL_ENCRYPTION_KEY",
+        "test-only-server-credential-key-with-sufficient-length",
+    )
+
+    from app.ai.model_registry import encrypt_api_key
+
+    encrypted = encrypt_api_key("portable-private-value")
+
+    assert encrypted.startswith("fernet:")
+    assert "portable-private-value" not in encrypted
+    assert decrypt_api_key(encrypted) == "portable-private-value"
 
 
 def test_image_vendor_template_fills_endpoint_and_stays_out_of_text_models(tmp_path) -> None:

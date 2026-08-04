@@ -15,7 +15,7 @@ def _service(tmp_path, *, enabled: bool = False) -> tuple[dict, BatchService]:
     config = {
         **load_config(),
         "_db_path": str(tmp_path / "api-runtime-health.db"),
-        "api": {"token": ""},
+        "api": {"token": "runtime-test-token"},
         "feishu": {"enabled": enabled},
     }
     return config, BatchService(config)
@@ -84,7 +84,10 @@ def test_onboarding_status_api_is_read_only_and_secret_free(tmp_path) -> None:
     app = create_api_app(config, service, start_feishu=False)
 
     with TestClient(app) as client:
-        response = client.get("/api/v1/onboarding/status")
+        response = client.get(
+            "/api/v1/onboarding/status",
+            headers={"Authorization": "Bearer runtime-test-token"},
+        )
 
     assert response.status_code == 200
     payload = response.json()

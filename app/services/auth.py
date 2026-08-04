@@ -11,7 +11,6 @@ from typing import Any
 
 from app.db import Database
 
-
 DEFAULT_ADMIN_USERNAME = "lanxue"
 DEFAULT_ADMIN_PASSWORD = "lanxue"
 SESSION_DAYS = 30
@@ -86,6 +85,7 @@ class AuthService:
     def ensure_default_admin(self) -> dict[str, Any]:
         existing = self.db.get_user_by_username(DEFAULT_ADMIN_USERNAME)
         if existing:
+            self.db.claim_legacy_customer_data(str(existing["id"]))
             return public_user(existing)
         try:
             created = self.db.create_user(
@@ -100,6 +100,7 @@ class AuthService:
             if not existing:
                 raise
             created = existing
+        self.db.claim_legacy_customer_data(str(created["id"]))
         return public_user(created)
 
     def register(self, username: str, password: str) -> dict[str, Any]:

@@ -13,7 +13,10 @@ import httpx
 
 from app.ai.model_registry import decrypt_api_key
 from app.db import Database
-from app.providers.public_wechat import fetch_public_article_metadata, normalize_article_url
+from app.providers.public_wechat import (
+    fetch_public_article_metadata,
+    normalize_article_url,
+)
 from app.providers.wechat_backend_search import (
     normalize_backend_cookie,
     normalize_backend_token,
@@ -27,7 +30,6 @@ from app.services.wechat_backend_settings import (
     save_backend_settings,
 )
 from app.wechat.factory import build_wechat_client
-
 
 FETCH_METHODS = {
     "backend_search": "公众号后台搜索（需登录态）",
@@ -76,7 +78,12 @@ class FollowedContentService:
             name = str(peer.get("name") or peer.get("account") or "").strip()
             if not name or _name_key(name) in existing_names:
                 continue
-            account_id = "follow-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+            account_key = name
+            if self.db.owner_user_id:
+                account_key = f"{self.db.owner_user_id}\0{name}"
+            account_id = "follow-" + hashlib.sha256(
+                account_key.encode("utf-8")
+            ).hexdigest()[:16]
             self.db.upsert_followed_account(
                 {
                     "id": account_id,

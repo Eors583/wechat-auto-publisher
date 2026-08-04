@@ -7,12 +7,12 @@ from nicegui import app as nicegui_app
 from nicegui import run, ui
 
 from app.ai.image_providers import is_image_provider
+from app.config import database_target, load_config
 from app.services.wechat_relay_settings import public_wechat_relay_settings
 from app.ui.panels.auth import AUTH_STORAGE_KEY, current_desktop_user
 from app.ui.panels.settings_hub import build_model_management_panel
 from app.ui.panels.wechat_relay import build_wechat_relay_panel
 from app.ui.state import AppState, set_button_loading
-
 
 ADMIN_CSS = """
 body {
@@ -255,7 +255,7 @@ def _build_user_panel(state: AppState) -> None:
 def create_admin_app() -> None:
     ui.add_css(ADMIN_CSS)
     state = AppState(recover_stale_work=False)
-    state.current_user = current_desktop_user(state.auth)
+    state.bind_user(current_desktop_user(state.auth))
     if not state.current_user:
         _build_admin_login(state)
         return
@@ -315,6 +315,7 @@ def create_admin_app() -> None:
 
 
 def main() -> None:
+    database_target(load_config())
     ui.run(
         root=create_admin_app,
         host="0.0.0.0",

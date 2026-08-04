@@ -264,7 +264,11 @@ def build_tasks_panel(
     initial_job_id: int | None = None,
 ) -> None:
     """Review-first task center backed by the shared batch service."""
-    service = BatchService(load_config())
+    service = BatchService(
+        load_config(),
+        owner_user_id=str(getattr(state, "current_user_id", "") or ""),
+        recover_stale_work=False,
+    )
     render_workflow_guide(
         "review",
         note="生成完成后在这里逐篇审核，全部确认后再一次写入草稿箱",

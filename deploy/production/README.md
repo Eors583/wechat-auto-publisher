@@ -12,7 +12,11 @@
 
 ## 启动
 
-复制环境模板并替换两个随机密钥：
+复制环境模板并替换三个相互独立的长随机值：
+
+- `POSTGRES_PASSWORD`：PostgreSQL 数据库密码；
+- `AUTH_STORAGE_SECRET`：登录会话签名密钥；
+- `CREDENTIAL_ENCRYPTION_KEY`：模型和公众号凭证加密密钥，必须稳定备份，所有应用实例保持一致。
 
 ```bash
 cp deploy/production/.env.production.example .env.production

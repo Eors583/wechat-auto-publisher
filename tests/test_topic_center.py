@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
 import pytest
 
 from app.ai.model_registry import encrypt_api_key
-from app.db import Database
+from app.db import Database, customer_data_scope
+from app.services.auth import AuthService
 from app.services.followed_content import FollowedContentService, group_articles
 from app.services.topic_sources import (
     TopicSourceService,
@@ -68,6 +71,173 @@ def test_topic_sources_are_bootstrapped_and_refreshed_independently(
     assert items[0]["title"] == "企业组织的新变化"
 
 
+def test_default_topic_sources_are_isolated_between_users(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    root = Database(config["_db_path"])
+    auth = AuthService(root)
+    admin = auth.ensure_default_admin()
+    customer = auth.register("topic-customer", "secret123")
+
+    admin_service = TopicSourceService(
+        root.for_user(str(admin["id"])),
+        config,
+    )
+    customer_service = TopicSourceService(
+        root.for_user(str(customer["id"])),
+        config,
+    )
+    admin_sources = {
+        str(item["source_key"]): item
+        for item in admin_service.list_sources()
+    }
+    customer_sources = {
+        str(item["source_key"]): item
+        for item in customer_service.list_sources()
+    }
+
+    assert set(admin_sources) == set(customer_sources)
+    assert {
+        "internal-followed-accounts",
+        "internal-manual-topics",
+        "hot-weibo",
+        "hot-baidu",
+    } <= set(admin_sources)
+    assert {
+        str(item["id"]) for item in admin_sources.values()
+    }.isdisjoint(
+        {str(item["id"]) for item in customer_sources.values()}
+    )
+
+    customer_hot = customer_sources["hot-weibo"]
+    customer_service.save_source(
+        {
+            "id": customer_hot["id"],
+            "name": customer_hot["name"],
+            "source_type": customer_hot["source_type"],
+            "config": customer_hot["config"],
+            "enabled": False,
+        }
+    )
+    assert customer_service.db.get_topic_source("hot-weibo")["enabled"] == 0
+    assert admin_service.db.get_topic_source("hot-weibo")["enabled"] == 1
+
+    customer_service.add_manual_topic("客户自己的管理选题")
+    assert customer_service.list_topics(
+        source_ids=["internal-manual-topics"],
+        days=7,
+    )[0]["title"] == "客户自己的管理选题"
+    assert admin_service.list_topics(
+        source_ids=["internal-manual-topics"],
+        days=7,
+    ) == []
+
+
+def test_default_topic_source_initialization_is_concurrently_idempotent(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    root = Database(config["_db_path"])
+    user = AuthService(root).register("concurrent-topics", "secret123")
+    handles = [root.for_user(str(user["id"])) for _ in range(4)]
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        services = list(
+            executor.map(
+                lambda db: TopicSourceService(db, config),
+                handles,
+            )
+        )
+
+    sources = services[0].list_sources()
+    source_keys = [str(item["source_key"]) for item in sources]
+    assert len(source_keys) == len(set(source_keys))
+    assert len(source_keys) == 6
+
+
+def test_topic_search_worker_preserves_authenticated_owner_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _config(tmp_path)
+    root = Database(config["_db_path"])
+    auth = AuthService(root)
+    first = auth.register("search-owner-a", "secret123")
+    second = auth.register("search-owner-b", "secret123")
+    shared_service = TopicSourceService(root, config)
+    monkeypatch.setattr(
+        shared_service,
+        "_search_source",
+        lambda source, **_kwargs: [
+            {
+                "title": "线程作用域选题",
+                "url": "https://example.com/thread-scope",
+                "published_at": "2026-08-04T00:00:00+00:00",
+            }
+        ]
+        if str(source.get("source_type")) == "rss"
+        else [],
+    )
+
+    with customer_data_scope(str(first["id"])):
+        result = shared_service.search("线程", days=7)
+
+    assert result["total"] == 1
+    assert root.for_user(str(first["id"])).list_topic_items(
+        keyword="线程"
+    )
+    assert root.for_user(str(second["id"])).list_topic_items(
+        keyword="线程"
+    ) == []
+
+
+def test_legacy_topic_sources_receive_source_key_migration(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-topic-sources.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE topic_sources (
+                id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_synced_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO topic_sources (
+                id, owner_user_id, name, source_type,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "hot-weibo",
+                "legacy-owner",
+                "微博热榜",
+                "hot_api",
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-01T00:00:00+00:00",
+            ),
+        )
+
+    migrated = Database(path, owner_user_id="legacy-owner")
+    source = migrated.get_topic_source("hot-weibo")
+
+    assert source is not None
+    assert source["id"] == "hot-weibo"
+    assert source["source_key"] == "hot-weibo"
+
+
 def test_legacy_hot_sources_are_migrated_to_direct_platform_endpoints(tmp_path: Path) -> None:
     config = _config(tmp_path)
     db = Database(config["_db_path"])
@@ -81,10 +251,43 @@ def test_legacy_hot_sources_are_migrated_to_direct_platform_endpoints(tmp_path: 
         }
     )
     service = TopicSourceService(db, config)
+    service.list_sources()
     source = service.db.get_topic_source("hot-weibo")
     assert source["config"]["provider"] == "weibo"
     assert source["config"]["url"] == "https://weibo.com/ajax/side/hotSearch"
     assert source["enabled"] == 0
+
+
+def test_legacy_followed_accounts_are_isolated_between_users(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    root = Database(config["_db_path"])
+    auth = AuthService(root)
+    admin = auth.ensure_default_admin()
+    customer = auth.register("followed-customer", "secret123")
+
+    admin_service = FollowedContentService(
+        root.for_user(str(admin["id"])),
+        config,
+    )
+    customer_service = FollowedContentService(
+        root.for_user(str(customer["id"])),
+        config,
+    )
+    admin_accounts = {
+        str(item["name"]): item for item in admin_service.list_accounts()
+    }
+    customer_accounts = {
+        str(item["name"]): item for item in customer_service.list_accounts()
+    }
+
+    assert set(admin_accounts) == set(customer_accounts)
+    assert {
+        str(item["id"]) for item in admin_accounts.values()
+    }.isdisjoint(
+        {str(item["id"]) for item in customer_accounts.values()}
+    )
 
 
 def test_native_weibo_and_baidu_hot_payloads_are_parsed() -> None:

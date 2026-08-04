@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import os
 import uuid
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
-from app.db import Database
+from cryptography.fernet import Fernet, InvalidToken
+
 from app.ai.image_providers import (
     IMAGE_CUSTOM,
     IMAGE_PROVIDER_TYPES,
     is_image_provider,
     resolved_image_endpoint,
 )
-
+from app.db import Database
 
 OPENAI_COMPATIBLE = "openai_compatible"
 GEMINI = "gemini"
@@ -76,15 +78,31 @@ def _blob(data: bytes) -> tuple[_DataBlob, Any]:
     return _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte))), buffer
 
 
-def encrypt_api_key(api_key: str) -> str:
-    """Encrypt a key for the current Windows user (DPAPI).
+def _credential_fernet() -> Fernet | None:
+    secret = str(os.getenv("CREDENTIAL_ENCRYPTION_KEY") or "").strip()
+    if not secret:
+        return None
+    derived = hashlib.sha256(
+        ("wechat-auto-publisher:credentials:v1:" + secret).encode("utf-8")
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(derived))
 
-    The fallback is only used on non-Windows development hosts; the desktop build
-    runs on Windows and therefore never stores the key as readable text.
+
+def encrypt_api_key(api_key: str) -> str:
+    """Encrypt a credential with the server key or legacy Windows DPAPI.
+
+    PostgreSQL-backed services require ``CREDENTIAL_ENCRYPTION_KEY`` so every
+    container instance can decrypt the same record. DPAPI is retained only for
+    one-time Windows migration compatibility; Linux never falls back to Base64.
     """
     raw = api_key.encode("utf-8")
+    fernet = _credential_fernet()
+    if fernet is not None:
+        return "fernet:" + fernet.encrypt(raw).decode("ascii")
     if os.name != "nt":
-        return "base64:" + base64.b64encode(raw).decode("ascii")
+        raise RuntimeError(
+            "服务器未配置 CREDENTIAL_ENCRYPTION_KEY，不能保存敏感凭证"
+        )
     in_blob, in_buffer = _blob(raw)
     out_blob = _DataBlob()
     crypt32 = ctypes.windll.crypt32
@@ -102,6 +120,18 @@ def encrypt_api_key(api_key: str) -> str:
 
 
 def decrypt_api_key(value: str) -> str:
+    if value.startswith("fernet:"):
+        fernet = _credential_fernet()
+        if fernet is None:
+            raise RuntimeError(
+                "服务器未配置 CREDENTIAL_ENCRYPTION_KEY，无法读取敏感凭证"
+            )
+        try:
+            return fernet.decrypt(value[7:].encode("ascii")).decode("utf-8")
+        except InvalidToken as exc:
+            raise RuntimeError(
+                "敏感凭证无法解密，请检查服务器加密密钥"
+            ) from exc
     if value.startswith("base64:"):
         return base64.b64decode(value[7:]).decode("utf-8")
     if not value.startswith("dpapi:"):

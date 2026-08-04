@@ -8,6 +8,11 @@ $iss = (Get-ChildItem -LiteralPath $packagingDir -Filter '*.iss' | Select-Object
 $buildTarget = Join-Path $projectRoot 'build'
 $distRoot = Join-Path $projectRoot 'dist'
 $installerDir = Join-Path $projectRoot 'dist\installers'
+$remoteUrl = if ($env:WECHAT_PUBLISHER_REMOTE_URL) {
+    $env:WECHAT_PUBLISHER_REMOTE_URL
+} else {
+    'http://47.99.126.8/'
+}
 $isccCandidates = @(
     (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
     'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
@@ -64,7 +69,7 @@ try {
     }
 
     $appExe = (Get-ChildItem -LiteralPath $distTarget -Filter '*.exe' | Select-Object -First 1).FullName
-    $selfTest = Start-Process -FilePath $appExe -ArgumentList '--self-test' -WorkingDirectory $distTarget -Wait -PassThru
+    $selfTest = Start-Process -FilePath $appExe -ArgumentList @('--self-test', '--remote-url', $remoteUrl) -WorkingDirectory $distTarget -Wait -PassThru
     if ($selfTest.ExitCode -ne 0) {
         $reportPath = Join-Path $portableData 'logs\package-self-test.json'
         throw "Frozen self-test failed. See $reportPath"

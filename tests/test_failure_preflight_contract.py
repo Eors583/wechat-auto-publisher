@@ -18,7 +18,15 @@ preflight_module = importlib.import_module("app.services.preflight")
 
 
 def _api_config(tmp_path) -> dict[str, Any]:
-    return {**load_config(), "_db_path": str(tmp_path / "api-failure.db")}
+    return {
+        **load_config(),
+        "_db_path": str(tmp_path / "api-failure.db"),
+        "api": {"token": "failure-test-token"},
+    }
+
+
+def _api_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer failure-test-token"}
 
 
 def test_retry_api_keeps_detail_and_returns_structured_sanitized_failure(
@@ -39,6 +47,7 @@ def test_retry_api_keeps_detail_and_returns_structured_sanitized_failure(
 
     response = client.post(
         "/api/v1/batches/batch-1/jobs/7/retry",
+        headers=_api_headers(),
         json={"step": "rewrite"},
     )
 
@@ -90,6 +99,7 @@ def test_retry_api_forwards_inline_image_retry_target(
 
     response = client.post(
         "/api/v1/batches/batch-1/jobs/7/retry",
+        headers=_api_headers(),
         json={
             "step": "inline_image",
             "image_index": 3,
@@ -116,7 +126,11 @@ def test_request_validation_error_also_uses_failure_envelope(tmp_path) -> None:
     service = BatchService(config)
     client = TestClient(create_api_app(config, service, start_feishu=False))
 
-    response = client.post("/api/v1/batches", json={"account_ids": []})
+    response = client.post(
+        "/api/v1/batches",
+        headers=_api_headers(),
+        json={"account_ids": []},
+    )
 
     assert response.status_code == 422
     payload = response.json()

@@ -159,12 +159,11 @@ publish:
   default_mode: draft
 
 db:
-  path: data/app.db
-  # 生产环境优先通过 DATABASE_URL 环境变量配置 PostgreSQL。
-  # url: postgresql://wechat_app:password@127.0.0.1:5432/wechat_publisher
+  # PostgreSQL 为必需项；也可只通过 DATABASE_URL 环境变量配置。
+  url: ${DATABASE_URL}
 
 auth:
-  # HTTP API 是否强制使用登录会话或兼容 API Token。
+  # HTTP API 始终强制使用登录会话或兼容 API Token，禁止无认证访问。
   required: true
 
 data_dir: data

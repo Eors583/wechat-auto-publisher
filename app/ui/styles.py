@@ -543,6 +543,84 @@ body, .q-page, .nicegui-content {
   min-height: 36px;
   box-shadow: none !important;
 }
+.source-mode-toggle {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0;
+  margin-bottom: 7px;
+  background: transparent;
+}
+.source-mode-toggle .q-btn {
+  width: 100%;
+  min-height: 46px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px !important;
+  background: #f7faf9;
+  line-height: 1.25;
+}
+.source-mode-toggle .q-btn.bg-teal-8 {
+  border-color: var(--accent);
+  background: var(--accent) !important;
+}
+.source-mode-hint {
+  min-height: 20px;
+  margin: 0 2px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.article-body-input .q-field__control {
+  min-height: 300px;
+}
+.article-body-input textarea.q-field__native {
+  min-height: 250px !important;
+  resize: vertical !important;
+}
+.body-input-tools {
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+.fullscreen-editor-dialog .q-dialog__inner {
+  padding: 0;
+}
+.fullscreen-editor-card {
+  display: flex !important;
+  flex-direction: column;
+  width: 100vw !important;
+  max-width: none !important;
+  height: 100vh !important;
+  padding: 22px 28px 24px;
+  border-radius: 0 !important;
+  overflow: hidden;
+}
+.fullscreen-editor-header,
+.fullscreen-editor-actions {
+  width: 100%;
+  align-items: center;
+}
+.fullscreen-body-textarea {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  margin: 16px 0;
+}
+.fullscreen-body-textarea .q-field__control,
+.fullscreen-body-textarea .q-field__native {
+  height: 100% !important;
+  min-height: 360px !important;
+}
+.fullscreen-body-textarea textarea.q-field__native {
+  resize: none !important;
+}
+.fullscreen-editor-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
 .q-btn {
   border-radius: 10px !important;
   font-weight: 700 !important;
@@ -581,6 +659,12 @@ body, .q-page, .nicegui-content {
   .card { padding: 16px; border-radius: 14px; }
   .workflow-guide__header { align-items: flex-start; flex-direction: column; gap: 3px; }
   .workflow-guide__note { text-align: left; }
+}
+
+@media (max-width: 420px) {
+  .source-mode-toggle { grid-template-columns: 1fr; }
+  .body-input-tools { align-items: flex-start; }
+  .fullscreen-editor-card { padding: 16px 14px; }
 }
 """
 

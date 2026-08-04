@@ -20,7 +20,7 @@ from app.accounts import (
     save_account_layout,
     save_account_prompt_selection,
 )
-from app.config import load_config
+from app.config import database_target, load_config
 from app.layout_profiles import (
     layout_to_template_config,
     normalize_layout,
@@ -160,17 +160,25 @@ def create_desktop_app() -> None:
     ui.add_head_html(HEAD_HTML)
     ui.add_css(APP_CSS)
     if request is not None and hasattr(page_state, "auth"):
-        page_state.current_user = current_desktop_user(page_state.auth)
+        authenticated_user = current_desktop_user(page_state.auth)
+        if hasattr(page_state, "bind_user"):
+            page_state.bind_user(authenticated_user)
+        else:
+            page_state.current_user = authenticated_user
         if not page_state.current_user:
             build_auth_screen(page_state.auth)
             return
     elif not getattr(page_state, "current_user", None):
         # Compatibility for lightweight UI test doubles.
-        page_state.current_user = {
+        test_user = {
             "id": "test-admin",
             "username": "test",
             "role": "admin",
         }
+        if hasattr(page_state, "bind_user"):
+            page_state.bind_user(test_user)
+        else:
+            page_state.current_user = test_user
     page_is_admin = bool(
         getattr(
             page_state,
@@ -936,15 +944,26 @@ def _build_wizard(
         ui.label("请选择一种输入方式；从选题库带回文章时会自动填入链接。").classes(
             "muted q-mb-sm"
         )
+        source_mode_hints = {
+            "link": "粘贴一篇可直接访问的原文链接。",
+            "text": "直接粘贴完整正文；输入框可向下拖动，也可打开大编辑器。",
+            "references": "每行一个参考链接，第一篇作为主要参考。",
+            "topic": "只填写话题和补充要求，由 AI 从头创作。",
+        }
         source_mode_in = ui.toggle(
             {
-                "link": "粘贴文章链接",
+                "link": "文章链接",
                 "text": "粘贴正文",
-                "references": "多篇参考资料",
-                "topic": "仅输入话题原创",
+                "references": "多篇参考",
+                "topic": "话题原创",
             },
             value="link",
-        ).props("dense no-caps")
+        ).classes("source-mode-toggle").props(
+            "no-caps unelevated toggle-color=teal-8"
+        )
+        source_mode_hint = ui.label(source_mode_hints["link"]).classes(
+            "source-mode-hint"
+        )
         url_holder["mode"] = source_mode_in
         url_in = (
             ui.input(
@@ -955,7 +974,64 @@ def _build_wizard(
             .props("clearable outlined stack-label")
         )
         url_holder["el"] = url_in
-        text_in = ui.textarea("粘贴文章正文").classes("w-full").props("rows=8 outlined")
+        text_in = (
+            ui.textarea("粘贴文章正文")
+            .classes("w-full article-body-input")
+            .props("rows=12 outlined")
+        )
+        with ui.row().classes("body-input-tools") as text_input_tools:
+            ui.label("可拖动输入框右下角调高；双击正文也可打开大编辑器。").classes(
+                "muted"
+            )
+            expand_body_btn = ui.button(
+                "放大编辑",
+                icon="open_in_full",
+            ).props("flat dense no-caps color=teal-8")
+
+        with ui.dialog().props("maximized").classes(
+            "fullscreen-editor-dialog"
+        ) as body_editor_dialog:
+            with ui.card().classes("fullscreen-editor-card"):
+                with ui.row().classes("fullscreen-editor-header"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("编辑粘贴正文").classes("text-h6 text-weight-bold")
+                        ui.label("大编辑器中的内容会在点击“应用正文”后带回工作台。").classes(
+                            "muted"
+                        )
+                    ui.space()
+                    ui.button(
+                        icon="close",
+                        on_click=body_editor_dialog.close,
+                    ).props("flat round color=grey-8").tooltip("关闭")
+                fullscreen_text_in = (
+                    ui.textarea("文章正文")
+                    .classes("fullscreen-body-textarea")
+                    .props("outlined autofocus")
+                )
+                with ui.row().classes("fullscreen-editor-actions"):
+                    ui.button(
+                        "取消",
+                        on_click=body_editor_dialog.close,
+                    ).props("flat no-caps color=grey-8")
+
+                    def apply_fullscreen_body() -> None:
+                        text_in.value = str(fullscreen_text_in.value or "")
+                        text_in.update()
+                        body_editor_dialog.close()
+
+                    ui.button(
+                        "应用正文",
+                        icon="check",
+                        on_click=apply_fullscreen_body,
+                    ).props("unelevated no-caps color=teal-8")
+
+        def open_body_editor() -> None:
+            fullscreen_text_in.value = str(text_in.value or "")
+            fullscreen_text_in.update()
+            body_editor_dialog.open()
+
+        expand_body_btn.on_click(open_body_editor)
+        text_in.on("dblclick", open_body_editor)
         references_in = (
             ui.textarea("参考文章链接（每行一个，第一篇为主要参考）")
             .classes("w-full")
@@ -987,8 +1063,12 @@ def _build_wizard(
 
         def sync_source_mode() -> None:
             mode = str(source_mode_in.value or "link")
+            source_mode_hint.set_text(
+                source_mode_hints.get(mode, source_mode_hints["link"])
+            )
             url_in.set_visibility(mode == "link")
             text_in.set_visibility(mode == "text")
+            text_input_tools.set_visibility(mode == "text")
             references_in.set_visibility(mode == "references")
             facts_in.set_visibility(mode in {"link", "text", "references"})
 
@@ -1219,7 +1299,13 @@ def _build_wizard(
             progress_hint.text = "发布环境检查通过后将立即创建并发生成任务"
             try:
                 reports = await run.io_bound(
-                    lambda: BatchService(load_config()).preflight(check_ids)
+                    lambda: BatchService(
+                        load_config(),
+                        owner_user_id=str(
+                            getattr(state, "current_user_id", "") or ""
+                        ),
+                        recover_stale_work=False,
+                    ).preflight(check_ids)
                 )
             except Exception as exc:
                 if ui_alive():
@@ -1359,7 +1445,13 @@ def _build_wizard(
 
             state.busy = True
             active_stop_requested = False
-            active_batch_service = BatchService(load_config())
+            active_batch_service = BatchService(
+                load_config(),
+                owner_user_id=str(
+                    getattr(state, "current_user_id", "") or ""
+                ),
+                recover_stale_work=False,
+            )
             active_batch_id = None
             set_workflow(
                 "generate",
@@ -1731,7 +1823,11 @@ def _build_accounts_panel(
     state = state or globals().get("state") or AppState()
     current_config = state.reload_config()
     host = ui.column().classes("w-full")
-    review_service = BatchService(load_config())
+    review_service = BatchService(
+        load_config(),
+        owner_user_id=str(getattr(state, "current_user_id", "") or ""),
+        recover_stale_work=False,
+    )
     creation_plan_service = CreationPlanService(state.db, current_config)
 
     def open_editor(account_id: str | None = None) -> None:
@@ -3062,6 +3158,7 @@ AI 评审使用目标公众号绑定的文本模型，会产生模型费用。�
 
 
 def main() -> None:
+    database_target(load_config())
     port = int(str(os.getenv("WECHAT_PUBLISHER_UI_PORT") or "18765"))
     storage_secret = str(
         os.getenv("AUTH_STORAGE_SECRET")

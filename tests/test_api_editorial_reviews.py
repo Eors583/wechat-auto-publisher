@@ -13,7 +13,8 @@ from app.services.editorial_reviews import EditorialReviewConflict
 def _api(
     tmp_path,
     *,
-    token: str = "",
+    token: str = "review-token",
+    authenticated: bool = True,
 ) -> tuple[BatchService, TestClient]:
     config = {
         **load_config(),
@@ -23,13 +24,22 @@ def _api(
     }
     service = BatchService(config)
     app = create_api_app(config, service, start_feishu=False)
-    return service, TestClient(app)
+    headers = (
+        {"Authorization": f"Bearer {token}"}
+        if authenticated and token
+        else None
+    )
+    return service, TestClient(app, headers=headers)
 
 
 def test_editorial_review_router_uses_existing_bearer_auth(
     tmp_path, monkeypatch
 ) -> None:
-    service, client = _api(tmp_path, token="review-token")
+    service, client = _api(
+        tmp_path,
+        token="review-token",
+        authenticated=False,
+    )
     monkeypatch.setattr(
         service,
         "get_editorial_review_options",

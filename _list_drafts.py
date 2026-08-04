@@ -1,16 +1,16 @@
 import sys
 
-sys.stdout.reconfigure(encoding="utf-8")
-
-from app.config import load_config
+from app.config import database_target, load_config
 from app.db import Database
 from app.layout import select_secondary_articles
 from app.wechat.auth import WeChatAuth
 from app.wechat.client import WeChatClient
 from app.wechat.draft import list_draft_summaries
 
+sys.stdout.reconfigure(encoding="utf-8")
+
 cfg = load_config()
-db = Database(cfg["_db_path"])
+db = Database(database_target(cfg))
 w = cfg["wechat"]
 auth = WeChatAuth(w["app_id"], w["app_secret"], db)
 c = WeChatClient(auth.get_access_token, lambda: auth.get_access_token(True))

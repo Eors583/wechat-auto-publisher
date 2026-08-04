@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import textwrap
+
 from fastapi.testclient import TestClient
 
 from app.accounts import apply_account_selection, public_accounts, save_account
 from app.ai.model_registry import OPENAI_COMPATIBLE, save_model
 from app.api.server import create_api_app
+from app.config import load_config
 from app.db import Database
 from app.db_backend import postgres_schema_sql, postgres_statement
 from app.services.auth import AuthService
@@ -75,6 +78,30 @@ def test_auth_api_and_admin_model_boundary(tmp_path) -> None:
             "/api/v1/admin/models",
             headers=user_header,
         ).status_code == 403
+
+
+def test_auth_required_cannot_be_disabled_by_legacy_environment(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            data_dir: data
+            db:
+              path: data/test.db
+            auth:
+              required: false
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+
+    config = load_config(config_path)
+
+    assert config["auth"]["required"] is True
 
 
 def test_unbound_account_uses_only_explicit_merchant_default(tmp_path) -> None:

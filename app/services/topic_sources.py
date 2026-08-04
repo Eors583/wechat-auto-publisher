@@ -15,8 +15,7 @@ from urllib.parse import parse_qs, quote_plus, urlsplit
 
 import httpx
 
-from app.db import Database
-
+from app.db import Database, customer_data_scope
 
 SOURCE_TYPES = {
     "rss": "行业网站 RSS",
@@ -54,7 +53,6 @@ class TopicSourceService:
     def __init__(self, db: Database, config: dict[str, Any]) -> None:
         self.db = db
         self.config = config
-        self.ensure_defaults()
 
     def ensure_defaults(self) -> None:
         topics = dict(self.config.get("topics") or {})
@@ -159,6 +157,7 @@ class TopicSourceService:
                     self.db.upsert_topic_source(source)
 
     def list_sources(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        self.ensure_defaults()
         return self.db.list_topic_sources(enabled_only=enabled_only)
 
     def save_source(self, source: dict[str, Any]) -> dict[str, Any]:
@@ -199,11 +198,14 @@ class TopicSourceService:
         *,
         timeout: float = 15.0,
     ) -> dict[str, Any]:
+        self.ensure_defaults()
         selected = set(source_ids or [])
         sources = [
             item
             for item in self.db.list_topic_sources(enabled_only=True)
-            if not selected or str(item["id"]) in selected
+            if not selected
+            or str(item["id"]) in selected
+            or str(item.get("source_key") or "") in selected
         ]
         report: list[dict[str, Any]] = []
         total = 0
@@ -243,59 +245,69 @@ class TopicSourceService:
         keyword = re.sub(r"\s+", " ", keyword or "").strip()
         if not keyword:
             raise ValueError("请输入要搜索的热点关键词")
+        self.ensure_defaults()
         selected = set(source_ids or [])
         sources = [
             item
             for item in self.db.list_topic_sources(enabled_only=True)
-            if not selected or str(item["id"]) in selected
+            if not selected
+            or str(item["id"]) in selected
+            or str(item.get("source_key") or "") in selected
         ]
         if not sources:
             raise ValueError("请至少选择一个已启用的选题来源")
+        owner_user_id = self.db.owner_user_id
+
         def search_one(
             source: dict[str, Any],
         ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            try:
-                items = self._search_source(
-                    source,
-                    keyword=keyword,
-                    days=days,
-                    timeout=timeout,
-                )
-                normalized_items: list[dict[str, Any]] = []
-                for item in items:
-                    normalized = self._normalize_item(source, item)
-                    self.db.upsert_topic_item(normalized)
-                    normalized_items.append(
-                        {
-                            **normalized,
-                            "source_name": str(source["name"]),
-                            "source_type": str(source["source_type"]),
-                            "favorite": 0,
-                            "used": 0,
-                        }
+            with customer_data_scope(owner_user_id):
+                try:
+                    items = self._search_source(
+                        source,
+                        keyword=keyword,
+                        days=days,
+                        timeout=timeout,
                     )
-                self.db.update_topic_source_sync(str(source["id"]), error="")
-                return (
-                    {
-                        "source_id": source["id"],
-                        "name": source["name"],
-                        "count": len(normalized_items),
-                        "error": "",
-                    },
-                    normalized_items,
-                )
-            except Exception as exc:  # noqa: BLE001
-                error = _friendly_error(exc)
-                self.db.update_topic_source_sync(str(source["id"]), error=error)
-                return (
-                    {
-                        "source_id": source["id"],
-                        "name": source["name"],
-                        "count": 0,
-                        "error": error,
-                    },
-                    [],
-                )
+                    normalized_items: list[dict[str, Any]] = []
+                    for item in items:
+                        normalized = self._normalize_item(source, item)
+                        self.db.upsert_topic_item(normalized)
+                        normalized_items.append(
+                            {
+                                **normalized,
+                                "source_name": str(source["name"]),
+                                "source_type": str(source["source_type"]),
+                                "favorite": 0,
+                                "used": 0,
+                            }
+                        )
+                    self.db.update_topic_source_sync(
+                        str(source["id"]), error=""
+                    )
+                    return (
+                        {
+                            "source_id": source["id"],
+                            "name": source["name"],
+                            "count": len(normalized_items),
+                            "error": "",
+                        },
+                        normalized_items,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    error = _friendly_error(exc)
+                    self.db.update_topic_source_sync(
+                        str(source["id"]), error=error
+                    )
+                    return (
+                        {
+                            "source_id": source["id"],
+                            "name": source["name"],
+                            "count": 0,
+                            "error": error,
+                        },
+                        [],
+                    )
         report: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=min(6, len(sources))) as executor:
@@ -323,6 +335,7 @@ class TopicSourceService:
         unused_only: bool = False,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
+        self.ensure_defaults()
         since = (datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365)))).isoformat()
         return self.db.list_topic_items(
             source_ids=source_ids,
@@ -361,10 +374,10 @@ class TopicSourceService:
         title = title.strip()
         if not title:
             raise ValueError("选题标题不能为空")
+        self.ensure_defaults()
         source = self.db.get_topic_source("internal-manual-topics")
         if not source:
-            self.ensure_defaults()
-            source = self.db.get_topic_source("internal-manual-topics") or {}
+            raise RuntimeError("手动选题来源初始化失败")
         item = self._normalize_item(
             source,
             {

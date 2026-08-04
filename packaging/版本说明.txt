@@ -49,5 +49,5 @@
 安全说明：
 - 安装包不包含开发电脑上的 API Key、公众号 AppSecret、飞书密钥或历史数据库。
 - 首次安装后请在“设置 → 模型管理”和“设置 → 公众号”中录入自己的凭证。
-- 用户配置保存在安装目录 data/app.db，API Key、AppSecret 和中转密码均使用当前
-  Windows 用户的 DPAPI 加密。
+- 用户配置保存在中心 PostgreSQL，API Key、AppSecret 和中转密码使用服务器端
+  CREDENTIAL_ENCRYPTION_KEY 加密，可在连接同一服务的设备上随账号读取。

@@ -22,7 +22,7 @@ from app.ai.image_providers import is_image_provider
 from app.ai.model_registry import apply_model_selection, build_text_client
 from app.config import database_target, load_config
 from app.cover import invalidate_generated_cover
-from app.db import Database
+from app.db import Database, customer_data_scope
 from app.inline_images import (
     invalidate_inline_image_meta,
     regenerate_inline_image_asset,
@@ -76,11 +76,21 @@ def _retry_guard(db_path: str, job_id: int) -> threading.Lock:
 class BatchService:
     """Application service shared by the HTTP API and the Feishu bot."""
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        owner_user_id: str | None = None,
+        recover_stale_work: bool = True,
+    ) -> None:
         self.config = config or load_config()
-        self.db = Database(database_target(self.config))
-        self.db.recover_stale_jobs(older_than_minutes=30)
-        self.db.recover_stale_editorial_reviews(older_than_minutes=30)
+        self.db = Database(
+            database_target(self.config),
+            owner_user_id=owner_user_id,
+        )
+        if recover_stale_work:
+            self.db.recover_stale_jobs(older_than_minutes=30)
+            self.db.recover_stale_editorial_reviews(older_than_minutes=30)
         self._cancel_events: dict[str, threading.Event] = {}
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._lock = threading.RLock()
@@ -91,6 +101,13 @@ class BatchService:
             interval_seconds=float(
                 ((self.config.get("feishu") or {}).get("progress_interval_seconds") or 1.0)
             ),
+        )
+
+    def _for_user(self, user_id: str) -> BatchService:
+        return BatchService(
+            self.config,
+            owner_user_id=str(user_id or "").strip(),
+            recover_stale_work=False,
         )
 
     def list_accounts(self) -> list[dict[str, Any]]:
@@ -536,8 +553,8 @@ class BatchService:
             self._cancel_events[batch_id] = cancel_event
         self.db.update_batch(batch_id, status="processing", error="")
         threading.Thread(
-            target=self._run_generation,
-            args=(batch_id, task_items),
+            target=self._run_generation_in_scope,
+            args=(self.db.owner_user_id, batch_id, task_items),
             name=f"batch-generation-{batch_id}",
             daemon=True,
         ).start()
@@ -1652,30 +1669,34 @@ class BatchService:
             self._notify(result)
             return result
         self.db.update_batch(batch_id, status="injecting", error="")
+        owner_user_id = self.db.owner_user_id
 
         def inject_one(job: dict[str, Any]) -> None:
-            try:
-                meta = dict(job.get("meta") or {})
-                cfg, _ = apply_account_selection(
-                    load_config(), self.db, str(meta["official_account_id"]), allow_disabled=True
-                )
-                # The reviewer has already persisted the exact title (including
-                # any manually edited custom title). Remapping it through a
-                # candidate index here could overwrite the confirmed value.
+            with customer_data_scope(owner_user_id):
                 try:
-                    pipeline = Pipeline(cfg, db=self.db)
-                except TypeError as exc:
-                    if "db" not in str(exc):
-                        raise
-                    pipeline = Pipeline(cfg)
-                pipeline.review_and_inject(int(job["id"]))
-            except Exception as exc:  # noqa: BLE001
-                self.db.update_job(
-                    int(job["id"]),
-                    status="failed",
-                    step="inject",
-                    error=sanitize_failure_text(exc),
-                )
+                    meta = dict(job.get("meta") or {})
+                    cfg, _ = apply_account_selection(
+                        load_config(),
+                        self.db,
+                        str(meta["official_account_id"]),
+                        allow_disabled=True,
+                    )
+                    # The reviewer has already persisted the exact title
+                    # (including manual edits). Do not remap it here.
+                    try:
+                        pipeline = Pipeline(cfg, db=self.db)
+                    except TypeError as exc:
+                        if "db" not in str(exc):
+                            raise
+                        pipeline = Pipeline(cfg)
+                    pipeline.review_and_inject(int(job["id"]))
+                except Exception as exc:  # noqa: BLE001
+                    self.db.update_job(
+                        int(job["id"]),
+                        status="failed",
+                        step="inject",
+                        error=sanitize_failure_text(exc),
+                    )
 
         threads = [
             threading.Thread(target=inject_one, args=(job,), daemon=True)
@@ -1862,8 +1883,9 @@ class BatchService:
                 error="",
             )
             thread = threading.Thread(
-                target=self._run_job_retry,
+                target=self._run_job_retry_in_scope,
                 args=(
+                    self.db.owner_user_id,
                     batch_id,
                     job_id,
                     requested_step,
@@ -1909,6 +1931,26 @@ class BatchService:
             if not handed_off and guard.locked():
                 guard.release()
             raise
+
+    def _run_job_retry_in_scope(
+        self,
+        owner_user_id: str,
+        batch_id: str,
+        job_id: int,
+        step: str,
+        cfg: dict[str, Any],
+        guard: threading.Lock,
+        image_index: int | None = None,
+    ) -> None:
+        with customer_data_scope(owner_user_id):
+            self._run_job_retry(
+                batch_id,
+                job_id,
+                step,
+                cfg,
+                guard,
+                image_index,
+            )
 
     def _run_job_retry(
         self,
@@ -2318,12 +2360,31 @@ class BatchService:
         self._notify(result)
         return result
 
-    def _run_generation(self, batch_id: str, task_items: list[dict[str, Any]]) -> None:
+    def _run_generation_in_scope(
+        self,
+        owner_user_id: str,
+        batch_id: str,
+        task_items: list[dict[str, Any]],
+    ) -> None:
+        with customer_data_scope(owner_user_id):
+            self._run_generation(owner_user_id, batch_id, task_items)
+
+    def _run_generation(
+        self,
+        owner_user_id: str,
+        batch_id: str,
+        task_items: list[dict[str, Any]],
+    ) -> None:
         def run_one(item: dict[str, Any]) -> None:
-            try:
-                item["pipe"].run_job(int(item["job_id"]), review=True, from_step="ingest")
-            except Exception:  # noqa: BLE001
-                return
+            with customer_data_scope(owner_user_id):
+                try:
+                    item["pipe"].run_job(
+                        int(item["job_id"]),
+                        review=True,
+                        from_step="ingest",
+                    )
+                except Exception:  # noqa: BLE001
+                    return
 
         threads = [
             threading.Thread(target=run_one, args=(item,), daemon=True)

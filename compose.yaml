@@ -34,6 +34,7 @@ services:
       DATABASE_URL: postgresql://wechat_publisher:wechat_dev_password@postgres:5432/wechat_publisher
       AUTH_REQUIRED: "true"
       AUTH_STORAGE_SECRET: local-docker-development-secret-change-before-production
+      CREDENTIAL_ENCRYPTION_KEY: local-docker-credential-key-change-before-production
       FEISHU_ENABLED: "false"
       WECHAT_RELAY_ENABLED: "false"
       PYTHONUNBUFFERED: "1"

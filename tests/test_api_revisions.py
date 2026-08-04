@@ -57,7 +57,7 @@ def test_single_image_revision_api_requires_instruction(tmp_path) -> None:
     config = {
         **load_config(),
         "_db_path": str(tmp_path / "api-revisions-validation.db"),
-        "api": {"token": ""},
+        "api": {"token": "test-token"},
         "feishu": {"enabled": False},
     }
     service = BatchService(config)
@@ -66,6 +66,7 @@ def test_single_image_revision_api_requires_instruction(tmp_path) -> None:
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/batches/batch-1/jobs/12/inline-images/2/regenerate",
+            headers={"Authorization": "Bearer test-token"},
             json={"instruction": ""},
         )
 

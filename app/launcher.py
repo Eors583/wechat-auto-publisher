@@ -9,8 +9,8 @@ import sys
 import time
 import uuid
 from typing import Any
-from urllib.parse import urlparse
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from dotenv import load_dotenv
@@ -22,7 +22,6 @@ from app.runtime_control import (
     clear_api_process_controller,
     register_api_process_controller,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +272,12 @@ def main() -> int:
     if remote_url:
         logger.info("Starting hosted desktop client: %s", remote_url)
         return _run_remote_desktop(remote_url)
+
+    try:
+        database_target(load_config())
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        _show_warning(f"本地模式启动失败：{exc}")
+        return 2
 
     api_port = _api_port()
     launcher_session_id = uuid.uuid4().hex

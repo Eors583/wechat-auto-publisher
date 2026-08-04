@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from app.db_backend import is_postgres_url
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -47,14 +48,16 @@ def _optional_env_bool(name: str) -> bool | None:
 
 
 def _apply_env_overrides(config: dict[str, Any]) -> None:
-    auth_required = _optional_env_bool("AUTH_REQUIRED")
-    if auth_required is not None:
-        current_auth = config.get("auth")
-        if current_auth is None:
-            current_auth = {}
-        if not isinstance(current_auth, dict):
-            raise ValueError("配置项 auth 必须是对象")
-        config["auth"] = {**current_auth, "required": auth_required}
+    _optional_env_bool("AUTH_REQUIRED")
+    current_auth = config.get("auth")
+    if current_auth is None:
+        current_auth = {}
+    if not isinstance(current_auth, dict):
+        raise ValueError("配置项 auth 必须是对象")
+    # Multi-user customer data must never be reachable through the historical
+    # unauthenticated compatibility mode. Keep parsing AUTH_REQUIRED so an
+    # invalid value is still reported, but always fail closed.
+    config["auth"] = {**current_auth, "required": True}
 
     feishu_enabled = _optional_env_bool("FEISHU_ENABLED")
     feishu_string_overrides = {
@@ -121,28 +124,59 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     _apply_env_overrides(cfg)
     data_dir = root / str(cfg.get("data_dir", "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
-    db_rel = cfg.get("db", {}).get("path", "data/app.db")
-    db_path = root / db_rel
-    db_path.parent.mkdir(parents=True, exist_ok=True)
     database_url = str(
         os.getenv("DATABASE_URL")
         or (cfg.get("db") or {}).get("url")
         or ""
     ).strip()
+    allow_sqlite_tests = str(
+        os.getenv("WECHAT_PUBLISHER_ALLOW_SQLITE_FOR_TESTS") or ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    legacy_db_path = ""
+    if allow_sqlite_tests:
+        db_rel = str(
+            (cfg.get("db") or {}).get("path")
+            or os.getenv("WECHAT_PUBLISHER_TEST_SQLITE_PATH")
+            or ""
+        ).strip()
+        if db_rel:
+            db_path = root / db_rel
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_db_path = str(db_path)
     cfg["_root"] = str(root)
-    cfg["_db_path"] = str(db_path)
+    # ``_db_path`` remains as a compatibility identity for in-process locks
+    # and older callers. In application runtime it is the PostgreSQL URL, not
+    # a path which can recreate data/app.db. Only explicitly opted-in tests
+    # receive a local SQLite path.
+    cfg["_db_path"] = database_url or legacy_db_path
     cfg["_database_url"] = database_url
-    cfg["_db_target"] = database_url or str(db_path)
+    cfg["_db_target"] = database_url or legacy_db_path
     cfg["_data_dir"] = str(data_dir)
     return cfg
 
 
 def database_target(config: dict[str, Any]) -> str:
-    """Return the configured PostgreSQL URL or the legacy SQLite path."""
+    """Return the required PostgreSQL target.
 
-    return str(
+    SQLite remains available only to isolated automated tests and the one-time
+    legacy importer; application entry points must use PostgreSQL.
+    """
+
+    target = str(
         config.get("_database_url")
-        or config.get("_db_path")
         or config.get("_db_target")
         or ""
+    ).strip()
+    if is_postgres_url(target):
+        return target
+    allow_sqlite = str(
+        os.getenv("WECHAT_PUBLISHER_ALLOW_SQLITE_FOR_TESTS") or ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    if allow_sqlite:
+        fallback = str(config.get("_db_path") or target).strip()
+        if fallback:
+            return fallback
+    raise RuntimeError(
+        "未配置 PostgreSQL。请设置 DATABASE_URL=postgresql://...；"
+        "应用不再回退创建 data/app.db。"
     )

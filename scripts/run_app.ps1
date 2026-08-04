@@ -14,6 +14,11 @@ if (-not $env:DATABASE_URL) {
     # value with their managed service connection.
     $env:DATABASE_URL = 'postgresql://wechat_publisher:wechat_dev_password@127.0.0.1:15432/wechat_publisher'
 }
+if (-not $env:CREDENTIAL_ENCRYPTION_KEY) {
+    # Development-only key matching compose.yaml. Production must inject a
+    # separately generated stable secret instead of using this value.
+    $env:CREDENTIAL_ENCRYPTION_KEY = 'local-docker-credential-key-change-before-production'
+}
 
 # Use the same launcher as the frozen desktop build.  The launcher retains the
 # exact Process handle it created, so the Feishu settings page can safely

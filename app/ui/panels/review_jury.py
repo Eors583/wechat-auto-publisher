@@ -971,7 +971,11 @@ def build_editorial_review_profiles_panel(
 ) -> None:
     """Manage reusable custom editorial review profiles."""
 
-    service = BatchService(load_config())
+    service = BatchService(
+        load_config(),
+        owner_user_id=str(getattr(_state, "current_user_id", "") or ""),
+        recover_stale_work=False,
+    )
     options = service.get_editorial_review_options()
     role_options = {
         str(item["id"]): str(item["name"]) for item in options.get("roles") or []

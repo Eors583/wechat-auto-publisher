@@ -19,20 +19,21 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import __version__
 from app.api.editorial_reviews import create_editorial_review_router
 from app.config import load_config
+from app.db import customer_data_scope
 from app.services import (
     BatchService,
     FollowedContentService,
     TopicSourceService,
     get_batch_service,
 )
+from app.services.auth import AuthService
+from app.services.configuration import ConfigurationService
 from app.services.failures import (
     classify_job_failure,
     public_failure,
     sanitize_failure_payload,
     sanitize_failure_text,
 )
-from app.services.auth import AuthService
-from app.services.configuration import ConfigurationService
 from app.services.onboarding import OnboardingService
 
 logger = logging.getLogger(__name__)
@@ -277,15 +278,13 @@ def create_api_app(
     )
     api_cfg = dict(cfg.get("api") or {})
     expected_token = str(api_cfg.get("token") or "").strip()
-    auth_cfg = dict(cfg.get("auth") or {})
-    auth_required = bool(auth_cfg.get("required", False))
     bot_holder: dict[str, Any] = {}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         from app.feishu.runtime import get_runtime, update_runtime
 
-        auth_service.ensure_default_admin()
+        default_admin = auth_service.ensure_default_admin()
         onboarding_service.migrate_legacy_state()
         feishu_enabled = bool(
             (cfg.get("feishu") or {}).get("enabled", False)
@@ -293,7 +292,11 @@ def create_api_app(
         if start_feishu and feishu_enabled:
             threading.Thread(
                 target=_run_feishu_bot,
-                args=(cfg, batch_service, bot_holder),
+                args=(
+                    cfg,
+                    batch_service._for_user(str(default_admin["id"])),
+                    bot_holder,
+                ),
                 name="feishu-long-connection",
                 daemon=True,
             ).start()
@@ -414,13 +417,6 @@ def create_api_app(
         user = auth_service.authenticate(supplied)
         if user:
             return user
-        if not auth_required and not expected_token:
-            return {
-                "id": "local-compat",
-                "username": "local",
-                "role": "admin",
-                "enabled": True,
-            }
         if not supplied:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -440,6 +436,27 @@ def create_api_app(
                 detail="只有管理员可以配置模型和密钥",
             )
         return principal
+
+    @app.middleware("http")
+    async def bind_customer_data_scope(
+        request: Request,
+        call_next: Any,
+    ) -> Any:
+        """Bind shared service objects to the authenticated user's data."""
+
+        supplied = _bearer_token(request.headers.get("authorization"))
+        principal = auth_service.authenticate(supplied) if supplied else None
+        if (
+            principal is None
+            and expected_token
+            and supplied
+            and hmac.compare_digest(supplied, expected_token)
+        ):
+            principal = auth_service.ensure_default_admin()
+        with customer_data_scope(
+            str((principal or {}).get("id") or "")
+        ):
+            return await call_next(request)
 
     @app.post("/api/v1/auth/register")
     def register_user(payload: RegisterRequest) -> dict[str, Any]:

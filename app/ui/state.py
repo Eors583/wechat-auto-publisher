@@ -71,7 +71,7 @@ class AppState:
         self.config = load_config()
         self.db = Database(database_target(self.config))
         self.auth = AuthService(self.db)
-        self.auth.ensure_default_admin()
+        default_admin = self.auth.ensure_default_admin()
         self.current_user: dict[str, Any] | None = None
         if recover_stale_work:
             recovered = self.db.recover_stale_jobs(older_than_minutes=30)
@@ -85,9 +85,13 @@ class AppState:
                     "Recovered %s stale editorial review operations",
                     recovered_reviews,
                 )
+        # Legacy config.yaml accounts belong to the original administrator,
+        # never to whichever customer happens to open the page first.
+        self.db.set_owner_user(str(default_admin["id"]))
         ensure_config_accounts_imported(self.db, self.config)
-        OnboardingService(self.db, self.config).migrate_legacy_state()
         ensure_account_layouts_initialized(self.db, self.config)
+        self.db.set_owner_user(None)
+        OnboardingService(self.db, self.config).migrate_legacy_state()
         self.busy = False
         self.wizard_job_id: int | None = None
         self.selected_topic = ""
@@ -103,11 +107,21 @@ class AppState:
     def is_admin(self) -> bool:
         return str((self.current_user or {}).get("role") or "") == "admin"
 
+    @property
+    def current_user_id(self) -> str:
+        return str((self.current_user or {}).get("id") or "").strip()
+
+    def bind_user(self, user: dict[str, Any] | None) -> None:
+        """Bind this page's customer data access to the authenticated user."""
+
+        self.current_user = dict(user) if user else None
+        self.db.set_owner_user(self.current_user_id)
+
     def remembered_account_ids(self) -> list[str]:
         """Return the last desktop target selection, filtered by current accounts."""
         try:
             saved = json.loads(
-                self.db.get_setting("ui.last_target_account_ids") or "[]"
+                self.db.get_user_setting("ui.last_target_account_ids") or "[]"
             )
         except (TypeError, ValueError):
             saved = []
@@ -119,17 +133,22 @@ class AppState:
         ]
 
     def remember_account_ids(self, account_ids: list[str]) -> None:
-        self.db.set_setting(
+        self.db.set_user_setting(
             "ui.last_target_account_ids",
             json.dumps([str(item) for item in account_ids], ensure_ascii=False),
         )
 
     def reload_config(self) -> dict[str, Any]:
+        owner_user_id = self.current_user_id
         self.config = load_config()
-        self.db = Database(database_target(self.config))
+        self.db = Database(
+            database_target(self.config),
+            owner_user_id=owner_user_id,
+        )
         self.auth = AuthService(self.db)
         self.auth.ensure_default_admin()
-        ensure_config_accounts_imported(self.db, self.config)
+        if self.is_admin:
+            ensure_config_accounts_imported(self.db, self.config)
         ensure_account_layouts_initialized(self.db, self.config)
         return self.config
 
