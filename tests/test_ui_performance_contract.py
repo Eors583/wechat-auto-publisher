@@ -24,3 +24,11 @@ def test_robots_route_returns_valid_private_app_policy() -> None:
 
     assert response.media_type == "text/plain"
     assert response.body == b"User-agent: *\nDisallow: /\n"
+
+
+def test_lazy_wizard_wrapper_preserves_the_responsive_two_column_layout() -> None:
+    assert ".wizard-layout > .topic-card" in APP_CSS
+    assert ".wizard-layout > .source-card" in APP_CSS
+    assert ".wizard-layout > .action-card" in APP_CSS
+    assert ".wizard-layout::after" in APP_CSS
+    assert ".wizard-panel > .topic-card" not in APP_CSS

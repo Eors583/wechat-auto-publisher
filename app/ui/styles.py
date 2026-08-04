@@ -261,18 +261,23 @@ body, .q-page, .nicegui-content {
   display: block !important;
   overflow: visible;
 }
-.wizard-panel > .topic-card {
+.wizard-layout::after {
+  display: block;
+  clear: both;
+  content: "";
+}
+.wizard-layout > .topic-card {
   float: left;
   width: calc(66% - 8px);
 }
-.wizard-panel > .source-card,
-.wizard-panel > .action-card {
+.wizard-layout > .source-card,
+.wizard-layout > .action-card {
   float: right;
   clear: right;
   width: calc(34% - 8px);
 }
-.wizard-panel > .source-card { margin-bottom: 16px; }
-.wizard-panel > .review-section {
+.wizard-layout > .source-card { margin-bottom: 16px; }
+.wizard-layout > .review-section {
   clear: both;
   padding-top: 16px;
 }
@@ -632,16 +637,16 @@ body, .q-page, .nicegui-content {
 
 @media (max-width: 900px) {
   .shell { padding: 18px 16px 40px; }
-  .wizard-panel > .topic-card,
-  .wizard-panel > .source-card,
-  .wizard-panel > .action-card {
+  .wizard-layout > .topic-card,
+  .wizard-layout > .source-card,
+  .wizard-layout > .action-card {
     float: none;
     clear: none;
     width: 100%;
   }
-  .wizard-panel > .topic-card,
-  .wizard-panel > .source-card { margin-bottom: 16px; }
-  .wizard-panel > .review-section { padding-top: 0; }
+  .wizard-layout > .topic-card,
+  .wizard-layout > .source-card { margin-bottom: 16px; }
+  .wizard-layout > .review-section { padding-top: 0; }
   .workflow-steps { grid-template-columns: repeat(5, minmax(112px, 1fr)); overflow-x: auto; padding-bottom: 4px; }
 }
 

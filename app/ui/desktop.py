@@ -361,7 +361,11 @@ def create_desktop_app() -> None:
         ).classes("w-full bg-transparent")
         with panels:
             with ui.tab_panel(tab_wizard).classes("wizard-panel"):
-                wizard_host = ui.column().classes("w-full")
+                wizard_host = (
+                    ui.column()
+                    .classes("w-full wizard-layout")
+                    .style("display:block")
+                )
             with ui.tab_panel(tab_topics):
                 topics_host = ui.column().classes("w-full")
             with ui.tab_panel(tab_jobs):
