@@ -301,6 +301,16 @@ def test_editorial_review_and_application_lifecycle_contract(
             "review_status": "viewed",
         },
     )
+    monkeypatch.setattr(
+        service,
+        "keep_editorial_review_source",
+        lambda batch_id, job_id, application_id: {
+            "id": job_id,
+            "status": "ready_for_review",
+            "review_status": "viewed",
+            "version_choice": "source",
+        },
+    )
 
     def resolve_issue(
         review_id: str,
@@ -356,6 +366,10 @@ def test_editorial_review_and_application_lifecycle_contract(
             "/api/v1/batches/batch-1/jobs/12/"
             "editorial-review-applications/application-1/apply"
         )
+        source_kept = client.post(
+            "/api/v1/batches/batch-1/jobs/12/"
+            "editorial-review-applications/application-1/keep-source"
+        )
         resolved = client.patch(
             "/api/v1/editorial-reviews/review-1/issues/issue-1",
             json={
@@ -374,6 +388,8 @@ def test_editorial_review_and_application_lifecycle_contract(
     assert fetched_application.status_code == 200
     assert applied.status_code == 200
     assert applied.json()["review_status"] == "viewed"
+    assert source_kept.status_code == 200
+    assert source_kept.json()["version_choice"] == "source"
     assert resolved.status_code == 200
     assert resolved.json()["blocking_count"] == 0
     assert (

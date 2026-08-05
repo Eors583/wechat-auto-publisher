@@ -228,6 +228,22 @@ def create_editorial_review_router(
             application_id,
         )
 
+    @router.post(
+        "/api/v1/batches/{batch_id}/jobs/{job_id}/"
+        "editorial-review-applications/{application_id}/keep-source"
+    )
+    def keep_editorial_review_source(
+        batch_id: str,
+        job_id: int,
+        application_id: str,
+    ) -> dict[str, Any]:
+        return _domain_call(
+            service.keep_editorial_review_source,
+            batch_id,
+            job_id,
+            application_id,
+        )
+
     @router.patch(
         "/api/v1/editorial-reviews/{review_id}/issues/{issue_id}"
     )

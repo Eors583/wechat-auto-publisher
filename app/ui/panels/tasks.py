@@ -56,6 +56,8 @@ def _review_confirmation_gate(review: dict[str, Any] | None) -> tuple[str, int]:
     current = dict(review or {})
     if str(current.get("status") or "") in {"running", "rewriting"}:
         return "AI 评审仍在进行中", 0
+    if str(current.get("status") or "") == "candidate_ready":
+        return "AI 改写稿已生成，请先选择使用原文还是改写稿", 0
     blocking_count = max(0, int(current.get("blocking_count") or 0))
     if blocking_count:
         return f"AI 评审仍有 {blocking_count} 个阻断项待处理", blocking_count
@@ -71,9 +73,11 @@ def _quick_review_action(review: dict[str, Any] | None) -> tuple[str, str, bool]
     status = str(current.get("status") or "")
     if status in {"running", "rewriting"}:
         return "AI 评审进行中…", "running", True
-    if status == "applied":
+    if status == "candidate_ready":
+        return "选择最终文章版本", "comparison", False
+    if status in {"applied", "source_kept"}:
         return "查看改写前后对比", "comparison", False
-    if status in {"completed", "candidate_ready"}:
+    if status == "completed":
         return "查看评审结论", "result", False
     return "重新评审", "rerun", False
 
@@ -465,26 +469,41 @@ def build_tasks_panel(
             running_reviews = [
                 review
                 for review in service.list_editorial_reviews(limit=30)
-                if str(review.get("status") or "") in {"running", "rewriting"}
+                if str(review.get("status") or "")
+                in {"running", "rewriting", "candidate_ready"}
             ]
         except Exception:  # noqa: BLE001
             running_reviews = []
-        persisted_jobs = {int(item.get("job_id") or 0) for item in running_reviews}
+        persisted_jobs = {
+            int(item.get("job_id") or 0)
+            for item in running_reviews
+            if str(item.get("status") or "") in {"running", "rewriting"}
+        }
         for review in running_reviews:
-            is_rewrite = str(review.get("status") or "") == "rewriting"
+            review_status = str(review.get("status") or "")
+            is_rewrite = review_status == "rewriting"
+            candidate_waiting = review_status == "candidate_ready"
             activities.append(
                 {
-                    "kind": "rewrite" if is_rewrite else "review",
+                    "kind": "rewrite" if is_rewrite or candidate_waiting else "review",
                     "title": (
                         f'{review.get("profile_name") or "AI 评审"}'
-                        + (" · 整篇优化" if is_rewrite else "")
+                        + (
+                            " · 整篇优化"
+                            if is_rewrite or candidate_waiting
+                            else ""
+                        )
                     ),
                     "status": (
-                        "AI 正在后台改写并重新排版"
+                        "AI 改写候选稿已生成，等待选择版本"
+                        if candidate_waiting
+                        else "AI 正在后台改写并生成候选稿"
                         if is_rewrite
                         else "AI 正在评审文章"
                     ),
-                    "progress": 0.75 if is_rewrite else 0.55,
+                    "progress": (
+                        1.0 if candidate_waiting else 0.75 if is_rewrite else 0.55
+                    ),
                     "batch_id": str(review.get("batch_id") or ""),
                     "job_id": int(review.get("job_id") or 0),
                 }
@@ -1927,9 +1946,20 @@ def open_review_workbench(
             rewritten_snapshot = dict(
                 latest_review.get("rewritten_snapshot") or {}
             )
+            source_snapshot = dict(latest_review.get("source_snapshot") or {})
             rewrite_matches_editor = bool(rewritten_snapshot) and all(
                 str(job.get(job_key) or "").strip()
                 == str(rewritten_snapshot.get(snapshot_key) or "").strip()
+                for job_key, snapshot_key in (
+                    ("selected_title", "title"),
+                    ("selected_subtitle", "subtitle"),
+                    ("digest", "digest"),
+                    ("body", "body"),
+                )
+            )
+            source_matches_editor = bool(source_snapshot) and all(
+                str(job.get(job_key) or "").strip()
+                == str(source_snapshot.get(snapshot_key) or "").strip()
                 for job_key, snapshot_key in (
                     ("selected_title", "title"),
                     ("selected_subtitle", "subtitle"),
@@ -2006,7 +2036,29 @@ def open_review_workbench(
                             ui.label(
                                 review_summary
                             ).classes("muted")
-                            if review_status == "applied":
+                            if review_status == "candidate_ready":
+                                ui.badge(
+                                    (
+                                        "待选择：保留原文或采用 AI 改写稿"
+                                        if source_matches_editor
+                                        else "AI 候选稿已过期，请重新评审"
+                                    )
+                                ).props("outline color=amber-9")
+                                ui.label(
+                                    (
+                                        "当前正文仍是改写前原文，AI 候选稿尚未覆盖正文。"
+                                        if source_matches_editor
+                                        else "候选稿生成后正文发生了变化，不能再直接采用。"
+                                    )
+                                ).classes("text-caption text-amber-10")
+                            elif review_status == "source_kept":
+                                ui.badge("已选择：保留改写前原文").props(
+                                    "outline color=blue-grey-7"
+                                )
+                                ui.label(
+                                    "AI 改写稿没有覆盖正文，可随时查看本次前后对比。"
+                                ).classes("text-caption text-blue-grey-7")
+                            elif review_status == "applied":
                                 version_badge = (
                                     "当前版本：AI 改写后"
                                     if rewrite_matches_editor

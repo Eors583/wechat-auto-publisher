@@ -217,6 +217,7 @@ def build_review_jury_panel(
         "selected_issue_ids": set(),
         "rewrite_running": False,
         "rewrite_in_background": False,
+        "version_choice_running": False,
     }
 
     review_expansion = ui.expansion(
@@ -458,9 +459,11 @@ def build_review_jury_panel(
 
             comparison_host.clear()
             comparison_section.set_visibility(False)
-            if not review or str(review.get("status") or "") not in {
+            review_status = str((review or {}).get("status") or "")
+            if not review or review_status not in {
                 "candidate_ready",
                 "applied",
+                "source_kept",
             }:
                 return False
 
@@ -475,16 +478,115 @@ def build_review_jury_panel(
                 after.get("body") or ""
             ).strip():
                 return False
-            comparison_matches_editor = all(
-                str(job.get(job_key) or "").strip()
-                == str(after.get(snapshot_key) or "").strip()
-                for job_key, snapshot_key in (
-                    ("selected_title", "title"),
-                    ("selected_subtitle", "subtitle"),
-                    ("digest", "digest"),
-                    ("body", "body"),
+            def snapshot_matches_editor(snapshot: dict[str, Any]) -> bool:
+                return all(
+                    str(job.get(job_key) or "").strip()
+                    == str(snapshot.get(snapshot_key) or "").strip()
+                    for job_key, snapshot_key in (
+                        ("selected_title", "title"),
+                        ("selected_subtitle", "subtitle"),
+                        ("digest", "digest"),
+                        ("body", "body"),
+                    )
                 )
-            )
+
+            source_matches_editor = snapshot_matches_editor(before)
+            comparison_matches_editor = snapshot_matches_editor(after)
+
+            async def select_version(
+                *,
+                use_rewrite: bool,
+                button: Any,
+                other_button: Any,
+            ) -> None:
+                if bool(runtime.get("version_choice_running")):
+                    ui.notify("正在保存版本选择，请勿重复提交", type="warning")
+                    return
+                application_id = str((application or {}).get("id") or "")
+                if not application_id:
+                    ui.notify("未找到可选择的 AI 修改稿，请重新生成", type="negative")
+                    return
+                runtime["version_choice_running"] = True
+                other_button.disable()
+                set_button_loading(
+                    button,
+                    True,
+                    (
+                        "正在采用 AI 改写稿并重新排版，请稍候…"
+                        if use_rewrite
+                        else "正在保存“保留改写前原文”的选择…"
+                    ),
+                )
+                updated: dict[str, Any] | None = None
+                refreshed_review: dict[str, Any] | None = None
+                refreshed_application: dict[str, Any] | None = None
+                try:
+                    if use_rewrite:
+                        updated = await run.io_bound(
+                            lambda: service.apply_editorial_review_application(
+                                batch_id,
+                                job_id,
+                                application_id,
+                            )
+                        )
+                    else:
+                        updated = await run.io_bound(
+                            lambda: service.keep_editorial_review_source(
+                                batch_id,
+                                job_id,
+                                application_id,
+                            )
+                        )
+                    refreshed_review = await run.io_bound(
+                        lambda: service.get_editorial_review(str(review["id"]))
+                    )
+                    refreshed_application = await run.io_bound(
+                        lambda: service.get_editorial_review_application(
+                            application_id
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if ui_alive():
+                        ui.notify(
+                            f"保存版本选择失败：{exc}",
+                            type="negative",
+                            timeout=12000,
+                        )
+                finally:
+                    runtime["version_choice_running"] = False
+                    if ui_alive():
+                        set_button_loading(button, False)
+                        other_button.enable()
+                if (
+                    updated is None
+                    or refreshed_review is None
+                    or refreshed_application is None
+                    or not ui_alive()
+                ):
+                    return
+                on_job_updated(updated)
+                runtime["review"] = refreshed_review
+                runtime["application"] = refreshed_application
+                notify_review_updated(refreshed_review)
+                render_review_result(refreshed_review)
+                render_review_summary(refreshed_review)
+                render_rewrite_progress(
+                    "completed",
+                    (
+                        "已采用 AI 改写稿，正文和排版已更新。"
+                        if use_rewrite
+                        else "已保留改写前原文，AI 候选稿没有覆盖当前正文。"
+                    ),
+                )
+                ui.notify(
+                    (
+                        "已采用 AI 改写稿并完成重新排版"
+                        if use_rewrite
+                        else "已选择保留改写前原文"
+                    ),
+                    type="positive",
+                )
+                await scroll_to_article_comparison()
 
             def render_snapshot(
                 *,
@@ -541,12 +643,27 @@ def build_review_jury_panel(
                         )
                         ui.label(
                             (
-                                "左侧为 AI 评审时的原稿，右侧为本次智能修改后"
-                                "并已应用的版本；当前正文编辑区使用右侧内容。"
-                                if comparison_matches_editor
-                                else "左侧为 AI 评审时的原稿，右侧为本次智能"
-                                "修改应用时的版本；此后正文又经过人工修改，"
-                                "右侧仅保留本次 AI 修改记录。"
+                                "AI 改写候选稿已经生成，但尚未覆盖正文。当前正文仍使用"
+                                "左侧原文，请在对比后明确选择最终版本。"
+                                if review_status == "candidate_ready"
+                                and source_matches_editor
+                                else (
+                                    "候选稿生成后当前正文又发生了变化，此候选稿已不能"
+                                    "直接采用，请重新进行 AI 评审。"
+                                    if review_status == "candidate_ready"
+                                    else (
+                                        "已选择保留左侧原文，右侧 AI 改写稿仅作为"
+                                        "本次对比记录。"
+                                        if review_status == "source_kept"
+                                        else (
+                                            "已选择采用右侧 AI 改写稿；当前正文编辑区"
+                                            "使用右侧内容。"
+                                            if comparison_matches_editor
+                                            else "已采用过右侧 AI 改写稿，但此后正文又"
+                                            "经过人工修改，右侧仅保留本次 AI 修改记录。"
+                                        )
+                                    )
+                                )
                             )
                         ).classes("muted")
                     ui.badge("内容对比").props("outline color=indigo-7")
@@ -562,19 +679,74 @@ def build_review_jury_panel(
                     "w-full q-col-gutter-md items-stretch"
                 ).style("gap:0"):
                     render_snapshot(
-                        label="改写前原文",
+                        label=(
+                            "改写前原文（当前版本）"
+                            if source_matches_editor
+                            else "改写前原文"
+                        ),
                         snapshot=before,
                         badge_color="blue-grey-7",
                     )
                     render_snapshot(
                         label=(
-                            "改写后文章（当前版本）"
-                            if comparison_matches_editor
-                            else "AI 改写后版本（历史记录）"
+                            "AI 改写候选稿（待选择）"
+                            if review_status == "candidate_ready"
+                            else (
+                                "AI 改写稿（未采用）"
+                                if review_status == "source_kept"
+                                else (
+                                    "改写后文章（当前版本）"
+                                    if comparison_matches_editor
+                                    else "AI 改写后版本（历史记录）"
+                                )
+                            )
                         ),
                         snapshot=after,
                         badge_color="indigo-7",
                     )
+                if review_status == "candidate_ready":
+                    with ui.card().classes("w-full q-pa-md bg-amber-1").style(
+                        "border:1px solid #ffe082;box-shadow:none"
+                    ):
+                        ui.label("请选择最终使用的文章版本").classes(
+                            "text-subtitle1 text-weight-bold"
+                        )
+                        ui.label(
+                            "选择前不会修改当前正文。保留原文不会触发重新排版；"
+                            "只有选择 AI 改写稿后，系统才会替换正文并刷新排版。"
+                        ).classes("text-body2 text-blue-grey-8")
+                        if source_matches_editor:
+                            with ui.row().classes(
+                                "w-full justify-end q-gutter-sm q-mt-sm"
+                            ):
+                                keep_source_btn = ui.button(
+                                    "保留改写前原文",
+                                ).props(
+                                    "outline color=blue-grey-8 no-caps icon=history"
+                                )
+                                use_rewrite_btn = ui.button(
+                                    "采用 AI 改写稿",
+                                ).props(
+                                    "unelevated color=indigo-7 no-caps icon=auto_fix_high"
+                                )
+                                keep_source_btn.on_click(
+                                    lambda event: select_version(
+                                        use_rewrite=False,
+                                        button=event.sender,
+                                        other_button=use_rewrite_btn,
+                                    )
+                                )
+                                use_rewrite_btn.on_click(
+                                    lambda event: select_version(
+                                        use_rewrite=True,
+                                        button=event.sender,
+                                        other_button=keep_source_btn,
+                                    )
+                                )
+                        else:
+                            ui.label(
+                                "当前正文与生成候选稿时的原文不一致，请重新评审后再生成修改稿。"
+                            ).classes("text-negative text-weight-medium q-mt-sm")
             comparison_section.set_visibility(True)
             return True
 
@@ -629,7 +801,17 @@ def build_review_jury_panel(
                     "已按所选建议完成智能修改，原稿已保存到历史版本。"
                 ).classes("text-positive")
                 return
-            if review_status not in {"completed", "candidate_ready"}:
+            if review_status == "source_kept":
+                ui.label(
+                    "已选择保留改写前原文，AI 修改稿仅保留为对比记录。"
+                ).classes("text-positive")
+                return
+            if review_status == "candidate_ready":
+                ui.label(
+                    "AI 修改候选稿已生成，请先在改写前后对比区选择最终版本。"
+                ).classes("text-warning text-weight-medium")
+                return
+            if review_status != "completed":
                 return
             ui.separator()
             ui.label(
@@ -692,24 +874,10 @@ def build_review_jury_panel(
                     application = dict(generated_review.get("application") or {})
                     if not application.get("id"):
                         raise RuntimeError("AI 修改稿生成成功，但缺少应用记录")
-                    updated = await run.io_bound(
-                        lambda: service.apply_editorial_review_application(
-                            batch_id,
-                            job_id,
-                            str(application["id"]),
-                        )
-                    )
+                    refreshed_review = generated_review
                     if not ui_alive():
                         return
-                    on_job_updated(updated)
-                    refreshed_review = await run.io_bound(
-                        lambda: service.get_editorial_review(str(review["id"]))
-                    )
-                    runtime["application"] = await run.io_bound(
-                        lambda: service.get_editorial_review_application(
-                            str(application["id"])
-                        )
-                    )
+                    runtime["application"] = application
                 except Exception as exc:  # noqa: BLE001
                     if ui_alive():
                         render_rewrite_progress(
@@ -739,11 +907,11 @@ def build_review_jury_panel(
                     render_review_summary(refreshed_review)
                     render_rewrite_progress(
                         "completed",
-                        "正文和排版已更新，下方已生成改写前后对比，请检查后确认文章。",
+                        "AI 候选稿已生成，当前正文仍保留原文；请在下方对比后选择最终版本。",
                     )
                     ui.notify(
-                        "已按所选整体方向优化标题、开头和传播效果并刷新排版；"
-                        "下方已展示改写前后内容对比，请检查后确认文章",
+                        "AI 改写候选稿已生成，尚未覆盖原文；"
+                        "请在下方对比后选择保留原文或采用改写稿",
                         type="positive",
                         timeout=10000,
                     )
@@ -810,6 +978,7 @@ def build_review_jury_panel(
                     "completed": "评审完成",
                     "candidate_ready": "候选稿待确认",
                     "applied": "修改稿已应用",
+                    "source_kept": "已保留原文",
                     "failed": "评审失败",
                     "stale": "评审已过期",
                 }
@@ -819,6 +988,7 @@ def build_review_jury_panel(
                     "completed": "teal-7",
                     "candidate_ready": "indigo-7",
                     "applied": "green-7",
+                    "source_kept": "blue-grey-7",
                     "failed": "red-7",
                     "stale": "orange-8",
                 }

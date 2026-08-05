@@ -364,6 +364,24 @@ class BatchService:
                 )
                 raise
 
+    def keep_editorial_review_source(
+        self,
+        batch_id: str,
+        job_id: int,
+        application_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a rewrite choice without replacing the current source article."""
+
+        with self.editorial_reviews.job_operation(job_id):
+            job = self._batch_job(batch_id, job_id)
+            self.editorial_reviews.keep_source_candidate(
+                batch_id=batch_id,
+                job=job,
+                application_id=application_id,
+            )
+            self.db.update_batch_job_review(batch_id, job_id, "viewed")
+            return self._public_job(job, include_content=True)
+
     def _rerender_claimed_editorial_job(
         self,
         batch_id: str,

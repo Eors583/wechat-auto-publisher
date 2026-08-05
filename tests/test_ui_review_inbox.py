@@ -496,8 +496,9 @@ def test_task_center_exposes_background_generation_and_review_progress() -> None
     assert "background-activity-dock" in source
     assert "start_background_review" in source
     assert "AI 正在评审文章" in source
-    assert "AI 正在后台改写并重新排版" in source
-    assert '"rewrite" if is_rewrite else "review"' in source
+    assert "AI 正在后台改写并生成候选稿" in source
+    assert "AI 改写候选稿已生成，等待选择版本" in source
+    assert "1.0 if candidate_waiting" in source
     assert "后台生成中" in source
     assert "查看详情" in source
     assert "ui.linear_progress(" in source
@@ -623,6 +624,9 @@ def test_confirmation_gate_blocks_running_and_open_risks() -> None:
     assert tasks._review_confirmation_gate(  # noqa: SLF001
         {"status": "completed", "blocking_count": 2}
     ) == ("AI 评审仍有 2 个阻断项待处理", 2)
+    assert tasks._review_confirmation_gate(  # noqa: SLF001
+        {"status": "candidate_ready", "blocking_count": 0}
+    ) == ("AI 改写稿已生成，请先选择使用原文还是改写稿", 0)
 
 
 def test_quick_review_action_covers_unreviewed_running_completed_and_failed() -> None:
@@ -638,7 +642,13 @@ def test_quick_review_action_covers_unreviewed_running_completed_and_failed() ->
         {"status": "completed"}
     ) == ("查看评审结论", "result", False)
     assert tasks._quick_review_action(  # noqa: SLF001
+        {"status": "candidate_ready"}
+    ) == ("选择最终文章版本", "comparison", False)
+    assert tasks._quick_review_action(  # noqa: SLF001
         {"status": "applied"}
+    ) == ("查看改写前后对比", "comparison", False)
+    assert tasks._quick_review_action(  # noqa: SLF001
+        {"status": "source_kept"}
     ) == ("查看改写前后对比", "comparison", False)
     assert tasks._quick_review_action(  # noqa: SLF001
         {"status": "failed"}
@@ -657,6 +667,8 @@ def test_quick_review_uses_the_shared_start_action_and_default_summary() -> None
     assert "on_click=reveal_review_settings" in source
     assert 'review_jury_actions.get("reveal_comparison")' in source
     assert '"当前版本：AI 改写后"' in source
+    assert '"待选择：保留原文或采用 AI 改写稿"' in source
+    assert '"已选择：保留改写前原文"' in source
     assert '"AI 改写后又有人工编辑"' in source
     assert "rewrite_matches_editor" in source
     assert "on_click=reveal_article_comparison" in source

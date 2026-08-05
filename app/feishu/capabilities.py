@@ -140,6 +140,14 @@ BATCH_SERVICE_CAPABILITIES: tuple[FeishuCapability, ...] = (
         ),
     ),
     FeishuCapability(
+        "keep_editorial_review_source",
+        "对比后明确保留原文",
+        FeishuSupportStatus.PARTIAL,
+        ("get_editorial_review",),
+        "网页和 API 会持久化“保留原文”的选择；飞书目前可查看候选稿并选择不应用，"
+        "但尚未提供单独的保留原文指令。",
+    ),
+    FeishuCapability(
         "resolve_editorial_review_issue",
         "人工核实或接受事实合规风险",
         FeishuSupportStatus.SUPPORTED,

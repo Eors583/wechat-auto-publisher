@@ -246,17 +246,21 @@ def test_review_result_removes_old_manual_rewrite_and_candidate_confirmation_ui(
     }, "the old manual rewrite/candidate confirmation flow must stay removed"
 
 
-def test_review_result_removes_the_no_op_use_original_action() -> None:
-    render_controls = _function("render_rewrite_controls")
-    literals = _string_literals(render_controls)
+def test_candidate_comparison_requires_an_explicit_final_version_choice() -> None:
+    render_comparison = _function("render_article_comparison")
+    literals = _string_literals(render_comparison)
 
-    assert "使用原文" not in literals
-    assert "按所选建议优化整篇" in literals
-    assert "接受这条改进意见" not in literals
+    assert "请选择最终使用的文章版本" in literals
+    assert "保留改写前原文" in literals
+    assert "采用 AI 改写稿" in literals
+    assert (
+        "选择前不会修改当前正文。保留原文不会触发重新排版；"
+        "只有选择 AI 改写稿后，系统才会替换正文并刷新排版。"
+    ) in literals
 
 
-def test_smart_rewrite_uses_engagement_optimization_and_immediately_applies() -> None:
-    """One click must optimize the whole article, apply, and refresh it."""
+def test_smart_rewrite_generates_candidate_without_applying_it() -> None:
+    """Generating a candidate must leave the source untouched until selection."""
 
     smart_rewrite = _function("smart_rewrite", async_function=True)
     generate_calls = _calls(
@@ -270,8 +274,8 @@ def test_smart_rewrite_uses_engagement_optimization_and_immediately_applies() ->
     update_calls = _calls(smart_rewrite, "on_job_updated")
 
     assert len(generate_calls) == 1
-    assert len(apply_calls) == 1
-    assert len(update_calls) == 1
+    assert not apply_calls
+    assert not update_calls
 
     generate = generate_calls[0]
     issue_ids = _keyword(generate, "issue_ids")
@@ -287,7 +291,16 @@ def test_smart_rewrite_uses_engagement_optimization_and_immediately_applies() ->
     assert isinstance(paragraph_numbers, ast.List) and not paragraph_numbers.elts
     assert isinstance(instruction, ast.Constant) and instruction.value == ""
 
-    assert generate.lineno < apply_calls[0].lineno < update_calls[0].lineno
+
+
+def test_version_choice_is_the_only_place_that_applies_or_keeps_candidate() -> None:
+    select_version = _function("select_version", async_function=True)
+
+    assert len(
+        _calls(select_version, "service.apply_editorial_review_application")
+    ) == 1
+    assert len(_calls(select_version, "service.keep_editorial_review_source")) == 1
+    assert len(_calls(select_version, "on_job_updated")) == 1
 
 
 def test_smart_rewrite_keeps_parent_review_workbench_open() -> None:
@@ -304,7 +317,7 @@ def test_smart_rewrite_keeps_parent_review_workbench_open() -> None:
     assert "result_dialog.close" not in call_names
     assert "result_dialog.open" not in call_names
     assert "open_review_workbench" not in call_names
-    assert "on_job_updated" in call_names
+    assert "on_job_updated" not in call_names
 
 
 def test_smart_rewrite_can_move_to_background_and_keeps_visible_progress() -> None:
@@ -360,6 +373,9 @@ def test_article_comparison_uses_persisted_review_snapshots() -> None:
     assert "source_snapshot" in literals
     assert "candidate_snapshot" in literals
     assert "改写前原文" in literals
+    assert "改写前原文（当前版本）" in literals
+    assert "AI 改写候选稿（待选择）" in literals
+    assert "AI 改写稿（未采用）" in literals
     assert "改写后文章（当前版本）" in literals
     assert "AI 改写后版本（历史记录）" in literals
     assert "改写前后文章对比" in literals
@@ -403,8 +419,8 @@ def test_smart_rewrite_renders_and_scrolls_to_before_after_comparison() -> None:
 
     assert len(render_calls) == 1
     assert len(scroll_calls) == 1
-    assert len(update_calls) == 1
-    assert update_calls[0].lineno < render_calls[0].lineno < scroll_calls[0].lineno
+    assert not update_calls
+    assert render_calls[0].lineno < scroll_calls[0].lineno
 
 
 def test_article_comparison_scroll_helper_keeps_current_workbench_open() -> None:

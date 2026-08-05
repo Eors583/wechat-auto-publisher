@@ -243,6 +243,57 @@ def test_candidate_only_uses_selected_safe_issue_and_keeps_original(
     assert fact_issue["id"] not in client.prompts[-1]
 
 
+def test_operator_can_explicitly_keep_source_after_comparing_candidate(
+    tmp_path, monkeypatch
+) -> None:
+    service, batch_id, job_id = _ready_service(tmp_path)
+    client = _QueuedClient(
+        [
+            _review_payload(),
+            {
+                "title": "AI 候选标题",
+                "subtitle": "AI 候选副标题",
+                "digest": "AI 候选摘要",
+                "body": (
+                    "AI 候选第一段。\n\n"
+                    "AI 候选第二段保留2025年完成项目、收入增长32%的事实。"
+                ),
+                "change_summary": "优化标题和开头",
+            },
+        ]
+    )
+    _patch_text_model(monkeypatch, client)
+    original = service.get_batch(batch_id, include_content=True)["jobs"][0]
+    review = service.run_editorial_review(
+        batch_id, job_id, profile_id="professional_depth"
+    )
+    safe_issue = next(
+        item
+        for item in review["result"]["issues"]
+        if item["role_id"] == "chief_editor"
+    )
+    generated = service.generate_editorial_rewrite_candidate(
+        batch_id,
+        job_id,
+        review["id"],
+        issue_ids=[safe_issue["id"]],
+    )
+    application_id = generated["application"]["id"]
+
+    retained = service.keep_editorial_review_source(
+        batch_id,
+        job_id,
+        application_id,
+    )
+
+    assert retained["selected_title"] == original["selected_title"]
+    assert retained["body"] == original["body"]
+    assert service.get_editorial_review(review["id"])["status"] == "source_kept"
+    assert service.get_editorial_review_application(application_id)["status"] == (
+        "source_kept"
+    )
+
+
 def test_stale_review_cannot_overwrite_later_manual_edit(
     tmp_path, monkeypatch
 ) -> None:

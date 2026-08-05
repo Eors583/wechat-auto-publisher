@@ -6,8 +6,8 @@ import re
 import sqlite3
 import threading
 import uuid
-from copy import deepcopy
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -28,7 +28,6 @@ from app.editorial_review import (
 )
 from app.services.failures import sanitize_failure_text
 from app.services.model_readiness import record_model_auth_failure_for_error
-
 
 _INTEGRITY_ERRORS = (sqlite3.IntegrityError, *postgres_integrity_errors())
 
@@ -555,6 +554,41 @@ class EditorialReviewService:
         self.db.update_editorial_review(
             review_id,
             status="applied",
+            selected_issue_ids_json=application.get("selected_issue_ids") or [],
+            rewrite_mode=str(application.get("rewrite_mode") or ""),
+            rewritten_snapshot_json=candidate,
+            completed_at=_utc_now(),
+            error="",
+        )
+        result = self.get_review(review_id)
+        result["application"] = self.get_application(application_id)
+        return result
+
+    def keep_source_candidate(
+        self,
+        *,
+        batch_id: str,
+        job: dict[str, Any],
+        application_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a ready candidate by explicitly retaining the source article."""
+
+        candidate = self.candidate_for_apply(
+            batch_id=batch_id,
+            job=job,
+            application_id=application_id,
+        )
+        application = self.get_application(application_id)
+        review_id = str(application["review_id"])
+        self.db.update_editorial_review_application(
+            application_id,
+            status="source_kept",
+            applied_at=None,
+            error="",
+        )
+        self.db.update_editorial_review(
+            review_id,
+            status="source_kept",
             selected_issue_ids_json=application.get("selected_issue_ids") or [],
             rewrite_mode=str(application.get("rewrite_mode") or ""),
             rewritten_snapshot_json=candidate,
