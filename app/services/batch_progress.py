@@ -14,6 +14,7 @@ def batch_progress_signature(batch: dict[str, Any]) -> tuple[Any, ...]:
                 int(job.get("id") or 0),
                 str(job.get("status") or ""),
                 str(job.get("step") or ""),
+                str(job.get("review_status") or ""),
             )
             for job in batch.get("jobs") or []
         ),

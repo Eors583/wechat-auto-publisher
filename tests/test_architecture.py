@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.services.batch_contracts import batch_progress, public_job
+from app.services.batch_contracts import (
+    batch_progress,
+    effective_batch_status,
+    public_job,
+)
 from app.workflows import DeliverySteps, GenerationSteps, RenderingStep, WorkflowContext
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,10 +56,34 @@ def test_batch_contract_projection_is_independent_from_service() -> None:
         "drafted": 0,
         "failed": 0,
         "confirmed": 0,
+        "ready_for_draft": 0,
         "unconfirmed": 1,
         "review_total": 1,
         "reviewed": 0,
     }
+
+
+def test_effective_batch_status_distinguishes_review_from_draft_readiness() -> None:
+    waiting = {
+        "status": "ready_for_review",
+        "review_status": "viewed",
+    }
+    confirmed = {
+        "status": "ready_for_review",
+        "review_status": "confirmed",
+    }
+
+    assert effective_batch_status([waiting]) == "ready_for_review"
+    assert effective_batch_status([confirmed]) == "ready_for_draft"
+    assert effective_batch_status(
+        [confirmed, {"status": "drafted", "review_status": "confirmed"}]
+    ) == "ready_for_draft"
+    assert effective_batch_status(
+        [confirmed, {"status": "failed", "review_status": "confirmed"}]
+    ) == "partial_failed"
+    assert effective_batch_status(
+        [{"status": "injecting", "review_status": "confirmed"}]
+    ) == "injecting"
 
 
 def test_all_wechat_api_callsites_use_the_shared_factory() -> None:

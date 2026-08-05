@@ -49,6 +49,8 @@ def format_status(batch: dict[str, Any]) -> str:
         lines.append(line)
     if batch.get("status") == "ready_for_review":
         lines.append("\n下一步可回复：预览蓝血家族办公室的文章")
+    elif batch.get("status") == "ready_for_draft":
+        lines.append("\n全部文章已确认。下一步可回复：确认全部写入草稿箱")
     return "\n".join(lines)
 
 

@@ -40,6 +40,12 @@ def batch_progress(jobs: list[dict[str, Any]]) -> dict[str, int]:
         "confirmed": sum(
             1 for job in jobs if effective_review_status(job) == "confirmed"
         ),
+        "ready_for_draft": sum(
+            1
+            for job in jobs
+            if job.get("status") == "ready_for_review"
+            and effective_review_status(job) == "confirmed"
+        ),
         "unconfirmed": sum(
             1
             for job in jobs
@@ -165,10 +171,21 @@ def effective_batch_status(jobs: list[dict[str, Any]], stored: str = "") -> str:
         return "injecting"
     if statuses <= {"drafted", "published"}:
         return "drafted"
-    if statuses == {"ready_for_review"}:
-        return "ready_for_review"
     if statuses == {"cancelled"}:
         return "cancelled"
     if statuses == {"failed"}:
         return "failed"
+    reviewable_statuses = {"ready_for_review", "drafted", "published"}
+    if statuses <= reviewable_statuses:
+        pending_draft_jobs = [
+            job
+            for job in jobs
+            if str(job.get("status") or "") == "ready_for_review"
+        ]
+        if pending_draft_jobs and all(
+            effective_review_status(job) == "confirmed"
+            for job in pending_draft_jobs
+        ):
+            return "ready_for_draft"
+        return "ready_for_review"
     return "partial_failed"

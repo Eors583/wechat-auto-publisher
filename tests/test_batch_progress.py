@@ -86,3 +86,28 @@ def test_feishu_progress_reporter_deduplicates_and_uses_chinese_labels() -> None
     changed = reporter.render_if_changed("chat1", batch)
     assert changed is not None
     assert "套用排版和模板" in changed
+
+
+def test_batch_progress_signature_changes_when_review_is_confirmed() -> None:
+    reporter = FeishuProgressReporter()
+    batch = {
+        "id": "b-review",
+        "status": "ready_for_review",
+        "jobs": [
+            {
+                "id": 1,
+                "account_name": "测试公众号",
+                "status": "ready_for_review",
+                "step": "inject",
+                "review_status": "viewed",
+            }
+        ],
+    }
+    changed = reporter.render_if_changed("chat-review", batch)
+    assert changed is not None
+    assert "等待审核" in changed
+    batch["jobs"][0]["review_status"] = "confirmed"
+    changed = reporter.render_if_changed("chat-review", batch)
+    assert changed is not None
+    assert "等待写入草稿箱" in changed
+    assert "等待审核" not in changed

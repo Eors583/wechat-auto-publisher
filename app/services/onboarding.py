@@ -52,9 +52,40 @@ ONBOARDING_STEPS = (
     "wechat",
     "complete",
 )
+ONBOARDING_CHECK_LABELS = {
+    "article_ai": "文章 AI",
+    "account": "公众号",
+    "connection": "连接方式与白名单",
+    "draft": "草稿接口",
+    "material": "封面素材",
+    "creation_plan": "创作方案",
+}
 FEISHU_TOKEN_URL = (
     "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 )
+
+
+def _emit_onboarding_progress(
+    callback: Callable[[dict[str, Any]], None] | None,
+    key: str,
+    state: str,
+    message: str,
+) -> None:
+    """Emit a small sanitized event; progress must never carry credentials."""
+
+    if callback is None:
+        return
+    event = {
+        "key": str(key),
+        "label": ONBOARDING_CHECK_LABELS.get(str(key), str(key)),
+        "state": str(state),
+        "message": sanitize_failure_text(message),
+    }
+    try:
+        callback(event)
+    except Exception:  # noqa: BLE001
+        # UI progress is advisory; a disconnected client must not abort checks.
+        return
 
 
 # These are application presets, not credentials. Built-in presets keep new
@@ -570,6 +601,7 @@ class OnboardingService:
         refresh_wechat: bool = False,
         retest_models: bool = False,
         retest_model_ids: list[str] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Return local model/account readiness plus cached or refreshed preflight.
 
@@ -579,6 +611,13 @@ class OnboardingService:
         call the same read-only remote preflight used before publishing.
         """
 
+        if retest_models:
+            _emit_onboarding_progress(
+                on_progress,
+                "article_ai",
+                "running",
+                "正在验证文章模型连接",
+            )
         model_retest_results = (
             self._retest_text_models(retest_model_ids)
             if retest_models
@@ -587,7 +626,32 @@ class OnboardingService:
         state = self._load_state()
         db_models = public_models(self.db, enabled_only=True, purpose="text")
         model_ids = {str(item.get("id") or "") for item in db_models}
+        if retest_models:
+            model_ok = bool(model_ids) and (
+                not model_retest_results
+                or any(bool(item.get("ok")) for item in model_retest_results)
+            )
+            _emit_onboarding_progress(
+                on_progress,
+                "article_ai",
+                "passed" if model_ok else "failed",
+                (
+                    "文章模型连接正常"
+                    if model_ok
+                    else "没有可用的文章模型，请检查模型配置"
+                ),
+            )
         accounts = self.configuration.list_accounts(enabled_only=True)
+        _emit_onboarding_progress(
+            on_progress,
+            "account",
+            "passed" if accounts else "failed",
+            (
+                f"已发现 {len(accounts)} 个可用公众号"
+                if accounts
+                else "还没有可用公众号"
+            ),
+        )
         model_auth_failed_ids = active_model_auth_failure_ids(
             self.db,
             self.config,
@@ -643,12 +707,34 @@ class OnboardingService:
         ]
         account_ids = [str(item["id"]) for item in accounts]
         if refresh_wechat and account_ids:
-            raw_account_checks = preflight_accounts(
-                self.db,
-                account_ids,
-                deep_model_check=False,
-                force_wechat_check=True,
-            )
+            for progress_key, message in (
+                ("connection", "正在检查公众号连接与白名单"),
+                ("draft", "正在验证草稿接口"),
+                ("material", "正在读取封面素材"),
+            ):
+                _emit_onboarding_progress(
+                    on_progress,
+                    progress_key,
+                    "running",
+                    message,
+                )
+            try:
+                raw_account_checks = preflight_accounts(
+                    self.db,
+                    account_ids,
+                    deep_model_check=False,
+                    force_wechat_check=True,
+                )
+            except Exception as exc:
+                safe_error = sanitize_failure_text(exc)
+                for progress_key in ("connection", "draft", "material"):
+                    _emit_onboarding_progress(
+                        on_progress,
+                        progress_key,
+                        "failed",
+                        safe_error,
+                    )
+                raise
         else:
             raw_account_checks = self._offline_cached_account_checks(accounts)
         account_checks = self._decorate_account_checks(
@@ -656,6 +742,39 @@ class OnboardingService:
             accounts,
             tested_model_id_set,
         )
+        if refresh_wechat:
+            check_rows = [
+                dict(check)
+                for account_check in account_checks
+                for check in list(account_check.get("checks") or [])
+                if isinstance(check, dict)
+            ]
+            for progress_key, check_key, success_message in (
+                ("connection", "wechat", "公众号连接正常"),
+                ("draft", "draft", "草稿接口可用"),
+                ("material", "material", "封面素材可用"),
+            ):
+                matching = [
+                    item
+                    for item in check_rows
+                    if str(item.get("key") or "") == check_key
+                ]
+                ok = any(bool(item.get("ok")) for item in matching)
+                detail = next(
+                    (
+                        sanitize_failure_text(item.get("message") or "")
+                        for item in matching
+                        if bool(item.get("ok")) == ok
+                        and str(item.get("message") or "").strip()
+                    ),
+                    success_message if ok else "检查未通过，请按提示修复",
+                )
+                _emit_onboarding_progress(
+                    on_progress,
+                    progress_key,
+                    "passed" if ok else "failed",
+                    detail,
+                )
         draft_ready_account_ids = [
             str(item["account_id"])
             for item in account_checks
@@ -705,6 +824,16 @@ class OnboardingService:
         writer_ready = bool(tested_model_ids)
         content_ready = bool(content_ready_accounts)
         draft_ready = bool(draft_ready_account_ids)
+        _emit_onboarding_progress(
+            on_progress,
+            "creation_plan",
+            "passed" if content_ready else "failed",
+            (
+                "系统默认创作方案可用"
+                if content_ready
+                else "请先完成文章模型与公众号绑定"
+            ),
+        )
         feishu_saved = bool(
             feishu.get("enabled")
             and feishu.get("app_id")
@@ -812,6 +941,7 @@ class OnboardingService:
         *,
         model_ids: list[str] | None = None,
         refresh_wechat: bool = True,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Explicitly retest current text models and refresh read-only WeChat health.
 
@@ -824,6 +954,7 @@ class OnboardingService:
             refresh_wechat=refresh_wechat,
             retest_models=True,
             retest_model_ids=model_ids,
+            on_progress=on_progress,
         )
 
     def migrate_legacy_state(self) -> dict[str, Any]:

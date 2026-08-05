@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable
+from queue import Empty, SimpleQueue
 from typing import Any
 
 from nicegui import run, ui
 
 from app.services.failures import sanitize_failure_text
-from app.services.onboarding import OnboardingService
+from app.services.onboarding import ONBOARDING_CHECK_LABELS, OnboardingService
 from app.services.onboarding_errors import onboarding_wechat_issue
 from app.services.wechat_relay_settings import (
     public_wechat_relay_connection_info,
@@ -490,8 +492,24 @@ class _WizardController:
         guide_method = getattr(self.service, "guide", None)
         return dict(guide_method() or {}) if callable(guide_method) else {}
 
-    def _auto_check(self) -> dict[str, Any]:
-        return _run_auto_check(self.service)
+    def _auto_check(
+        self,
+        *,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        return _run_auto_check(self.service, on_progress=on_progress)
+
+    def _retry_check(
+        self,
+        key: str,
+        *,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        return _run_single_check(
+            self.service,
+            key,
+            on_progress=on_progress,
+        )
 
     def _effective_step(
         self,
@@ -593,6 +611,100 @@ class _WizardController:
                 ui.label("• 公众号开发配置权限")
             self._render_error()
 
+            progress_rows: dict[str, tuple[Any, Any, Any, Any, Any]] = {}
+            progress_states = {
+                key: "pending" for key in ONBOARDING_CHECK_LABELS
+            }
+            with ui.element("div").classes(
+                "onboarding-summary w-full"
+            ) as progress_host:
+                for key, label in ONBOARDING_CHECK_LABELS.items():
+                    with ui.element("div").classes("onboarding-check"):
+                        icon = ui.label("○").classes(
+                            "onboarding-check-icon text-grey-6"
+                        )
+                        with ui.column().classes("gap-0"):
+                            ui.label(label).classes("text-weight-bold")
+                            state_label = ui.label("等待检查").classes(
+                                "text-caption text-grey-7"
+                            )
+                            detail_label = ui.label("").classes(
+                                "text-caption text-grey-6"
+                            )
+                            with ui.row().classes("items-center gap-1 q-mt-xs"):
+                                retry_btn = ui.button(
+                                    "重试本项",
+                                    icon="refresh",
+                                    on_click=lambda _, check_key=key: retry_single(
+                                        check_key
+                                    ),
+                                ).props("flat dense color=teal-9 no-caps")
+                                repair_btn = ui.button(
+                                    "去修复",
+                                    icon="build",
+                                    on_click=lambda _, check_key=key: repair_single(
+                                        check_key
+                                    ),
+                                ).props("flat dense color=grey-8 no-caps")
+                                retry_btn.set_visibility(False)
+                                repair_btn.set_visibility(False)
+                        progress_rows[key] = (
+                            icon,
+                            state_label,
+                            detail_label,
+                            retry_btn,
+                            repair_btn,
+                        )
+                progress_note = ui.label("").classes(
+                    "text-caption text-grey-7 q-pa-sm"
+                )
+            progress_host.set_visibility(False)
+
+            def update_progress(event: dict[str, Any]) -> None:
+                key = str(event.get("key") or "")
+                if key not in progress_rows:
+                    return
+                state = str(event.get("state") or "pending")
+                message = sanitize_failure_text(event.get("message") or "")
+                progress_states[key] = state
+                (
+                    icon,
+                    state_label,
+                    detail_label,
+                    retry_btn,
+                    repair_btn,
+                ) = progress_rows[key]
+                icon.text = {
+                    "pending": "○",
+                    "running": "…",
+                    "passed": "✓",
+                    "failed": "!",
+                    "timeout": "!",
+                }.get(state, "○")
+                icon.classes(
+                    replace=(
+                        "onboarding-check-icon "
+                        + {
+                            "pending": "text-grey-6",
+                            "running": "text-info",
+                            "passed": "text-positive",
+                            "failed": "text-negative",
+                            "timeout": "text-warning",
+                        }.get(state, "text-grey-6")
+                    )
+                )
+                state_label.text = {
+                    "pending": "等待检查",
+                    "running": "检查中",
+                    "passed": "已通过",
+                    "failed": "未通过",
+                    "timeout": "检查超时",
+                }.get(state, state)
+                detail_label.text = message
+                show_actions = state in {"failed", "timeout"}
+                retry_btn.set_visibility(show_actions)
+                repair_btn.set_visibility(show_actions)
+
             async def start() -> None:
                 try:
                     await run.io_bound(
@@ -618,14 +730,168 @@ class _WizardController:
                 .classes("onboarding-primary")
             )
 
-            async def auto_check() -> None:
-                set_button_loading(
-                    auto_btn,
-                    True,
-                    "正在检查已有 AI、公众号和草稿接口配置…",
+            async def retry_single(key: str) -> None:
+                progress_host.set_visibility(True)
+                progress_note.text = f"正在重新检查{ONBOARDING_CHECK_LABELS[key]}。"
+                update_progress(
+                    {"key": key, "state": "running", "message": "正在重新检查"}
                 )
+                auto_btn.disable()
+                event_queue: SimpleQueue[dict[str, Any]] = SimpleQueue()
+
+                def collect_target(event: dict[str, Any]) -> None:
+                    event_queue.put(dict(event))
+
+                def drain_target() -> None:
+                    while True:
+                        try:
+                            update_progress(event_queue.get_nowait())
+                        except Empty:
+                            return
+
                 try:
-                    checked = await run.io_bound(self._auto_check)
+                    worker = asyncio.create_task(
+                        run.io_bound(
+                            lambda: self._retry_check(
+                                key,
+                                on_progress=collect_target,
+                            )
+                        )
+                    )
+                    loop = asyncio.get_running_loop()
+                    started_at = loop.time()
+                    timeout_marked = False
+                    while not worker.done():
+                        drain_target()
+                        elapsed = loop.time() - started_at
+                        if elapsed >= 10:
+                            progress_note.text = (
+                                f"{ONBOARDING_CHECK_LABELS[key]}仍在检查，请保持页面打开。"
+                            )
+                        if elapsed >= 30 and not timeout_marked:
+                            timeout_marked = True
+                            update_progress(
+                                {
+                                    "key": key,
+                                    "state": "timeout",
+                                    "message": "本项超过 30 秒，请修复后重新检查",
+                                }
+                            )
+                        await asyncio.sleep(0.1)
+                    checked = await worker
+                    drain_target()
+                    final_event = next(
+                        event
+                        for event in _final_auto_check_events(checked)
+                        if event["key"] == key
+                    )
+                    update_progress(final_event)
+                    progress_note.text = (
+                        f"{ONBOARDING_CHECK_LABELS[key]}已通过。"
+                        if final_event["state"] == "passed"
+                        else f"{ONBOARDING_CHECK_LABELS[key]}仍未通过，可继续重试或去修复。"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    update_progress(
+                        {
+                            "key": key,
+                            "state": "failed",
+                            "message": sanitize_failure_text(exc),
+                        }
+                    )
+                    progress_note.text = (
+                        f"{ONBOARDING_CHECK_LABELS[key]}仍未通过，可继续重试或去修复。"
+                    )
+                finally:
+                    if self._ui_alive():
+                        auto_btn.enable()
+
+            async def repair_single(key: str) -> None:
+                repair_step = {
+                    "article_ai": "ai",
+                    "account": "account",
+                    "creation_plan": "account",
+                    "connection": "wechat",
+                    "draft": "wechat",
+                    "material": "wechat",
+                }[key]
+                try:
+                    await run.io_bound(
+                        lambda: self.service.save_progress(
+                            mode="full",
+                            current_step=repair_step,
+                            completed_steps=_completed_before(repair_step),
+                        )
+                    )
+                    self.step_override = repair_step
+                    self._initial_status = {}
+                    if self._ui_alive():
+                        self.refresh()
+                except Exception as exc:  # noqa: BLE001
+                    self._show_error(exc)
+
+            async def auto_check() -> None:
+                progress_host.set_visibility(True)
+                progress_note.text = "正在读取已有配置，检查结果会逐项更新。"
+                for key in progress_rows:
+                    update_progress({"key": key, "state": "pending"})
+                auto_btn.props(add="loading")
+                auto_btn.disable()
+                event_queue: SimpleQueue[dict[str, Any]] = SimpleQueue()
+
+                def collect_progress(event: dict[str, Any]) -> None:
+                    event_queue.put(dict(event))
+
+                def drain_progress() -> None:
+                    while True:
+                        try:
+                            update_progress(event_queue.get_nowait())
+                        except Empty:
+                            return
+
+                try:
+                    worker = asyncio.create_task(
+                        run.io_bound(
+                            lambda: self._auto_check(
+                                on_progress=collect_progress
+                            )
+                        )
+                    )
+                    loop = asyncio.get_running_loop()
+                    started_at = loop.time()
+                    timeout_marked = False
+                    while not worker.done():
+                        drain_progress()
+                        elapsed = loop.time() - started_at
+                        if elapsed >= 10:
+                            progress_note.text = (
+                                "仍在检查公众号接口，请保持页面打开；"
+                                "已经通过的项目不会重复执行。"
+                            )
+                        if elapsed >= 30 and not timeout_marked:
+                            timeout_marked = True
+                            for key, state in progress_states.items():
+                                if state in {"pending", "running"}:
+                                    update_progress(
+                                        {
+                                            "key": key,
+                                            "state": "timeout",
+                                            "message": "本项超过 30 秒，请修复后重新检查",
+                                        }
+                                    )
+                        await asyncio.sleep(0.1)
+                    checked = await worker
+                    drain_progress()
+                    for event in _final_auto_check_events(checked):
+                        update_progress(event)
+                    has_failures = any(
+                        state != "passed" for state in progress_states.values()
+                    )
+                    progress_note.text = (
+                        "检查完成。未通过项目可以原位重试，或进入对应步骤修复。"
+                        if has_failures
+                        else "检查完成，正在整理下一步。"
+                    )
                     step = _next_required_step(checked)
                     completed = _completed_before(step)
                     await run.io_bound(
@@ -652,14 +918,25 @@ class _WizardController:
                     )
                     # Reload the local status so the just-saved guide step is
                     # used instead of the pre-check welcome snapshot.
-                    self._initial_status = {}
-                    if self._ui_alive():
+                    if not has_failures:
+                        self._initial_status = {}
+                    if not has_failures and self._ui_alive():
                         self.refresh()
                 except Exception as exc:  # noqa: BLE001
+                    for key, state in progress_states.items():
+                        if state in {"pending", "running", "timeout"}:
+                            update_progress(
+                                {
+                                    "key": key,
+                                    "state": "failed",
+                                    "message": "本项未完成，请修复后重试",
+                                }
+                            )
                     self._show_error(exc)
                 finally:
                     if self._ui_alive():
-                        set_button_loading(auto_btn, False)
+                        auto_btn.props(remove="loading")
+                        auto_btn.enable()
 
             auto_btn = ui.button(
                 "我已经配置过，自动检查",
@@ -1541,17 +1818,145 @@ def _friendly_model_error(exc: Exception) -> str:
         return sanitize_failure_text(exc)
 
 
-def _run_auto_check(service: OnboardingService) -> dict[str, Any]:
+def _run_auto_check(
+    service: OnboardingService,
+    *,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     auto_check = getattr(service, "auto_check", None)
     if callable(auto_check):
+        if "on_progress" in inspect.signature(auto_check).parameters:
+            return dict(auto_check(on_progress=on_progress) or {})
         return dict(auto_check() or {})
+    status_method = service.status
+    if "on_progress" in inspect.signature(status_method).parameters:
+        return dict(
+            status_method(
+                refresh_wechat=True,
+                retest_models=True,
+                on_progress=on_progress,
+            )
+            or {}
+        )
     return dict(
-        service.status(
+        status_method(
             refresh_wechat=True,
             retest_models=True,
         )
         or {}
     )
+
+
+def _run_single_check(
+    service: OnboardingService,
+    key: str,
+    *,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Retry one visible check while filtering related service progress."""
+
+    clean_key = str(key or "").strip()
+    if clean_key not in ONBOARDING_CHECK_LABELS:
+        raise ValueError("未知的配置检查项")
+
+    def emit_target(event: dict[str, Any]) -> None:
+        if str(event.get("key") or "") == clean_key and on_progress:
+            on_progress(dict(event))
+
+    status_method = service.status
+    parameters = inspect.signature(status_method).parameters
+    if "on_progress" not in parameters:
+        return _run_auto_check(service, on_progress=emit_target)
+
+    if clean_key == "article_ai":
+        options = {"refresh_wechat": False, "retest_models": True}
+    elif clean_key in {"connection", "draft", "material"}:
+        options = {"refresh_wechat": True, "retest_models": False}
+    else:
+        options = {"refresh_wechat": False, "retest_models": False}
+    return dict(status_method(on_progress=emit_target, **options) or {})
+
+
+def _final_auto_check_events(status: dict[str, Any]) -> list[dict[str, str]]:
+    """Project the authoritative final status into the six visible checks."""
+
+    reports = [
+        dict(item)
+        for item in list(status.get("account_checks") or [])
+        if isinstance(item, dict)
+    ]
+    checks = [
+        dict(check)
+        for report in reports
+        for check in list(report.get("checks") or [])
+        if isinstance(check, dict)
+    ]
+
+    def result(
+        key: str,
+        ok: bool,
+        passed_message: str,
+        failed_message: str,
+    ) -> dict[str, str]:
+        return {
+            "key": key,
+            "state": "passed" if ok else "failed",
+            "message": passed_message if ok else failed_message,
+        }
+
+    def remote_result(progress_key: str, check_key: str) -> dict[str, str]:
+        matching = [
+            item for item in checks if str(item.get("key") or "") == check_key
+        ]
+        fallback_ok = bool(status.get("draft_ready"))
+        ok = any(bool(item.get("ok")) for item in matching) or (
+            not matching and fallback_ok
+        )
+        message = next(
+            (
+                sanitize_failure_text(item.get("message") or "")
+                for item in matching
+                if bool(item.get("ok")) == ok
+                and str(item.get("message") or "").strip()
+            ),
+            "检查通过" if ok else "检查未通过，请按提示修复",
+        )
+        return result(progress_key, ok, message, message)
+
+    account_ok = bool(
+        status.get("account_count")
+        or status.get("content_ready")
+        or status.get("draft_ready_account_ids")
+    )
+    content_ready = bool(status.get("content_ready") or status.get("core_ready"))
+    article_ai_failure = next(
+        (
+            sanitize_failure_text(item.get("message") or "")
+            for item in list(status.get("model_retest_results") or [])
+            if isinstance(item, dict)
+            and not bool(item.get("ok"))
+            and str(item.get("message") or "").strip()
+        ),
+        "文章模型不可用，请检查模型配置",
+    )
+    return [
+        result(
+            "article_ai",
+            bool(status.get("writer_ready") or status.get("model_tested")),
+            "文章模型连接正常",
+            article_ai_failure,
+        ),
+        result("account", account_ok, "公众号配置可用", "还没有可用公众号"),
+        remote_result("connection", "wechat"),
+        remote_result("draft", "draft"),
+        remote_result("material", "material"),
+        result(
+            "creation_plan",
+            content_ready,
+            "系统默认创作方案可用",
+            "请先完成文章模型与公众号绑定",
+        ),
+    ]
 
 
 def _friendly_account_error(exc: Exception) -> str:

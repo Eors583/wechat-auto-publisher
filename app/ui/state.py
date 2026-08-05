@@ -34,6 +34,7 @@ STATUS_LABEL = {
     "rendering": "排版渲染",
     "injecting": "写入草稿",
     "ready_for_review": "待选标题/预览",
+    "ready_for_draft": "待写入草稿",
     "drafted": "已写入草稿箱",
     "published": "已发布",
     "failed": "失败",
@@ -102,6 +103,7 @@ class AppState:
         self.account_selects: list[Any] = []
         self.account_option_refreshers: list[Callable[[], None]] = []
         self.task_center_refresh: Any | None = None
+        self.pending_task_center_entry: dict[str, str] | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -116,6 +118,7 @@ class AppState:
 
         self.current_user = dict(user) if user else None
         self.db.set_owner_user(self.current_user_id)
+        self.pending_task_center_entry = None
 
     def remembered_account_ids(self) -> list[str]:
         """Return the last desktop target selection, filtered by current accounts."""

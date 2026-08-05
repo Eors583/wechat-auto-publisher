@@ -696,7 +696,9 @@ class BatchService:
         review_status = str(job_contract.get("review_status") or "")
         status = str(row.get("status") or "")
         step = str(row.get("step") or "")
-        if status == "ready_for_review":
+        if status == "ready_for_review" and review_status == "confirmed":
+            recommended_action = "打开所在批次并写入公众号草稿箱"
+        elif status == "ready_for_review":
             recommended_action = (
                 "继续修改并重新确认文章"
                 if review_status == "needs_changes"
@@ -835,9 +837,11 @@ class BatchService:
             self.db.update_batch_job_review(
                 batch_id, job_id, "confirmed"
             )
-            return self._public_job(
+            result = self._public_job(
                 self._batch_job(batch_id, job_id), include_content=True
             )
+            self._notify(self.get_batch(batch_id, include_content=True))
+            return result
 
     def request_job_changes(self, batch_id: str, job_id: int) -> dict[str, Any]:
         with self.editorial_reviews.job_operation(job_id):
@@ -847,9 +851,11 @@ class BatchService:
             self.db.update_batch_job_review(
                 batch_id, job_id, "needs_changes"
             )
-            return self._public_job(
+            result = self._public_job(
                 self._batch_job(batch_id, job_id), include_content=True
             )
+            self._notify(self.get_batch(batch_id, include_content=True))
+            return result
 
     def update_job_content(
         self,

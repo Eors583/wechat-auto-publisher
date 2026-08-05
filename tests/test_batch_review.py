@@ -53,12 +53,21 @@ def test_title_selection_does_not_implicitly_confirm(tmp_path) -> None:
 
 def test_explicit_confirmation_is_persisted_in_batch(tmp_path) -> None:
     service, batch_id, job_id = _service_with_ready_job(tmp_path)
+    notifications: list[dict] = []
+    service.add_listener(lambda batch: notifications.append(batch))
     service.mark_job_viewed(batch_id, job_id)
     confirmed = service.confirm_job(batch_id, job_id)
     assert confirmed["review_status"] == "confirmed"
     progress = service.get_batch(batch_id)["progress"]
     assert progress["confirmed"] == 1
+    assert progress["ready_for_draft"] == 1
     assert progress["unconfirmed"] == 0
+    assert service.get_batch(batch_id)["status"] == "ready_for_draft"
+    assert notifications[-1]["status"] == "ready_for_draft"
+
+    service.request_job_changes(batch_id, job_id)
+    assert service.get_batch(batch_id)["status"] == "ready_for_review"
+    assert notifications[-1]["status"] == "ready_for_review"
 
 
 def test_unviewed_job_cannot_be_confirmed(tmp_path) -> None:

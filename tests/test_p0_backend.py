@@ -125,6 +125,14 @@ def test_review_inbox_counts_pagination_priority_and_failure(tmp_path) -> None:
         status="ready_for_review",
         step="inject",
     )
+    ready_for_draft_id = _batch_job(
+        db,
+        batch_id="ready-for-draft",
+        account_id="normal",
+        status="ready_for_review",
+        step="inject",
+        review_status="confirmed",
+    )
     write_failed_id = _batch_job(
         db,
         batch_id="write-failed",
@@ -174,6 +182,7 @@ def test_review_inbox_counts_pagination_priority_and_failure(tmp_path) -> None:
     first = service.list_review_inbox(limit=2)
     assert first["counts"] == {
         "review": 4,
+        "ready_for_draft": 1,
         "write_failed": 1,
         "generation_failed": 1,
         "today_completed": 1,
@@ -205,6 +214,11 @@ def test_review_inbox_counts_pagination_priority_and_failure(tmp_path) -> None:
     assert service.list_review_inbox(bucket="today_completed")["items"][0][
         "job_id"
     ] == drafted_id
+    draft_page = service.list_review_inbox(bucket="ready_for_draft")
+    assert draft_page["items"][0]["job_id"] == ready_for_draft_id
+    assert draft_page["items"][0]["recommended_action"] == (
+        "打开所在批次并写入公众号草稿箱"
+    )
 
 
 def test_review_inbox_scopes_before_pagination_and_counting(tmp_path) -> None:

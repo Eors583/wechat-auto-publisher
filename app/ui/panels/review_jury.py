@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -8,9 +10,7 @@ from nicegui import run, ui
 from app.config import load_config
 from app.editorial_review import REVIEW_ROLES
 from app.services.batches import BatchService
-from app.ui.lifecycle import client_timer
 from app.ui.state import set_button_loading
-
 
 SEVERITY_LABELS = {
     "high": "高优先级",
@@ -29,6 +29,67 @@ RESOLUTION_LABELS = {
     "resolved": "已核实",
     "waived": "已接受风险",
 }
+
+
+_MISSING_DIMENSION_SCORE_SUMMARIES = {
+    "本次评审未单独返回该项判断。",
+    "本次评审未单独返回该项判断",
+}
+
+
+def _format_dimension_score(
+    value: Any,
+    *,
+    summary: Any = "",
+    score_available: Any = None,
+) -> str:
+    """Keep a missing model score distinct from an explicit numeric zero."""
+
+    if score_available is False:
+        return "—"
+    if score_available is not True and str(summary or "").strip() in (
+        _MISSING_DIMENSION_SCORE_SUMMARIES
+    ):
+        return "—"
+    if value is None or isinstance(value, bool):
+        return "—"
+    if isinstance(value, str) and not value.strip():
+        return "—"
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if not math.isfinite(score):
+        return "—"
+    return str(int(score))
+
+
+def _add_accessible_removal_chips(select: Any, *, item_name: str) -> None:
+    """Give each Quasar chip removal control a specific Chinese name."""
+
+    select.add_slot(
+        "selected-item",
+        f"""
+        <q-chip
+          dense
+          removable
+          :selected="props.selected"
+          :tabindex="props.tabindex"
+          :remove-aria-label="'移除{item_name}：' + props.opt.label"
+          @remove="props.removeAtIndex(props.index)"
+        ><span class="ellipsis">{{{{ props.opt.label }}}}</span></q-chip>
+        """,
+    )
+
+
+def _review_start_action(review: dict[str, Any] | None) -> tuple[str, bool, bool]:
+    """Return label, disabled state and whether starting needs confirmation."""
+
+    if not review:
+        return "开始 AI 评审", False, False
+    if str(review.get("status") or "") in {"running", "rewriting"}:
+        return "AI 评审中", True, False
+    return "重新评审", False, True
 
 
 def _issue_can_auto_apply(issue: dict[str, Any]) -> bool:
@@ -56,7 +117,8 @@ def build_review_jury_panel(
     is_workbench_alive: Callable[[], bool] | None = None,
     on_background_review: Callable[..., bool] | None = None,
     on_enter_background: Callable[[], None] | None = None,
-) -> None:
+    on_review_updated: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     """Render the manual AI editorial jury inside the shared review workbench.
 
     The component never closes or rebuilds the parent workbench. Applying a
@@ -65,6 +127,9 @@ def build_review_jury_panel(
     """
 
     owner_client = ui.context.client
+    result_anchor_id = f"editorial-review-result-{job_id}"
+    settings_anchor_id = f"editorial-review-settings-{job_id}"
+    comparison_anchor_id = f"editorial-review-comparison-{job_id}"
 
     def ui_alive() -> bool:
         if bool(getattr(owner_client, "is_deleted", False)):
@@ -75,6 +140,35 @@ def build_review_jury_panel(
             return bool(is_workbench_alive())
         except RuntimeError:
             return False
+
+    def scroll_dom_target(target_id: str) -> None:
+        """Scroll after Vue applies visibility changes, without a UI timer."""
+
+        if not ui_alive():
+            return
+        target_literal = json.dumps(target_id)
+        try:
+            owner_client.run_javascript(
+                "(() => {"
+                f"const targetId={target_literal};"
+                "const scroll=()=>{"
+                "const target=document.getElementById(targetId);"
+                "if(!target){return false;}"
+                "target.scrollIntoView({behavior:'auto',block:'start',"
+                "inline:'nearest'});"
+                "return true;"
+                "};"
+                "requestAnimationFrame(()=>requestAnimationFrame(scroll));"
+                "setTimeout(scroll,80);"
+                "setTimeout(scroll,180);"
+                "})();"
+            )
+        except RuntimeError:
+            return
+
+    def notify_review_updated(review: dict[str, Any]) -> None:
+        if on_review_updated is not None:
+            on_review_updated(dict(review))
 
     options = service.get_editorial_review_options()
     profiles = [
@@ -138,77 +232,147 @@ def build_review_jury_panel(
             "优先级：事实与合规底线 ＞ 公众号品牌规则 ＞ 用户选择的目标风格"
         ).classes("text-warning text-caption")
 
-        profile_in = ui.select(
-            profile_options,
-            value=initial_profile_id or None,
-            label="评审方案",
-        ).classes("w-full q-mt-sm").props(
-            "outlined dense stack-label options-dense"
+        result_section = ui.column().classes(
+            "editorial-review-result-anchor w-full gap-3 q-mt-md"
         )
-        with ui.grid(columns=2).classes("w-full gap-3"):
-            roles_in = ui.select(
-                role_options,
-                value=list(initial_config.get("role_ids") or []),
-                label="评审角色（可多选）",
-                multiple=True,
-            ).classes("w-full").props(
-                "outlined dense stack-label options-dense use-chips"
-            )
-            styles_in = ui.select(
-                style_options,
-                value=list(initial_config.get("style_ids") or []),
-                label="目标风格（可多选）",
-                multiple=True,
-            ).classes("w-full").props(
-                "outlined dense stack-label options-dense use-chips"
-            )
-        strictness_in = ui.toggle(
-            strictness_options,
-            value=str(initial_config.get("strictness") or "standard"),
-        ).classes("q-mt-xs")
+        with result_section:
+            result_card = ui.card().classes("w-full q-pa-md").style(
+                "border:1px solid #cbded8;box-shadow:none"
+            ).props(f"id={result_anchor_id}")
+            with result_card:
+                result_host = ui.column().classes("w-full gap-3")
+                comparison_section = ui.column().classes(
+                    "w-full gap-3 q-mt-md"
+                ).props(f"id={comparison_anchor_id}")
+                with comparison_section:
+                    comparison_host = ui.column().classes("w-full gap-3")
+                comparison_section.set_visibility(False)
+        result_section.set_visibility(False)
+        result_summary_host = ui.column().classes("w-full gap-2 q-mt-sm")
+        start_action_host = ui.column().classes("w-full items-start q-mt-sm")
 
-        with ui.expansion("自定义本次评审规则", icon="tune", value=False).classes(
-            "w-full"
-        ):
-            focus_in = ui.textarea(
-                "评审重点",
-                value=str(initial_config.get("focus") or ""),
-                placeholder="例如：强化标题点击力、开头留存和转发价值，保留专业克制的品牌语气",
-            ).classes("w-full").props(
-                "outlined rows=3 stack-label maxlength=4000 counter"
+        def settings_summary_text(
+            profile_id: str,
+            strictness: str,
+            role_ids: list[str],
+        ) -> str:
+            profile_name = str(
+                (profile_map.get(profile_id) or {}).get("name")
+                or profile_options.get(profile_id)
+                or "默认评审方案"
+            ).replace("（内置）", "")
+            strictness_name = strictness_options.get(strictness, strictness)
+            return f"{profile_name} · {strictness_name} · {len(role_ids)} 个角色"
+
+        with ui.column().classes(
+            "editorial-review-settings-anchor w-full gap-1 q-mt-sm"
+        ).props(f"id={settings_anchor_id}"):
+            settings_summary_label = ui.label(
+                settings_summary_text(
+                    initial_profile_id,
+                    str(initial_config.get("strictness") or "standard"),
+                    list(initial_config.get("role_ids") or []),
+                )
+            ).classes("muted text-caption")
+            settings_expansion = ui.expansion(
+                "调整本次评审设置",
+                icon="tune",
+                value=False,
+            ).classes("w-full").props("dense header-class=text-blue-grey-8")
+            with settings_expansion:
+                profile_in = ui.select(
+                    profile_options,
+                    value=initial_profile_id or None,
+                    label="评审方案",
+                ).classes("w-full q-mt-sm").props(
+                    "outlined dense stack-label options-dense"
+                )
+                with ui.grid(columns=2).classes("w-full gap-3"):
+                    roles_in = ui.select(
+                        role_options,
+                        value=list(initial_config.get("role_ids") or []),
+                        label="评审角色（可多选）",
+                        multiple=True,
+                    ).classes("w-full").props(
+                        "outlined dense stack-label options-dense use-chips"
+                    )
+                    _add_accessible_removal_chips(
+                        roles_in,
+                        item_name="评审角色",
+                    )
+                    styles_in = ui.select(
+                        style_options,
+                        value=list(initial_config.get("style_ids") or []),
+                        label="目标风格（可多选）",
+                        multiple=True,
+                    ).classes("w-full").props(
+                        "outlined dense stack-label options-dense use-chips"
+                    )
+                    _add_accessible_removal_chips(
+                        styles_in,
+                        item_name="目标风格",
+                    )
+                strictness_in = ui.toggle(
+                    strictness_options,
+                    value=str(initial_config.get("strictness") or "standard"),
+                ).classes("q-mt-xs")
+
+                with ui.expansion(
+                    "自定义本次评审规则",
+                    icon="settings_suggest",
+                    value=False,
+                ).classes("w-full"):
+                    focus_in = ui.textarea(
+                        "评审重点",
+                        value=str(initial_config.get("focus") or ""),
+                        placeholder="例如：强化标题点击力、开头留存和转发价值，保留专业克制的品牌语气",
+                    ).classes("w-full").props(
+                        "outlined rows=3 stack-label maxlength=4000 counter"
+                    )
+                    audience_in = ui.input(
+                        "期望读者",
+                        value=str(initial_config.get("target_audience") or ""),
+                        placeholder="例如：企业经营者、中高层管理者",
+                    ).classes("w-full").props(
+                        "outlined stack-label maxlength=1000"
+                    )
+                    with ui.grid(columns=2).classes("w-full gap-3"):
+                        required_in = ui.textarea(
+                            "必须检查项（每行一项）",
+                            value=_join_lines(initial_config.get("required_checks")),
+                        ).classes("w-full").props("outlined rows=4 stack-label")
+                        ignored_in = ui.textarea(
+                            "忽略项（每行一项）",
+                            value=_join_lines(initial_config.get("ignored_items")),
+                        ).classes("w-full").props("outlined rows=4 stack-label")
+                        banned_in = ui.textarea(
+                            "禁用表达（每行一项）",
+                            value=_join_lines(initial_config.get("banned_expressions")),
+                        ).classes("w-full").props("outlined rows=4 stack-label")
+                        must_keep_in = ui.textarea(
+                            "必须保留内容（每行一项）",
+                            value=_join_lines(initial_config.get("must_keep")),
+                        ).classes("w-full").props("outlined rows=4 stack-label")
+                    advanced_in = ui.textarea(
+                        "高级业务评审规则",
+                        value=str(initial_config.get("advanced_rules") or ""),
+                        placeholder=(
+                            "只填写业务规则。JSON 输出、评分字段和阶段协议由系统管理，"
+                            "不能在这里修改。"
+                        ),
+                    ).classes("w-full").props(
+                        "outlined rows=5 stack-label maxlength=8000 counter"
+                    )
+
+        def current_settings_summary() -> str:
+            return settings_summary_text(
+                str(profile_in.value or ""),
+                str(strictness_in.value or "standard"),
+                list(roles_in.value or []),
             )
-            audience_in = ui.input(
-                "期望读者",
-                value=str(initial_config.get("target_audience") or ""),
-                placeholder="例如：企业经营者、中高层管理者",
-            ).classes("w-full").props("outlined stack-label maxlength=1000")
-            with ui.grid(columns=2).classes("w-full gap-3"):
-                required_in = ui.textarea(
-                    "必须检查项（每行一项）",
-                    value=_join_lines(initial_config.get("required_checks")),
-                ).classes("w-full").props("outlined rows=4 stack-label")
-                ignored_in = ui.textarea(
-                    "忽略项（每行一项）",
-                    value=_join_lines(initial_config.get("ignored_items")),
-                ).classes("w-full").props("outlined rows=4 stack-label")
-                banned_in = ui.textarea(
-                    "禁用表达（每行一项）",
-                    value=_join_lines(initial_config.get("banned_expressions")),
-                ).classes("w-full").props("outlined rows=4 stack-label")
-                must_keep_in = ui.textarea(
-                    "必须保留内容（每行一项）",
-                    value=_join_lines(initial_config.get("must_keep")),
-                ).classes("w-full").props("outlined rows=4 stack-label")
-            advanced_in = ui.textarea(
-                "高级业务评审规则",
-                value=str(initial_config.get("advanced_rules") or ""),
-                placeholder=(
-                    "只填写业务规则。JSON 输出、评分字段和阶段协议由系统管理，"
-                    "不能在这里修改。"
-                ),
-            ).classes("w-full").props(
-                "outlined rows=5 stack-label maxlength=8000 counter"
-            )
+
+        def refresh_settings_summary() -> None:
+            settings_summary_label.set_text(current_settings_summary())
 
         def load_profile_config(profile_id: str) -> None:
             config = dict((profile_map.get(str(profile_id)) or {}).get("config") or {})
@@ -224,10 +388,13 @@ def build_review_jury_panel(
             banned_in.value = _join_lines(config.get("banned_expressions"))
             must_keep_in.value = _join_lines(config.get("must_keep"))
             advanced_in.value = str(config.get("advanced_rules") or "")
+            refresh_settings_summary()
 
         profile_in.on_value_change(
             lambda event: load_profile_config(str(event.value or ""))
         )
+        roles_in.on_value_change(lambda _: refresh_settings_summary())
+        strictness_in.on_value_change(lambda _: refresh_settings_summary())
 
         def collect_config() -> dict[str, Any]:
             profile = profile_map.get(str(profile_in.value or "")) or {}
@@ -248,51 +415,26 @@ def build_review_jury_panel(
             )
             return config
 
-        result_summary_host = ui.column().classes("w-full gap-2 q-mt-sm")
-        result_section = ui.column().classes("w-full gap-3 q-mt-md")
-        with result_section:
-            with ui.card().classes("w-full q-pa-md").style(
-                "border:1px solid #cbded8;box-shadow:none"
-            ):
-                result_host = ui.column().classes("w-full gap-3")
-                comparison_section = ui.column().classes(
-                    "w-full gap-3 q-mt-md"
-                )
-                with comparison_section:
-                    comparison_host = ui.column().classes("w-full gap-3")
-                comparison_section.set_visibility(False)
-        result_section.set_visibility(False)
-
         async def scroll_to_review_result() -> None:
             """Reveal the inline conclusion and keep the current workbench open."""
 
             if not ui_alive():
                 return
             review_expansion.value = True
+            settings_expansion.value = False
             result_section.set_visibility(True)
 
-            def perform_scroll() -> None:
-                """Scroll only after the visibility update reached the browser."""
+            scroll_dom_target(result_anchor_id)
 
-                if not ui_alive():
-                    return
-                try:
-                    result_section.run_method(
-                        "scrollIntoView",
-                        {"behavior": "smooth", "block": "start"},
-                    )
-                except RuntimeError:
-                    return
+        async def scroll_to_review_settings() -> None:
+            """Expand only the settings requested by the operator and focus them."""
 
-            # NiceGUI flushes element visibility after the current event handler
-            # returns. A one-shot client timer therefore makes the first click
-            # scroll reliably instead of requiring a second click.
-            client_timer(
-                0.08,
-                perform_scroll,
-                once=True,
-                immediate=False,
-            )
+            if not ui_alive():
+                return
+            review_expansion.value = True
+            settings_expansion.value = True
+
+            scroll_dom_target(settings_anchor_id)
 
         async def scroll_to_article_comparison() -> None:
             """Reveal and scroll to the stable before/after comparison anchor."""
@@ -303,23 +445,7 @@ def build_review_jury_panel(
             result_section.set_visibility(True)
             comparison_section.set_visibility(True)
 
-            def perform_scroll() -> None:
-                if not ui_alive():
-                    return
-                try:
-                    comparison_section.run_method(
-                        "scrollIntoView",
-                        {"behavior": "smooth", "block": "start"},
-                    )
-                except RuntimeError:
-                    return
-
-            client_timer(
-                0.08,
-                perform_scroll,
-                once=True,
-                immediate=False,
-            )
+            scroll_dom_target(comparison_anchor_id)
 
         def render_article_comparison(
             review: dict[str, Any] | None,
@@ -460,12 +586,6 @@ def build_review_jury_panel(
                 "标题、开头、阅读节奏和互动价值，原稿事实与核心观点保持不变。"
             ).classes("muted")
 
-            async def use_original() -> None:
-                ui.notify(
-                    "已保留原文，本次 AI 评审没有修改文章内容",
-                    type="positive",
-                )
-
             async def smart_rewrite() -> None:
                 if not require_saved_editor():
                     return
@@ -515,7 +635,7 @@ def build_review_jury_panel(
                 except Exception as exc:  # noqa: BLE001
                     if ui_alive():
                         ui.notify(
-                            f"智能修改原文失败：{exc}",
+                            f"整篇优化失败：{exc}",
                             type="negative",
                             timeout=12000,
                         )
@@ -524,6 +644,7 @@ def build_review_jury_panel(
                         set_button_loading(smart_btn, False)
                 if refreshed_review is not None and ui_alive():
                     runtime["review"] = refreshed_review
+                    notify_review_updated(refreshed_review)
                     render_review_result(
                         refreshed_review,
                         include_comparison=False,
@@ -547,12 +668,8 @@ def build_review_jury_panel(
                         await scroll_to_review_result()
 
             with ui.row().classes("w-full justify-end q-gutter-sm q-mt-sm"):
-                ui.button(
-                    "使用原文",
-                    on_click=use_original,
-                ).props("outline color=blue-grey-7 no-caps icon=description")
                 smart_btn = ui.button(
-                    "智能修改原文",
+                    "按所选建议优化整篇",
                     on_click=smart_rewrite,
                 ).props("unelevated color=indigo-7 no-caps icon=auto_fix_high")
 
@@ -568,24 +685,17 @@ def build_review_jury_panel(
                 with ui.card().classes("w-full q-pa-md").style(
                     "border:1px solid #dbe8e4;box-shadow:none"
                 ):
-                    with ui.row().classes("w-full items-center justify-between"):
-                        with ui.column().classes("gap-0"):
-                            ui.label("AI 评审已完成").classes(
-                                "text-subtitle1 text-weight-bold"
-                            )
-                            ui.label(
-                                str(
-                                    result.get("conclusion")
-                                    or result.get("summary")
-                                    or "点击查看评审结论和改进意见"
-                                )
-                            ).classes("muted")
-                        ui.button(
-                            "查看评审结论",
-                            on_click=scroll_to_review_result,
-                        ).props(
-                            "outline color=indigo-7 no-caps icon=rate_review"
+                    with ui.column().classes("gap-0"):
+                        ui.label("AI 评审已完成").classes(
+                            "text-subtitle1 text-weight-bold"
                         )
+                        ui.label(
+                            str(
+                                result.get("conclusion")
+                                or result.get("summary")
+                                or "评审结论和改进意见已生成"
+                            )
+                        ).classes("muted")
 
         def render_review_result(
             review: dict[str, Any] | None,
@@ -710,6 +820,11 @@ def build_review_jury_panel(
                         ).classes("muted text-caption")
                     with ui.grid(columns=5).classes("w-full gap-2"):
                         for dimension in dimensions:
+                            score_text = _format_dimension_score(
+                                dimension.get("score"),
+                                summary=dimension.get("summary"),
+                                score_available=dimension.get("score_available"),
+                            )
                             with ui.card().classes("q-pa-sm").style(
                                 "border:1px solid #dfe8e5;box-shadow:none"
                             ):
@@ -717,9 +832,13 @@ def build_review_jury_panel(
                                     str(dimension.get("name") or "运营潜力")
                                 ).classes("text-caption text-weight-bold")
                                 ui.label(
-                                    str(int(dimension.get("score") or 0))
+                                    score_text
                                 ).classes("text-h6 text-indigo-8")
-                                if dimension.get("summary"):
+                                if score_text == "—":
+                                    ui.label(
+                                        "本次评审未返回该项评分"
+                                    ).classes("muted text-caption")
+                                elif dimension.get("summary"):
                                     ui.label(
                                         str(dimension.get("summary") or "")
                                     ).classes("muted text-caption")
@@ -808,22 +927,6 @@ def build_review_jury_panel(
                                 "这类提醒不会交给 AI 猜测或改写。您无需填写意见，"
                                 "只需选择核实结果。"
                             ).classes("muted text-caption")
-                            with ui.row().classes("items-center"):
-                                verified_btn = ui.button(
-                                    "我已核实",
-                                ).props(
-                                    "outline dense color=teal-8 no-caps icon=fact_check"
-                                )
-                                waive_btn = ui.button(
-                                    "保留原文并接受风险",
-                                ).props(
-                                    "outline dense color=deep-orange-7 no-caps icon=warning"
-                                )
-                                reopen_btn = ui.button(
-                                    "恢复待核实",
-                                ).props(
-                                    "flat dense color=blue-grey-7 no-caps icon=undo"
-                                )
 
                             async def resolve_issue(
                                 resolution_value: str,
@@ -869,18 +972,14 @@ def build_review_jury_panel(
                                         set_button_loading(button, False)
                                 if updated_review is not None and ui_alive():
                                     runtime["review"] = updated_review
+                                    notify_review_updated(updated_review)
                                     render_review_result(updated_review)
                                     render_review_summary(updated_review)
                                     await scroll_to_review_result()
 
-                            verified_btn.on_click(
-                                lambda _=None, button=verified_btn, handler=resolve_issue: handler(
-                                    "resolved", button
-                                )
-                            )
                             def open_waive_confirmation(
                                 *,
-                                button: Any = waive_btn,
+                                button: Any,
                                 handler: Any = resolve_issue,
                             ) -> None:
                                 with ui.dialog() as confirm, ui.card():
@@ -908,12 +1007,54 @@ def build_review_jury_panel(
                                         )
                                 confirm.open()
 
-                            waive_btn.on_click(open_waive_confirmation)
-                            reopen_btn.on_click(
-                                lambda _=None, button=reopen_btn, handler=resolve_issue: handler(
-                                    "open", button
+                            if resolution == "open":
+                                with ui.row().classes("items-center"):
+                                    verified_btn = ui.button(
+                                        "我已核实",
+                                    ).props(
+                                        "outline dense color=teal-8 no-caps icon=fact_check"
+                                    )
+                                    waive_btn = ui.button(
+                                        "保留原文并接受风险",
+                                    ).props(
+                                        "outline dense color=deep-orange-7 no-caps icon=warning"
+                                    )
+                                verified_btn.on_click(
+                                    lambda _=None, button=verified_btn, handler=resolve_issue: handler(
+                                        "resolved", button
+                                    )
                                 )
-                            )
+                                waive_btn.on_click(
+                                    lambda _=None,
+                                    button=waive_btn,
+                                    open_confirmation=open_waive_confirmation: open_confirmation(
+                                        button=button
+                                    )
+                                )
+                            else:
+                                resolved_by = str(
+                                    issue.get("resolved_by") or "运营人员"
+                                )
+                                resolved_at = str(issue.get("resolved_at") or "")
+                                ui.label(
+                                    "处理记录："
+                                    + resolved_by
+                                    + (f" · {resolved_at}" if resolved_at else "")
+                                ).classes("muted text-caption")
+                                if issue.get("resolution_note"):
+                                    ui.label(
+                                        f'处理说明：{issue["resolution_note"]}'
+                                    ).classes("muted text-caption")
+                                reopen_btn = ui.button(
+                                    "恢复待核实",
+                                ).props(
+                                    "flat dense color=blue-grey-7 no-caps icon=undo"
+                                )
+                                reopen_btn.on_click(
+                                    lambda _=None, button=reopen_btn, handler=resolve_issue: handler(
+                                        "open", button
+                                    )
+                                )
                 render_rewrite_controls(review)
 
         async def start_review() -> None:
@@ -944,6 +1085,11 @@ def build_review_jury_panel(
                     operation=run_review,
                 )
                 if started:
+                    runtime["review"] = {
+                        **dict(runtime.get("review") or {}),
+                        "status": "running",
+                    }
+                    sync_start_button()
                     ui.notify(
                         "AI 评审已转入后台，可继续处理其他文章；右侧可查看进度。",
                         type="positive",
@@ -968,6 +1114,7 @@ def build_review_jury_panel(
                 runtime["review"] = review
                 runtime["application"] = None
                 runtime["selected_issue_ids"].clear()
+                notify_review_updated(review)
                 render_review_result(review)
                 render_review_summary(review)
                 completed_review = review
@@ -979,20 +1126,89 @@ def build_review_jury_panel(
             except Exception as exc:  # noqa: BLE001
                 if ui_alive():
                     ui.notify(f"AI 评审失败：{exc}", type="negative", timeout=12000)
+                    try:
+                        failed_reviews = await run.io_bound(
+                            lambda: service.list_editorial_reviews(
+                                job_id=job_id,
+                                limit=1,
+                            )
+                        )
+                    except Exception:  # noqa: BLE001
+                        failed_reviews = []
+                    if failed_reviews:
+                        runtime["review"] = failed_reviews[0]
+                        notify_review_updated(failed_reviews[0])
+                        render_review_result(failed_reviews[0])
+                        render_review_summary(failed_reviews[0])
             finally:
                 if ui_alive():
                     set_button_loading(start_btn, False)
+                    sync_start_button()
             if completed_review is not None:
                 if ui_alive():
                     await scroll_to_review_result()
 
-        start_btn = ui.button(
-            "转入后台评审" if on_background_review is not None else "开始 AI 评审",
-            on_click=start_review,
-        ).props("unelevated color=indigo-7 no-caps icon=move_to_inbox")
-        ui.label(
-            "评审和生成修改稿会调用该公众号绑定的文本模型，可能产生模型费用。"
-        ).classes("muted text-caption")
+        async def request_review_start() -> None:
+            """Require an explicit decision before replacing an existing review."""
+
+            _label, disabled, requires_confirmation = _review_start_action(
+                dict(runtime.get("review") or {}) or None
+            )
+            if disabled:
+                ui.notify("AI 评审正在进行中，请等待完成", type="info")
+                return
+            if not requires_confirmation:
+                await start_review()
+                return
+
+            with ui.dialog() as confirm_rerun, ui.card().classes("q-pa-md"):
+                ui.label("确认重新评审？").classes(
+                    "text-subtitle1 text-weight-bold"
+                )
+                ui.label(
+                    "重新评审会调用该公众号绑定的文本模型并产生一次新的评审记录；"
+                    "现有评审记录会保留。"
+                ).classes("muted")
+
+                async def confirm_review_rerun() -> None:
+                    confirm_rerun.close()
+                    await start_review()
+
+                with ui.row().classes("w-full justify-end q-gutter-sm"):
+                    ui.button(
+                        "取消",
+                        on_click=confirm_rerun.close,
+                    ).props("flat no-caps")
+                    ui.button(
+                        "确认重新评审",
+                        on_click=confirm_review_rerun,
+                    ).props("unelevated color=indigo-7 no-caps")
+            confirm_rerun.open()
+
+        def sync_start_button() -> None:
+            label, disabled, _requires_confirmation = _review_start_action(
+                dict(runtime.get("review") or {}) or None
+            )
+            start_btn.set_text(label)
+            start_btn.props(remove="unelevated outline flat color icon")
+            if label == "重新评审":
+                start_btn.props(add="flat color=blue-grey-7 icon=refresh")
+            else:
+                start_btn.props(add="unelevated color=indigo-7 icon=rate_review")
+            if disabled:
+                start_btn.disable()
+            else:
+                start_btn.enable()
+
+        with start_action_host:
+            start_btn = ui.button(
+                "开始 AI 评审",
+                on_click=request_review_start,
+            ).props("no-caps")
+            sync_start_button()
+            ui.label(
+                "评审和生成修改稿会调用该公众号绑定的文本模型，可能产生模型费用。"
+            ).classes("muted text-caption")
 
         if runtime["review"]:
             applications = service.list_editorial_review_applications(
@@ -1001,6 +1217,14 @@ def build_review_jury_panel(
             runtime["application"] = applications[0] if applications else None
             render_review_result(runtime["review"])
             render_review_summary(runtime["review"])
+            result_section.set_visibility(True)
+
+    return {
+        "reveal_result": scroll_to_review_result,
+        "reveal_settings": scroll_to_review_settings,
+        "start_review": request_review_start,
+        "settings_summary": current_settings_summary,
+    }
 
 
 def build_editorial_review_profiles_panel(

@@ -8,7 +8,6 @@ from pathlib import Path
 from app.db import Database
 from app.ui.panels import tasks
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "app" / "ui" / "desktop.py"
 STYLES = ROOT / "app" / "ui" / "styles.py"
@@ -47,6 +46,7 @@ def test_review_inbox_adapter_prefers_service_contract_and_normalizes_counts() -
         "items": [{"job_id": 7, "title": "待审核文章"}],
         "counts": {
             "review": 3,
+            "ready_for_draft": 0,
             "write_failed": 1,
             "generation_failed": 0,
             "today_completed": 0,
@@ -207,7 +207,7 @@ def test_review_inbox_database_filters_before_pagination(tmp_path) -> None:
     assert db.has_active_batches() is False
 
 
-def test_legacy_service_fallback_projects_all_four_inbox_buckets() -> None:
+def test_legacy_service_fallback_projects_all_inbox_buckets() -> None:
     today = datetime.now().date().isoformat()
     batches = [
         {
@@ -243,6 +243,15 @@ def test_legacy_service_fallback_projects_all_four_inbox_buckets() -> None:
                     "error": "model failed",
                 },
                 {
+                    "id": 5,
+                    "status": "ready_for_review",
+                    "step": "inject",
+                    "review_status": "confirmed",
+                    "account_id": "a",
+                    "account_name": "高优先级号",
+                    "selected_title": "待写入文章",
+                },
+                {
                     "id": 4,
                     "status": "drafted",
                     "step": "inject",
@@ -261,12 +270,19 @@ def test_legacy_service_fallback_projects_all_four_inbox_buckets() -> None:
     )
     assert review["counts"] == {
         "review": 1,
+        "ready_for_draft": 1,
         "write_failed": 1,
         "generation_failed": 1,
         "today_completed": 1,
     }
     assert review["items"][0]["review_status"] == "needs_changes"
     assert review["items"][0]["priority_reason"] == "已标记需要修改"
+
+    ready_for_draft = tasks._fallback_review_inbox(  # noqa: SLF001
+        batches,
+        bucket="ready_for_draft",
+    )
+    assert ready_for_draft["items"][0]["job_id"] == 5
 
     account_filtered = tasks._fallback_review_inbox(  # noqa: SLF001
         batches,
@@ -277,13 +293,14 @@ def test_legacy_service_fallback_projects_all_four_inbox_buckets() -> None:
     assert account_filtered["counts"]["generation_failed"] == 0
 
 
-def test_task_center_defaults_to_inbox_and_exposes_four_counts() -> None:
+def test_task_center_defaults_to_inbox_and_exposes_draft_ready_count() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
 
     assert '"inbox": "待处理收件箱"' in source
     assert 'value="inbox"' in source
     assert 'runtime["inbox_bucket"]' in source
     assert "INBOX_BUCKETS.items()" in source
+    assert '"ready_for_draft"' in source
     assert "_render_inbox_article_card(" in source
     assert "_render_batch_card(" in source
 
@@ -410,8 +427,14 @@ def test_review_workbench_is_quick_by_default_and_deep_edit_is_in_place() -> Non
     assert "render_quick_review_summary()" in mode_source
     assert "尚未进行 AI 评审" in mode_source
     assert "手动开始 AI 评审" not in mode_source
-    assert 'if latest_review:' in mode_source
-    assert '"查看完整评审"' in mode_source
+    assert "_quick_review_action(" in mode_source
+    assert '"查看完整评审"' not in mode_source
+    assert "review_jury_actions.update(build_review_jury_panel(" in mode_source
+    assert "await reveal_result()" in mode_source
+    assert "await reveal_settings()" in mode_source
+    assert mode_source.index("quick_summary_host =") < mode_source.index(
+        "title_choice ="
+    )
     assert "当前封面" in mode_source
     assert "阻断摘要" in mode_source
 
@@ -548,6 +571,85 @@ def test_quick_footer_has_direct_decisions_and_deep_only_edit_actions() -> None:
     assert "quick_review_actions.append(needs_changes_btn)" in source
     assert "control.set_visibility(show_deep_editor)" in source
     assert "control.set_visibility(not show_deep_editor)" in source
+
+
+def test_confirmation_gate_blocks_running_and_open_risks() -> None:
+    assert tasks._review_confirmation_gate(None) == ("", 0)  # noqa: SLF001
+    assert tasks._review_confirmation_gate(  # noqa: SLF001
+        {"status": "running", "blocking_count": 0}
+    ) == ("AI 评审仍在进行中", 0)
+    assert tasks._review_confirmation_gate(  # noqa: SLF001
+        {"status": "completed", "blocking_count": 2}
+    ) == ("AI 评审仍有 2 个阻断项待处理", 2)
+
+
+def test_quick_review_action_covers_unreviewed_running_completed_and_failed() -> None:
+    assert tasks._quick_review_action(None) == (  # noqa: SLF001
+        "开始 AI 评审",
+        "primary",
+        False,
+    )
+    assert tasks._quick_review_action(  # noqa: SLF001
+        {"status": "running"}
+    ) == ("AI 评审进行中…", "running", True)
+    assert tasks._quick_review_action(  # noqa: SLF001
+        {"status": "completed"}
+    ) == ("查看评审结论", "result", False)
+    assert tasks._quick_review_action(  # noqa: SLF001
+        {"status": "failed"}
+    ) == ("重新评审", "rerun", False)
+
+
+def test_quick_review_uses_the_shared_start_action_and_default_summary() -> None:
+    source = inspect.getsource(tasks.open_review_workbench)
+
+    assert 'review_jury_actions.get("start_review")' in source
+    assert 'review_jury_actions.get("settings_summary")' in source
+    assert '"调整设置"' in source
+    assert "on_click=start_initial_review_from_quick" in source
+    assert 'button.set_text("AI 评审进行中…")' in source
+    assert "button.disable()" in source
+    assert "on_click=reveal_review_settings" in source
+
+
+def test_confirm_rechecks_gate_before_invoking_confirmation_endpoint() -> None:
+    source = inspect.getsource(tasks.open_review_workbench)
+    start = source.index("async def confirm()")
+    end = source.index("\n        def needs_changes", start)
+    confirm_source = source[start:end]
+
+    assert "service.list_editorial_reviews(" in confirm_source
+    assert "if reason:" in confirm_source
+    assert "await reveal_deep_review()" in confirm_source
+    assert confirm_source.index("if reason:") < confirm_source.index(
+        "service.confirm_job("
+    )
+
+
+def test_blocking_footer_is_disabled_with_an_adjacent_processing_action() -> None:
+    source = inspect.getsource(tasks.open_review_workbench)
+    start = source.index("def sync_confirm_gate")
+    end = source.index("async def confirm()", start)
+    gate_source = source[start:end]
+
+    assert 'confirm_btn.set_text(f"先处理 {blocking_count} 个阻断项")' in gate_source
+    assert "confirm_btn.disable()" in gate_source
+    assert "go_process_btn.set_visibility(True)" in gate_source
+    assert 'confirm_btn.set_text("确认此文章")' in gate_source
+    assert "confirm_btn.enable()" in gate_source
+    assert '"去处理"' in source
+    assert "on_review_updated=handle_review_updated" in source
+
+
+def test_ai_rewrite_names_state_their_scope_and_footer_has_clearance() -> None:
+    source = inspect.getsource(tasks.open_review_workbench)
+    styles = STYLES.read_text(encoding="utf-8")
+
+    assert '"AI 定点改写（单段）"' in source
+    assert '"按要求改写所选段落"' in source
+    assert 'classes("review-action-spacer")' in source
+    assert ".review-action-spacer" in styles
+    assert "safe-area-inset-bottom" in styles
 
 
 def test_needs_changes_keeps_workbench_open_and_reveals_deep_editor() -> None:

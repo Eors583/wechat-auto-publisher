@@ -5,7 +5,6 @@ from typing import Any
 
 from app.services.batch_progress import batch_progress_signature
 
-
 STATUS_LABELS = {
     "pending": "等待开始",
     "ingesting": "抓取原文",
@@ -13,6 +12,7 @@ STATUS_LABELS = {
     "title_optimizing": "生成标题与副标题",
     "rendering": "套用排版和模板",
     "ready_for_review": "等待审核",
+    "ready_for_draft": "等待写入草稿箱",
     "injecting": "写入草稿箱",
     "drafted": "已写入草稿箱",
     "failed": "失败",
@@ -41,6 +41,11 @@ class FeishuProgressReporter:
         lines = [f'批次 {batch.get("id")} 实时进度：']
         for job in batch.get("jobs") or []:
             status = str(job.get("status") or "pending")
-            label = STATUS_LABELS.get(status, status)
+            review_status = str(job.get("review_status") or "")
+            label = (
+                STATUS_LABELS["ready_for_draft"]
+                if status == "ready_for_review" and review_status == "confirmed"
+                else STATUS_LABELS.get(status, status)
+            )
             lines.append(f'• {job.get("account_name") or "公众号"}：{label}')
         return "\n".join(lines)

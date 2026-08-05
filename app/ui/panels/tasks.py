@@ -7,28 +7,27 @@ from typing import Any, Callable
 
 from nicegui import run, ui
 
+from app.ai import clean_candidate_text
 from app.config import load_config
 from app.render.preview import prepare_preview_html
 from app.services.batches import BatchService
 from app.services.failures import sanitize_failure_text
-from app.ui.state import (
-    AppState,
-    STATUS_LABEL,
-    clean_subtitles,
-    clean_titles,
-    set_button_loading,
-)
-from app.ai import clean_candidate_text
 from app.ui.image_proxy import wechat_image_proxy_url
 from app.ui.ip_whitelist_guide import (
     has_ip_whitelist_issue,
     show_ip_whitelist_guide,
 )
-from app.wechat.errors import friendly_wechat_error
 from app.ui.lifecycle import client_timer
 from app.ui.panels.review_jury import build_review_jury_panel
+from app.ui.state import (
+    STATUS_LABEL,
+    AppState,
+    clean_subtitles,
+    clean_titles,
+    set_button_loading,
+)
 from app.ui.workflow import next_review_job, render_workflow_guide
-
+from app.wechat.errors import friendly_wechat_error
 
 REVIEW_LABELS = {
     "unviewed": "未查看",
@@ -48,11 +47,43 @@ REVIEW_COLORS = {
     "write_failed": "red-7",
 }
 
+
+def _review_confirmation_gate(review: dict[str, Any] | None) -> tuple[str, int]:
+    """Return the frontend confirmation block reason and open blocker count."""
+
+    current = dict(review or {})
+    if str(current.get("status") or "") in {"running", "rewriting"}:
+        return "AI 评审仍在进行中", 0
+    blocking_count = max(0, int(current.get("blocking_count") or 0))
+    if blocking_count:
+        return f"AI 评审仍有 {blocking_count} 个阻断项待处理", blocking_count
+    return "", 0
+
+
+def _quick_review_action(review: dict[str, Any] | None) -> tuple[str, str, bool]:
+    """Return the quick-card action label, visual role and disabled state."""
+
+    current = dict(review or {})
+    if not current:
+        return "开始 AI 评审", "primary", False
+    status = str(current.get("status") or "")
+    if status in {"running", "rewriting"}:
+        return "AI 评审进行中…", "running", True
+    if status in {"completed", "candidate_ready", "applied"}:
+        return "查看评审结论", "result", False
+    return "重新评审", "rerun", False
+
+
 INBOX_BUCKETS = {
     "review": {
         "label": "待审核",
         "color": "orange-8",
         "icon": "rate_review",
+    },
+    "ready_for_draft": {
+        "label": "待写入草稿",
+        "color": "teal-8",
+        "icon": "outbox",
     },
     "write_failed": {
         "label": "写入失败",
@@ -181,6 +212,8 @@ def _fallback_review_inbox(
             job_bucket = ""
             if status == "ready_for_review" and review_status != "confirmed":
                 job_bucket = "review"
+            elif status == "ready_for_review" and review_status == "confirmed":
+                job_bucket = "ready_for_draft"
             elif status == "failed" and (
                 step == "inject" or review_status == "write_failed"
             ):
@@ -257,11 +290,31 @@ def _fallback_review_inbox(
     }
 
 
+def task_center_workflow_stage(batch: dict[str, Any] | None) -> str:
+    """Choose the task-center guide stage from the effective batch contract."""
+
+    if not batch:
+        return "review"
+    progress = dict(batch.get("progress") or {})
+    unconfirmed = int(progress.get("unconfirmed") or 0)
+    if unconfirmed > 0:
+        return "review"
+    status = str(batch.get("status") or "")
+    if status in {"ready_for_draft", "injecting", "drafted", "published"}:
+        return "draft"
+    if int(progress.get("ready_for_draft") or 0) > 0:
+        return "draft"
+    if int(progress.get("drafted") or 0) > 0:
+        return "draft"
+    return "review"
+
+
 def build_tasks_panel(
     state: AppState,
     *,
     initial_batch_id: str | None = None,
     initial_job_id: int | None = None,
+    initial_entry_mode: str = "activity",
 ) -> None:
     """Review-first task center backed by the shared batch service."""
     service = BatchService(
@@ -269,11 +322,7 @@ def build_tasks_panel(
         owner_user_id=str(getattr(state, "current_user_id", "") or ""),
         recover_stale_work=False,
     )
-    render_workflow_guide(
-        "review",
-        note="生成完成后在这里逐篇审核，全部确认后再一次写入草稿箱",
-        compact=True,
-    )
+    workflow_host = ui.column().classes("w-full")
     account_options = {"": "全部公众号", **{
         item["id"]: item["name"] for item in service.list_accounts()
     }}
@@ -300,6 +349,7 @@ def build_tasks_panel(
                 "": "全部状态",
                 "attention": "待我审核 / 失败",
                 "ready_for_review": "待审核",
+                "ready_for_draft": "待写入草稿",
                 "drafted": "已写入草稿箱",
                 "failed": "失败",
                 "cancelled": "已停止",
@@ -320,12 +370,30 @@ def build_tasks_panel(
         "has_active_batch": False,
         "review_open": False,
         "focus_batch_id": str(initial_batch_id or ""),
+        "completion_batch_id": (
+            str(initial_batch_id or "")
+            if initial_entry_mode == "completion" and not initial_job_id
+            else ""
+        ),
         "visible_limit": 30,
         "inbox_bucket": "review",
     }
     owner_client = ui.context.client
     background_reviews: dict[str, dict[str, Any]] = {}
     background_activity_host = ui.column().classes("background-activity-dock")
+
+    def render_task_center_guide(batch: dict[str, Any] | None = None) -> None:
+        workflow_host.clear()
+        stage = task_center_workflow_stage(batch)
+        if batch is None and str(runtime.get("inbox_bucket") or "") == "ready_for_draft":
+            stage = "draft"
+        note = (
+            "全部文章已确认，可以安全写入公众号草稿箱"
+            if stage == "draft"
+            else "生成完成后在这里逐篇审核，全部确认后再一次写入草稿箱"
+        )
+        with workflow_host:
+            render_workflow_guide(stage, note=note, compact=True)
 
     def client_alive() -> bool:
         return not bool(getattr(owner_client, "is_deleted", False))
@@ -497,6 +565,7 @@ def build_tasks_panel(
     client_timer(2.0, render_background_activity, immediate=False)
 
     def show_batch(batch_id: str) -> None:
+        runtime["completion_batch_id"] = ""
         runtime["focus_batch_id"] = str(batch_id)
         runtime["visible_limit"] = 30
         view_in.value = "batches"
@@ -505,13 +574,97 @@ def build_tasks_panel(
         render()
 
     def select_inbox_bucket(bucket: str) -> None:
+        runtime["completion_batch_id"] = ""
         runtime["inbox_bucket"] = bucket
         runtime["visible_limit"] = 30
         render()
 
     def render() -> None:
         host.clear()
+        completion_batch_id = str(runtime.get("completion_batch_id") or "")
+        if completion_batch_id:
+            for control in (view_in, refresh_btn, search_in, account_in):
+                control.set_visibility(False)
+            status_in.set_visibility(False)
+            batch_only_filters.set_visibility(False)
+            try:
+                completed_batch = service.get_batch(completion_batch_id)
+            except KeyError:
+                runtime["completion_batch_id"] = ""
+            else:
+                render_task_center_guide(completed_batch)
+                completed_jobs = list(completed_batch.get("jobs") or [])
+                completed_progress = dict(completed_batch.get("progress") or {})
+                pending_job = next_review_job(completed_jobs)
+                failed_count = int(completed_progress.get("failed") or 0)
+                with host:
+                    with ui.element("section").classes(
+                        "card w-full completion-focus-card"
+                    ):
+                        ui.label("本次任务已生成").classes(
+                            "text-h5 text-weight-bold"
+                        )
+                        ui.label(
+                            f'批次 #{completed_batch.get("display_id") or completion_batch_id} · '
+                            f'公众号 {len(completed_jobs)} 个 · '
+                            f'待审核 {int(completed_progress.get("unconfirmed") or 0)} · '
+                            f'待写入 {int(completed_progress.get("ready_for_draft") or 0)} · '
+                            f'失败 {failed_count}'
+                        ).classes("muted")
+                        if failed_count:
+                            ui.label(
+                                "已生成文章可以先审核；失败公众号可在下方批次卡中单独重试。"
+                            ).classes("text-warning")
+                        elif pending_job is not None:
+                            ui.label(
+                                "先审核本次生成的文章，全部确认后再统一写入草稿箱。"
+                            ).classes("text-teal-9")
+                        else:
+                            ui.label(
+                                "本次文章均已确认，可以安全进入草稿写入步骤。"
+                            ).classes("text-positive")
+                        with ui.row().classes("items-center gap-2 q-mt-sm"):
+                            if pending_job is not None:
+                                ui.button(
+                                    "审核第 1 篇",
+                                    on_click=lambda: open_review_workbench(
+                                        state,
+                                        service,
+                                        completion_batch_id,
+                                        int(pending_job["id"]),
+                                        render,
+                                        review_runtime=runtime,
+                                        initial_mode="quick",
+                                    ),
+                                ).props(
+                                    "unelevated color=teal-9 no-caps icon=rate_review"
+                                )
+                            ui.button(
+                                "返回待处理收件箱",
+                                on_click=lambda: (
+                                    runtime.__setitem__("completion_batch_id", ""),
+                                    runtime.__setitem__("focus_batch_id", ""),
+                                    render(),
+                                ),
+                            ).props(
+                                "outline color=teal-9 no-caps icon=arrow_back"
+                            )
+                    _render_batch_card(
+                        state,
+                        service,
+                        completed_batch,
+                        render,
+                        review_runtime=runtime,
+                        focused=True,
+                        auto_expand=True,
+                    )
+                return
+        render_task_center_guide()
+        for control in (view_in, refresh_btn, search_in, account_in):
+            control.set_visibility(True)
         view_mode = str(view_in.value or "inbox")
+        status_in.set_visibility(view_mode == "batches")
+        batch_only_filters.set_visibility(view_mode == "batches")
         if view_mode == "inbox":
             has_active_batches = getattr(service, "has_active_batches", None)
             runtime["has_active_batch"] = (
@@ -536,7 +689,7 @@ def build_tasks_panel(
                         ui.label(
                             "先处理需要你决策的文章；深度编辑仍在同一个审核工作台完成。"
                         ).classes("muted")
-                with ui.grid(columns=4).classes("w-full gap-2"):
+                with ui.grid(columns=5).classes("w-full gap-2"):
                     counts = dict(payload.get("counts") or {})
                     for bucket, meta in INBOX_BUCKETS.items():
                         selected = bucket == str(runtime["inbox_bucket"])
@@ -688,6 +841,7 @@ def build_tasks_panel(
         *,
         status_filter: str | None = None,
         today: bool | None = None,
+        entry_mode: str = "activity",
     ) -> None:
         """Show a newly created batch even when stale filters were active."""
         if batch_id:
@@ -697,12 +851,16 @@ def build_tasks_panel(
             today_only.value = False
             archived_in.value = False
             runtime["focus_batch_id"] = str(batch_id)
+            runtime["completion_batch_id"] = (
+                str(batch_id) if entry_mode == "completion" else ""
+            )
             runtime["inbox_bucket"] = "review"
             runtime["visible_limit"] = 30
             view_in.value = "inbox"
             status_in.set_visibility(False)
             batch_only_filters.set_visibility(False)
         elif status_filter is not None or today is not None:
+            runtime["completion_batch_id"] = ""
             search_in.value = ""
             account_in.value = ""
             archived_in.value = False
@@ -719,6 +877,7 @@ def build_tasks_panel(
         render()
 
     def switch_view(event: Any) -> None:
+        runtime["completion_batch_id"] = ""
         show_batches = str(event.value or "inbox") == "batches"
         status_in.set_visibility(show_batches)
         batch_only_filters.set_visibility(show_batches)
@@ -1633,6 +1792,10 @@ def open_review_workbench(
         deep_review_controls: list[Any] = []
         deep_review_actions: list[Any] = []
         quick_review_actions: list[Any] = []
+        review_jury_actions: dict[str, Any] = {}
+        review_gate_state: dict[str, Any] = {"review": None}
+        confirm_controls: dict[str, Any] = {}
+        quick_summary_host = ui.column().classes("w-full gap-2")
 
         title_options = clean_titles(job)
         selected_title = clean_candidate_text(
@@ -1653,16 +1816,19 @@ def open_review_workbench(
             title_choice.on_value_change(
                 lambda event: setattr(title_in, "value", str(event.value or ""))
             )
-        quick_summary_host = ui.column().classes("w-full gap-2")
         cover_preview_state = {
             "media_id": "",
             "url": "",
             "loading": False,
         }
 
-        def reveal_deep_review() -> None:
+        async def reveal_deep_review() -> None:
             review_mode.value = "deep"
             apply_review_mode("deep")
+            reveal_result = review_jury_actions.get("reveal_result")
+            if callable(reveal_result):
+                await reveal_result()
+                return
             client_timer(
                 0.05,
                 lambda: review_jury_host.run_method(
@@ -1671,6 +1837,32 @@ def open_review_workbench(
                 ),
                 once=True,
             )
+
+        async def reveal_review_settings() -> None:
+            review_mode.value = "deep"
+            apply_review_mode("deep")
+            reveal_settings = review_jury_actions.get("reveal_settings")
+            if callable(reveal_settings):
+                await reveal_settings()
+
+        async def start_review_from_quick() -> None:
+            start_review = review_jury_actions.get("start_review")
+            if callable(start_review):
+                await start_review()
+                return
+            ui.notify("AI 评审入口仍在准备中，请稍后重试", type="warning")
+
+        async def start_initial_review_from_quick(event: Any) -> None:
+            """Show the shared running state before the background task is visible."""
+
+            button = event.sender
+            button.set_text("AI 评审进行中…")
+            button.disable()
+            try:
+                await start_review_from_quick()
+            finally:
+                if workbench_alive():
+                    render_quick_review_summary()
 
         def render_quick_review_summary() -> None:
             """Keep decision-critical context visible in quick review mode."""
@@ -1684,14 +1876,32 @@ def open_review_workbench(
             except Exception:  # noqa: BLE001
                 reviews = []
             latest_review = dict(reviews[0]) if reviews else {}
+            review_gate_state["review"] = latest_review or None
+            review_status = str(latest_review.get("status") or "")
+            action_label, action_kind, action_disabled = _quick_review_action(
+                latest_review or None
+            )
             review_result = dict(latest_review.get("result") or {})
             review_summary = str(
                 review_result.get("conclusion")
                 or review_result.get("summary")
                 or ""
             )
+            if not review_summary:
+                review_summary = {
+                    "running": "AI 评审正在进行中",
+                    "rewriting": "AI 正在生成修改稿",
+                    "failed": "上一次 AI 评审失败，可进入深度编辑重新评审",
+                    "stale": "文章已修改，上一次 AI 评审已过期",
+                }.get(review_status, "尚未进行 AI 评审")
             blocking_count = int(
                 latest_review.get("blocking_count") or 0
+            )
+            settings_summary = review_jury_actions.get("settings_summary")
+            default_settings_summary = (
+                str(settings_summary())
+                if callable(settings_summary)
+                else "使用公众号默认评审设置"
             )
             meta = dict(job.get("meta") or {})
             quality = dict(meta.get("layout_quality") or {})
@@ -1736,19 +1946,48 @@ def open_review_workbench(
                             )
                             ui.label(
                                 review_summary
-                                if review_summary
-                                else "尚未进行 AI 评审"
                             ).classes("muted")
+                            ui.label(default_settings_summary).classes(
+                                "text-caption text-blue-grey-7"
+                            )
                             if blocking_count:
                                 ui.label(
                                     f"AI 评审仍有 {blocking_count} 个阻断项"
                                 ).classes("text-warning text-caption")
-                        if latest_review:
+                        with ui.column().classes("items-end gap-1"):
+                            if action_kind == "primary":
+                                ui.button(
+                                    action_label,
+                                    on_click=start_initial_review_from_quick,
+                                ).props(
+                                    "unelevated color=indigo-7 no-caps icon=rate_review"
+                                )
+                            elif action_disabled:
+                                running_btn = ui.button(
+                                    action_label,
+                                ).props(
+                                    "outline color=indigo-7 no-caps icon=hourglass_top"
+                                )
+                                running_btn.disable()
+                            elif action_kind == "result":
+                                ui.button(
+                                    action_label,
+                                    on_click=reveal_deep_review,
+                                ).props(
+                                    "outline color=indigo-7 no-caps icon=rate_review"
+                                )
+                            else:
+                                ui.button(
+                                    action_label,
+                                    on_click=start_review_from_quick,
+                                ).props(
+                                    "flat color=blue-grey-7 no-caps icon=refresh"
+                                )
                             ui.button(
-                                "查看完整评审",
-                                on_click=reveal_deep_review,
+                                "调整设置",
+                                on_click=reveal_review_settings,
                             ).props(
-                                "outline color=indigo-7 no-caps icon=rate_review"
+                                "flat dense color=blue-grey-7 no-caps icon=tune"
                             )
                     ui.separator().classes("q-my-sm")
                     with ui.row().classes("w-full items-center gap-3"):
@@ -1906,8 +2145,6 @@ def open_review_workbench(
                 once=True,
             )
 
-        render_quick_review_summary()
-        schedule_selected_cover_preview()
         subtitle_options = clean_subtitles(job)
         selected_subtitle = clean_candidate_text(
             str(job.get("selected_subtitle") or "")
@@ -1987,11 +2224,18 @@ def open_review_workbench(
                 return True
             ui.notify(
                 "检测到标题、摘要或正文有尚未保存的修改。请先点击“保存并刷新排版预览”，"
-                "再进行 AI 评审或定点二次修改，避免覆盖人工编辑。",
+                "再进行 AI 评审或定点改写，避免覆盖人工编辑。",
                 type="warning",
                 timeout=10000,
             )
             return False
+
+        def handle_review_updated(updated_review: dict[str, Any]) -> None:
+            """Refresh both the quick summary and the footer gate in place."""
+
+            review_gate_state["review"] = dict(updated_review)
+            render_quick_review_summary()
+            sync_confirm_gate(updated_review)
 
         with ui.column().classes("w-full gap-2") as review_jury_host:
             background_review = (
@@ -1999,7 +2243,7 @@ def open_review_workbench(
                 if review_runtime is not None
                 else None
             )
-            build_review_jury_panel(
+            review_jury_actions.update(build_review_jury_panel(
                 service=service,
                 batch_id=batch_id,
                 job_id=job_id,
@@ -2016,8 +2260,11 @@ def open_review_workbench(
                     background_review if callable(background_review) else None
                 ),
                 on_enter_background=close_workbench,
-            )
+                on_review_updated=handle_review_updated,
+            ))
         deep_review_controls.append(review_jury_host)
+        render_quick_review_summary()
+        schedule_selected_cover_preview()
 
         def current_paragraphs() -> list[str]:
             return [
@@ -2033,7 +2280,7 @@ def open_review_workbench(
             }
 
         with ui.expansion(
-            "AI 二次修改正文（按段）", value=False
+            "AI 定点改写（单段）", value=False
         ).classes("w-full") as paragraph_editor:
             ui.label(
                 "选择不满意的段落并说明修改要求。系统只替换这一段，其他正文和已审核图片保持不变。"
@@ -2127,7 +2374,7 @@ def open_review_workbench(
                     "outline dense color=red-7 no-caps"
                 )
                 regenerate_btn = ui.button(
-                    "按要求二次改写此段", on_click=regenerate_paragraph
+                    "按要求改写所选段落", on_click=regenerate_paragraph
                 ).props("unelevated dense color=indigo-7 no-caps")
             ui.label(
                 "模型会同时参考标题、前后文和原段落；修改前版本会自动保存，可在历史版本中恢复。"
@@ -2837,7 +3084,47 @@ def open_review_workbench(
                 if workbench_alive():
                     set_button_loading(save_btn, False)
 
+        def sync_confirm_gate(review: dict[str, Any] | None = None) -> None:
+            if review is not None:
+                review_gate_state["review"] = dict(review)
+            confirm_btn = confirm_controls.get("confirm")
+            go_process_btn = confirm_controls.get("go_process")
+            if confirm_btn is None or go_process_btn is None:
+                return
+            reason, blocking_count = _review_confirmation_gate(
+                review_gate_state.get("review")
+            )
+            if blocking_count:
+                confirm_btn.set_text(f"先处理 {blocking_count} 个阻断项")
+                confirm_btn.disable()
+                go_process_btn.set_visibility(True)
+            elif reason:
+                confirm_btn.set_text("AI 评审中")
+                confirm_btn.disable()
+                go_process_btn.set_visibility(False)
+            else:
+                confirm_btn.set_text("确认此文章")
+                confirm_btn.enable()
+                go_process_btn.set_visibility(False)
+
         async def confirm() -> None:
+            fresh_reviews = await run.io_bound(
+                lambda: service.list_editorial_reviews(
+                    job_id=job_id,
+                    limit=1,
+                )
+            )
+            fresh_review = dict(fresh_reviews[0]) if fresh_reviews else None
+            review_gate_state["review"] = fresh_review
+            sync_confirm_gate(fresh_review)
+            reason, blocking_count = _review_confirmation_gate(fresh_review)
+            if reason:
+                ui.notify(reason, type="warning", timeout=8000)
+                if blocking_count:
+                    await reveal_deep_review()
+                return
+
+            confirm_btn = confirm_controls["confirm"]
             set_button_loading(confirm_btn, True)
             try:
                 await run.io_bound(
@@ -2900,6 +3187,7 @@ def open_review_workbench(
             finally:
                 if workbench_alive():
                     set_button_loading(confirm_btn, False)
+                    sync_confirm_gate()
 
         def needs_changes() -> None:
             updated = service.request_job_changes(batch_id, job_id)
@@ -2932,6 +3220,7 @@ def open_review_workbench(
             if mode == "quick":
                 render_quick_review_summary()
 
+        ui.element("div").classes("review-action-spacer").props("aria-hidden=true")
         with ui.row().classes("review-action-bar w-full justify-end q-mt-md"):
             more_btn = ui.button("更多", icon="more_horiz").props(
                 "flat color=grey-8 no-caps"
@@ -2946,7 +3235,13 @@ def open_review_workbench(
                 "需要修改",
                 on_click=needs_changes,
             ).props(
-                "unelevated color=deep-orange-8 no-caps icon=edit_note"
+                "outline color=deep-orange-8 no-caps icon=edit_note"
+            )
+            go_process_btn = ui.button(
+                "去处理",
+                on_click=reveal_deep_review,
+            ).props(
+                "unelevated color=deep-orange-8 no-caps icon=rule"
             )
             confirm_btn = ui.button(
                 "确认此文章",
@@ -2954,6 +3249,11 @@ def open_review_workbench(
             ).props(
                 "unelevated color=teal-9 no-caps icon=check"
             )
+            confirm_controls.update(
+                confirm=confirm_btn,
+                go_process=go_process_btn,
+            )
+            sync_confirm_gate()
         deep_review_actions.extend((more_btn, save_btn))
         quick_review_actions.append(needs_changes_btn)
         review_mode.on_value_change(switch_review_mode)
@@ -3329,6 +3629,7 @@ def _batch_status_text(batch: dict[str, Any]) -> str:
         "pending": "等待中",
         "processing": "正在生成",
         "ready_for_review": "待审核",
+        "ready_for_draft": "待写入草稿",
         "injecting": "写入中",
         "drafted": "已写入草稿箱",
         "partial_failed": "部分失败",
@@ -3342,6 +3643,7 @@ def _batch_color(status: str) -> str:
         "pending": "grey-7",
         "processing": "blue-7",
         "ready_for_review": "orange-8",
+        "ready_for_draft": "teal-7",
         "injecting": "blue-7",
         "drafted": "green-7",
         "partial_failed": "orange-8",

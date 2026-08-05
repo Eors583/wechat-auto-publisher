@@ -14,6 +14,22 @@ def test_generation_completion_focuses_batch_before_opening_task_center() -> Non
     assert refresh in source
     assert switch in source
     assert source.rfind(refresh) < source.rfind(switch)
+    assert 'entry_mode="completion"' in source
+    assert "state.pending_task_center_entry" in source
+
+
+def test_lazy_task_center_consumes_pending_completion_entry() -> None:
+    desktop_source = inspect.getsource(desktop.create_desktop_app)
+    task_source = inspect.getsource(tasks.build_tasks_panel)
+
+    assert "elif page_state.pending_task_center_entry:" in desktop_source
+    assert 'pending_entry.get("entry_mode") or "activity"' in desktop_source
+    assert "page_state.pending_task_center_entry = None" in desktop_source
+    assert 'initial_entry_mode == "completion"' in task_source
+    assert 'runtime.get("completion_batch_id")' in task_source
+    assert '"本次任务已生成"' in task_source
+    assert '"审核第 1 篇"' in task_source
+    assert '"返回待处理收件箱"' in task_source
 
 
 def test_active_generation_path_does_not_render_a_second_review_page() -> None:
@@ -52,6 +68,37 @@ def test_task_center_registers_focusable_external_refresh() -> None:
     assert "def refresh_and_focus(" in source
     assert "state.task_center_refresh = refresh_and_focus" in source
     assert 'runtime["focus_batch_id"] = str(batch_id)' in source
+
+
+def test_task_center_workflow_guide_follows_effective_batch_state() -> None:
+    cases = [
+        ({"status": "ready_for_review", "progress": {"unconfirmed": 1}}, "review"),
+        ({"status": "ready_for_draft", "progress": {"unconfirmed": 0}}, "draft"),
+        ({"status": "injecting", "progress": {"unconfirmed": 0}}, "draft"),
+        ({"status": "drafted", "progress": {"unconfirmed": 0}}, "draft"),
+        (
+            {
+                "status": "partial_failed",
+                "progress": {"unconfirmed": 1, "ready_for_draft": 1},
+            },
+            "review",
+        ),
+        (
+            {
+                "status": "partial_failed",
+                "progress": {"unconfirmed": 0, "ready_for_draft": 1},
+            },
+            "draft",
+        ),
+    ]
+
+    for batch, expected in cases:
+        assert tasks.task_center_workflow_stage(batch) == expected
+
+    source = inspect.getsource(tasks.build_tasks_panel)
+    assert "render_task_center_guide(completed_batch)" in source
+    assert "render_workflow_guide(stage, note=note" in source
+    assert "全部文章已确认，可以安全写入公众号草稿箱" in source
 
 
 def test_shared_review_link_routes_directly_to_the_one_workbench() -> None:

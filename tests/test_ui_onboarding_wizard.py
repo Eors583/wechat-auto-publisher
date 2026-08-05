@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -198,6 +199,8 @@ def test_welcome_is_full_first_run_path_and_keeps_packaging_brand(
     assert "欢迎使用" in snapshot
     assert "开始配置并连接公众号" in snapshot
     assert "我已经配置过，自动检查" in snapshot
+    assert "重试本项" in snapshot
+    assert "去修复" in snapshot
     assert "仅写入草稿" in snapshot
     assert "先体验文章生成" not in snapshot
     assert "飞书接入" not in snapshot
@@ -315,8 +318,94 @@ def test_welcome_auto_check_explicitly_runs_real_service_recheck(
         call[0] == "save_progress" and call[1].get("current_step") == "ai"
         for call in service.calls
     )
-    assert "文章模型复测未通过" in snapshot
     assert "API Key 无效" in snapshot
+    assert "重试本项" in snapshot
+    assert "去修复" in snapshot
+
+
+def test_final_auto_check_events_preserve_each_check_result() -> None:
+    events = onboarding_wizard._final_auto_check_events(  # noqa: SLF001
+        {
+            "writer_ready": True,
+            "content_ready": True,
+            "account_count": 1,
+            "draft_ready": False,
+            "account_checks": [
+                {
+                    "checks": [
+                        {"key": "wechat", "ok": True, "message": "连接正常"},
+                        {"key": "draft", "ok": False, "message": "缺少权限"},
+                        {"key": "material", "ok": True, "message": "素材可用"},
+                    ]
+                }
+            ],
+        }
+    )
+    states = {event["key"]: event["state"] for event in events}
+
+    assert states == {
+        "article_ai": "passed",
+        "account": "passed",
+        "connection": "passed",
+        "draft": "failed",
+        "material": "passed",
+        "creation_plan": "passed",
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "refresh_wechat", "retest_models"),
+    [
+        ("article_ai", False, True),
+        ("draft", True, False),
+        ("account", False, False),
+    ],
+)
+def test_single_check_retries_only_the_selected_visible_item(
+    key: str,
+    refresh_wechat: bool,
+    retest_models: bool,
+) -> None:
+    class RetryService:
+        def __init__(self) -> None:
+            self.options: dict[str, Any] = {}
+
+        def status(
+            self,
+            *,
+            refresh_wechat: bool = False,
+            retest_models: bool = False,
+            on_progress: Callable[[dict[str, Any]], None] | None = None,
+        ) -> dict[str, Any]:
+            self.options = {
+                "refresh_wechat": refresh_wechat,
+                "retest_models": retest_models,
+            }
+            if on_progress:
+                for event_key in onboarding.ONBOARDING_CHECK_LABELS:
+                    on_progress(
+                        {
+                            "key": event_key,
+                            "state": "passed",
+                            "message": "检查通过",
+                        }
+                    )
+            return {"writer_ready": True}
+
+    service = RetryService()
+    events: list[dict[str, Any]] = []
+
+    onboarding_wizard._run_single_check(  # noqa: SLF001
+        service,  # type: ignore[arg-type]
+        key,
+        on_progress=events.append,
+    )
+
+    assert service.options == {
+        "refresh_wechat": refresh_wechat,
+        "retest_models": retest_models,
+    }
+    assert [event["key"] for event in events] == [key]
 
 
 def test_ai_step_exposes_only_six_guided_providers_and_folds_advanced(

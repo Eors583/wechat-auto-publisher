@@ -1761,6 +1761,11 @@ class Database:
                         THEN 1 ELSE 0 END
                     ) AS review,
                     SUM(CASE
+                        WHEN j.status = 'ready_for_review'
+                         AND COALESCE(bj.review_status, 'unviewed') = 'confirmed'
+                        THEN 1 ELSE 0 END
+                    ) AS ready_for_draft,
+                    SUM(CASE
                         WHEN j.status = 'failed' AND j.step = 'inject'
                         THEN 1 ELSE 0 END
                     ) AS write_failed,
@@ -1796,6 +1801,7 @@ class Database:
             key: int(values.get(key) or 0)
             for key in (
                 "review",
+                "ready_for_draft",
                 "write_failed",
                 "generation_failed",
                 "today_completed",
@@ -1834,6 +1840,10 @@ class Database:
             "review": (
                 "j.status = 'ready_for_review' "
                 "AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'"
+            ),
+            "ready_for_draft": (
+                "j.status = 'ready_for_review' "
+                "AND COALESCE(bj.review_status, 'unviewed') = 'confirmed'"
             ),
             "write_failed": "j.status = 'failed' AND j.step = 'inject'",
             "generation_failed": "j.status = 'failed' AND j.step != 'inject'",

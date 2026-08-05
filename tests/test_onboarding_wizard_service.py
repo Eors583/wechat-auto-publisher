@@ -590,7 +590,11 @@ def test_explicit_auto_check_retests_models_and_returns_sanitized_failures(
         fail_model_test,
     )
 
-    status = service.auto_check(refresh_wechat=False)
+    progress_events: list[dict[str, Any]] = []
+    status = service.auto_check(
+        refresh_wechat=False,
+        on_progress=progress_events.append,
+    )
 
     assert status["writer_ready"] is False
     assert status["model_auth_failed_model_ids"] == [model["id"]]
@@ -607,6 +611,14 @@ def test_explicit_auto_check_retests_models_and_returns_sanitized_failures(
     ]
     assert "sk-auto-check-private" not in repr(status)
     assert "Authorization" not in repr(status)
+    assert progress_events[0]["key"] == "article_ai"
+    assert progress_events[0]["state"] == "running"
+    assert any(
+        event["key"] == "article_ai" and event["state"] == "failed"
+        for event in progress_events
+    )
+    assert "sk-auto-check-private" not in repr(progress_events)
+    assert "Authorization" not in repr(progress_events)
 
 
 def test_explicit_auto_check_transient_failure_overwrites_old_success(

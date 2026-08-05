@@ -525,6 +525,15 @@ body, .q-page, .nicegui-content {
   padding: 12px 0 4px;
   background: linear-gradient(180deg, rgba(255,255,255,0), #fff 22%);
 }
+.review-action-spacer {
+  height: calc(88px + env(safe-area-inset-bottom));
+  min-height: calc(88px + env(safe-area-inset-bottom));
+}
+.editorial-review-result-anchor,
+.editorial-review-settings-anchor {
+  scroll-margin-top: 20px;
+  scroll-margin-bottom: calc(104px + env(safe-area-inset-bottom));
+}
 
 .background-activity-dock {
   position: fixed;

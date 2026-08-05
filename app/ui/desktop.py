@@ -390,6 +390,15 @@ def create_desktop_app() -> None:
                     initial_batch_id=requested_batch_id,
                     initial_job_id=requested_job_id,
                 )
+            elif page_state.pending_task_center_entry:
+                pending_entry = dict(page_state.pending_task_center_entry)
+                task_panel_kwargs.update(
+                    initial_batch_id=str(pending_entry.get("batch_id") or ""),
+                    initial_entry_mode=str(
+                        pending_entry.get("entry_mode") or "activity"
+                    ),
+                )
+                page_state.pending_task_center_entry = None
             with jobs_host:
                 build_tasks_panel(page_state, **task_panel_kwargs)
 
@@ -1837,7 +1846,16 @@ def _build_wizard(
                         timeout=10000,
                     )
                 if callable(state.task_center_refresh):
-                    state.task_center_refresh(active_batch_id)
+                    state.pending_task_center_entry = None
+                    state.task_center_refresh(
+                        active_batch_id,
+                        entry_mode="completion",
+                    )
+                else:
+                    state.pending_task_center_entry = {
+                        "batch_id": str(active_batch_id or ""),
+                        "entry_mode": "completion",
+                    }
                 tabs.set_value(tab_jobs)
             except asyncio.CancelledError:
                 logger.info(
