@@ -501,7 +501,18 @@ def test_task_center_exposes_background_generation_and_review_progress() -> None
     assert "后台生成中" in source
     assert "查看详情" in source
     assert "ui.linear_progress(" in source
+    assert "show_value=False" in source
+    assert "progress_text" in source
     assert ".background-activity-dock" in styles
+    assert ".background-activity-progress-label" in styles
+
+
+def test_background_progress_is_formatted_as_a_clamped_percentage() -> None:
+    assert tasks._format_progress(0.55) == (0.55, "55%")  # noqa: SLF001
+    assert tasks._format_progress(0.75) == (0.75, "75%")  # noqa: SLF001
+    assert tasks._format_progress(2) == (1.0, "100%")  # noqa: SLF001
+    assert tasks._format_progress(-1) == (0.0, "0%")  # noqa: SLF001
+    assert tasks._format_progress("invalid") == (0.0, "0%")  # noqa: SLF001
 
 
 def test_structured_failure_actions_have_only_known_operator_handlers() -> None:
@@ -627,6 +638,9 @@ def test_quick_review_action_covers_unreviewed_running_completed_and_failed() ->
         {"status": "completed"}
     ) == ("查看评审结论", "result", False)
     assert tasks._quick_review_action(  # noqa: SLF001
+        {"status": "applied"}
+    ) == ("查看改写前后对比", "comparison", False)
+    assert tasks._quick_review_action(  # noqa: SLF001
         {"status": "failed"}
     ) == ("重新评审", "rerun", False)
 
@@ -641,6 +655,11 @@ def test_quick_review_uses_the_shared_start_action_and_default_summary() -> None
     assert 'button.set_text("AI 评审进行中…")' in source
     assert "button.disable()" in source
     assert "on_click=reveal_review_settings" in source
+    assert 'review_jury_actions.get("reveal_comparison")' in source
+    assert '"当前版本：AI 改写后"' in source
+    assert '"AI 改写后又有人工编辑"' in source
+    assert "rewrite_matches_editor" in source
+    assert "on_click=reveal_article_comparison" in source
 
 
 def test_confirm_rechecks_gate_before_invoking_confirmation_endpoint() -> None:

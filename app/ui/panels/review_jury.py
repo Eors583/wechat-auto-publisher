@@ -536,7 +536,7 @@ def build_review_jury_panel(
                     "w-full items-start justify-between q-gutter-sm"
                 ):
                     with ui.column().classes("gap-0"):
-                        ui.label("改写前后对比").classes(
+                        ui.label("改写前后文章对比").classes(
                             "text-h6 text-weight-bold"
                         )
                         ui.label(
@@ -567,7 +567,11 @@ def build_review_jury_panel(
                         badge_color="blue-grey-7",
                     )
                     render_snapshot(
-                        label="智能修改后",
+                        label=(
+                            "改写后文章（当前版本）"
+                            if comparison_matches_editor
+                            else "AI 改写后版本（历史记录）"
+                        ),
                         snapshot=after,
                         badge_color="indigo-7",
                     )
@@ -1304,6 +1308,7 @@ def build_review_jury_panel(
 
     return {
         "reveal_result": scroll_to_review_result,
+        "reveal_comparison": scroll_to_article_comparison,
         "reveal_settings": scroll_to_review_settings,
         "start_review": request_review_start,
         "settings_summary": current_settings_summary,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -70,7 +71,9 @@ def _quick_review_action(review: dict[str, Any] | None) -> tuple[str, str, bool]
     status = str(current.get("status") or "")
     if status in {"running", "rewriting"}:
         return "AI 评审进行中…", "running", True
-    if status in {"completed", "candidate_ready", "applied"}:
+    if status == "applied":
+        return "查看改写前后对比", "comparison", False
+    if status in {"completed", "candidate_ready"}:
         return "查看评审结论", "result", False
     return "重新评审", "rerun", False
 
@@ -102,6 +105,19 @@ INBOX_BUCKETS = {
         "icon": "task_alt",
     },
 }
+
+
+def _format_progress(value: Any) -> tuple[float, str]:
+    """Return a safe progress value and its user-facing percentage."""
+
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        normalized = 0.0
+    if not math.isfinite(normalized):
+        normalized = 0.0
+    normalized = min(1.0, max(0.0, normalized))
+    return normalized, f"{round(normalized * 100)}%"
 
 
 def _load_review_inbox(
@@ -495,6 +511,9 @@ def build_tasks_panel(
         with background_activity_host:
             ui.label("后台任务").classes("text-subtitle1 text-weight-bold")
             for activity in activities[:4]:
+                progress_value, progress_text = _format_progress(
+                    activity.get("progress")
+                )
                 with ui.card().classes("w-full q-pa-sm background-activity-card"):
                     ui.label(str(activity["title"])).classes(
                         "text-weight-bold ellipsis"
@@ -502,9 +521,16 @@ def build_tasks_panel(
                     ui.label(str(activity["status"])).classes(
                         "muted text-caption"
                     )
-                    ui.linear_progress(
-                        value=float(activity.get("progress") or 0.1)
-                    ).props("color=teal-8 track-color=teal-1 rounded")
+                    with ui.linear_progress(
+                        value=progress_value,
+                        show_value=False,
+                        size="20px",
+                    ).props(
+                        "color=teal-8 track-color=teal-1 rounded"
+                    ).classes("background-activity-progress"):
+                        ui.label(progress_text).classes(
+                            "absolute-center background-activity-progress-label"
+                        )
                     ui.button(
                         "查看详情",
                         on_click=lambda _=None, item=dict(activity): open_activity_detail(
@@ -1847,6 +1873,17 @@ def open_review_workbench(
                 once=True,
             )
 
+        async def reveal_article_comparison() -> None:
+            """Open deep review and focus the persisted before/after snapshots."""
+
+            review_mode.value = "deep"
+            apply_review_mode("deep")
+            reveal_comparison = review_jury_actions.get("reveal_comparison")
+            if callable(reveal_comparison):
+                await reveal_comparison()
+                return
+            await reveal_deep_review()
+
         async def reveal_review_settings() -> None:
             review_mode.value = "deep"
             apply_review_mode("deep")
@@ -1887,6 +1924,19 @@ def open_review_workbench(
             latest_review = dict(reviews[0]) if reviews else {}
             review_gate_state["review"] = latest_review or None
             review_status = str(latest_review.get("status") or "")
+            rewritten_snapshot = dict(
+                latest_review.get("rewritten_snapshot") or {}
+            )
+            rewrite_matches_editor = bool(rewritten_snapshot) and all(
+                str(job.get(job_key) or "").strip()
+                == str(rewritten_snapshot.get(snapshot_key) or "").strip()
+                for job_key, snapshot_key in (
+                    ("selected_title", "title"),
+                    ("selected_subtitle", "subtitle"),
+                    ("digest", "digest"),
+                    ("body", "body"),
+                )
+            )
             action_label, action_kind, action_disabled = _quick_review_action(
                 latest_review or None
             )
@@ -1956,6 +2006,22 @@ def open_review_workbench(
                             ui.label(
                                 review_summary
                             ).classes("muted")
+                            if review_status == "applied":
+                                version_badge = (
+                                    "当前版本：AI 改写后"
+                                    if rewrite_matches_editor
+                                    else "AI 改写后又有人工编辑"
+                                )
+                                ui.badge(version_badge).props(
+                                    "outline color=green-7"
+                                )
+                                ui.label(
+                                    (
+                                        "文章已应用本次 AI 修改稿，可查看改写前后的全文对比。"
+                                        if rewrite_matches_editor
+                                        else "文章应用 AI 修改稿后又发生了编辑；对比区会保留本次 AI 改写记录。"
+                                    )
+                                ).classes("text-caption text-green-8")
                             ui.label(default_settings_summary).classes(
                                 "text-caption text-blue-grey-7"
                             )
@@ -1984,6 +2050,13 @@ def open_review_workbench(
                                     on_click=reveal_deep_review,
                                 ).props(
                                     "outline color=indigo-7 no-caps icon=rate_review"
+                                )
+                            elif action_kind == "comparison":
+                                ui.button(
+                                    action_label,
+                                    on_click=reveal_article_comparison,
+                                ).props(
+                                    "outline color=green-7 no-caps icon=compare_arrows"
                                 )
                             else:
                                 ui.button(

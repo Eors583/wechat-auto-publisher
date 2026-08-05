@@ -360,7 +360,9 @@ def test_article_comparison_uses_persisted_review_snapshots() -> None:
     assert "source_snapshot" in literals
     assert "candidate_snapshot" in literals
     assert "改写前原文" in literals
-    assert "智能修改后" in literals
+    assert "改写后文章（当前版本）" in literals
+    assert "AI 改写后版本（历史记录）" in literals
+    assert "改写前后文章对比" in literals
 
 
 def test_article_comparison_is_a_responsive_two_column_inline_preview() -> None:

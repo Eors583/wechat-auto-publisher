@@ -554,6 +554,13 @@ body, .q-page, .nicegui-content {
   border: 1px solid var(--line);
   box-shadow: none;
 }
+.background-activity-progress-label {
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 1px 3px rgba(0, 54, 45, .9), 0 0 1px rgba(0, 54, 45, 1);
+}
 
 @media (max-width: 760px) {
   .background-activity-dock {
