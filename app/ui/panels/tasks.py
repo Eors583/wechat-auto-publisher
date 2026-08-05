@@ -12,6 +12,7 @@ from app.config import load_config
 from app.render.preview import prepare_preview_html
 from app.services.batches import BatchService
 from app.services.failures import sanitize_failure_text
+from app.time_utils import business_date, format_business_datetime
 from app.ui.image_proxy import wechat_image_proxy_url
 from app.ui.ip_whitelist_guide import (
     has_ip_whitelist_issue,
@@ -198,7 +199,7 @@ def _fallback_review_inbox(
 ) -> dict[str, Any]:
     """Project the stable batch contract into the P0 inbox shape."""
 
-    today = datetime.now().date().isoformat()
+    today = business_date().isoformat()
     grouped: dict[str, list[dict[str, Any]]] = {
         key: [] for key in INBOX_BUCKETS
     }
@@ -2942,7 +2943,7 @@ def open_review_workbench(
                 versions = service.list_job_versions(batch_id, job_id)
                 options = {
                     int(item["id"]): (
-                        f'{str(item.get("created_at") or "").replace("T", " ")[:19]}'
+                        f'{_format_time(item.get("created_at"))}'
                         f' · {item.get("reason") or "自动保存"}'
                     )
                     for item in versions
@@ -3606,8 +3607,10 @@ def _matches_filters(
         return False
     if account_id and not any(str(job.get("account_id")) == account_id for job in jobs):
         return False
-    if today and not str(batch.get("created_at") or "").startswith(datetime.now().date().isoformat()):
-        return False
+    if today:
+        created_at = format_business_datetime(batch.get("created_at"))
+        if not created_at.startswith(business_date().isoformat()):
+            return False
     if status == "attention":
         progress = batch.get("progress") or {}
         return bool(progress.get("unconfirmed") or progress.get("failed"))
@@ -3668,8 +3671,7 @@ def _job_color(status: str) -> str:
 
 
 def _format_time(value: Any) -> str:
-    text = str(value or "")
-    return text.replace("T", " ")[:19] if text else "-"
+    return format_business_datetime(value)
 
 
 def _duration(start: Any, end: Any) -> str:

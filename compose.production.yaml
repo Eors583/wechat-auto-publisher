@@ -41,6 +41,7 @@ services:
       - --port
       - "18766"
     environment: &app_environment
+      TZ: ${TZ:-Asia/Shanghai}
       DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
       AUTH_REQUIRED: "true"
       AUTH_STORAGE_SECRET: ${AUTH_STORAGE_SECRET:?AUTH_STORAGE_SECRET is required}

@@ -15,6 +15,7 @@ from app.db_backend import (
     is_postgres_url,
     postgres_integrity_errors,
 )
+from app.time_utils import business_date, business_day_bounds_utc
 
 JOB_STATUSES = (
     "pending",
@@ -1525,17 +1526,24 @@ class Database:
         parent_batch_id: str | None = None,
     ) -> None:
         now = _utc_now()
+        local_day = business_date()
+        day_start, day_end = business_day_bounds_utc(local_day)
         with self.connect() as conn:
-            day = now[:10].replace("-", "")
+            day = local_day.strftime("%Y%m%d")
             count = int(
                 conn.execute(
                     """
                     SELECT COUNT(*) AS value
                     FROM batches
-                    WHERE substr(created_at, 1, 10) = ?
+                    WHERE created_at >= ? AND created_at < ?
                       AND (? = '' OR owner_user_id = ?)
                     """,
-                    (now[:10], self.owner_user_id, self.owner_user_id),
+                    (
+                        day_start.isoformat(timespec="microseconds"),
+                        day_end.isoformat(timespec="microseconds"),
+                        self.owner_user_id,
+                        self.owner_user_id,
+                    ),
                 ).fetchone()["value"]
                 or 0
             )
@@ -1706,16 +1714,9 @@ class Database:
     ) -> dict[str, int]:
         """Return queue counters without loading every batch into memory."""
 
-        local_now = datetime.now().astimezone()
-        local_start = local_now.replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        day_start = local_start.astimezone(timezone.utc).isoformat(
-            timespec="microseconds"
-        )
-        day_end = (local_start + timedelta(days=1)).astimezone(
-            timezone.utc
-        ).isoformat(timespec="microseconds")
+        day_start_value, day_end_value = business_day_bounds_utc()
+        day_start = day_start_value.isoformat(timespec="microseconds")
+        day_end = day_end_value.isoformat(timespec="microseconds")
         account_clause = " AND bj.account_id = ?" if account_id else ""
         account_params: list[Any] = [str(account_id)] if account_id else []
         search_clause = ""
@@ -1822,20 +1823,13 @@ class Database:
         """Return one article-level page ordered by operator urgency."""
 
         normalized_bucket = str(bucket or "review").strip().lower()
-        local_now = datetime.now().astimezone()
-        local_start = local_now.replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        day_start = local_start.astimezone(timezone.utc).isoformat(
-            timespec="microseconds"
-        )
-        day_end = (local_start + timedelta(days=1)).astimezone(
-            timezone.utc
-        ).isoformat(timespec="microseconds")
+        day_start_value, day_end_value = business_day_bounds_utc()
+        day_start = day_start_value.isoformat(timespec="microseconds")
+        day_end = day_end_value.isoformat(timespec="microseconds")
         overdue = (
             datetime.now(timezone.utc) - timedelta(hours=24)
         ).isoformat(timespec="microseconds")
-        scheduled_day = local_start.date().isoformat()
+        scheduled_day = business_date().isoformat()
         clauses = {
             "review": (
                 "j.status = 'ready_for_review' "

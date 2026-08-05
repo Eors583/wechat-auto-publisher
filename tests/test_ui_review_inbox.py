@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.db import Database
@@ -11,6 +11,35 @@ from app.ui.panels import tasks
 ROOT = Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "app" / "ui" / "desktop.py"
 STYLES = ROOT / "app" / "ui" / "styles.py"
+
+
+def test_task_times_are_displayed_in_china_standard_time() -> None:
+    assert (
+        tasks._format_time("2026-08-05T06:21:54+00:00")  # noqa: SLF001
+        == "2026-08-05 14:21:54"
+    )
+    assert (
+        tasks._format_time("2026-08-05T06:21:54Z")  # noqa: SLF001
+        == "2026-08-05 14:21:54"
+    )
+    assert (
+        tasks._format_time(  # noqa: SLF001
+            datetime(
+                2026,
+                8,
+                5,
+                10,
+                21,
+                54,
+                tzinfo=timezone(timedelta(hours=4)),
+            )
+        )
+        == "2026-08-05 14:21:54"
+    )
+    assert (
+        tasks._format_time("2026-08-05T14:21:54")  # noqa: SLF001
+        == "2026-08-05 14:21:54"
+    )
 
 
 def test_review_inbox_adapter_prefers_service_contract_and_normalizes_counts() -> None:

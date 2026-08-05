@@ -27,7 +27,7 @@ def test_overview_matches_batch_article_statistics(tmp_path) -> None:
     with db.connect() as conn:
         conn.execute(
             "UPDATE batches SET created_at = ? WHERE id = ?",
-            ("2026-07-22T01:00:00+00:00", "today-batch"),
+            ("2026-07-21T16:30:00+00:00", "today-batch"),
         )
         conn.execute(
             "UPDATE batches SET created_at = ?, archived_at = ? WHERE id = ?",
@@ -71,6 +71,25 @@ def test_overview_matches_batch_article_statistics(tmp_path) -> None:
         "confirmed": 2,
         "needs_changes": 0,
     }
+
+
+def test_overview_uses_china_business_day_boundaries(tmp_path) -> None:
+    db = Database(tmp_path / "analytics-timezone.db")
+    db.create_batch("before-midnight-utc", topic="北京时间当日")
+    db.create_batch("after-business-day", topic="北京时间次日")
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE batches SET created_at = ? WHERE id = ?",
+            ("2026-07-21T16:00:00+00:00", "before-midnight-utc"),
+        )
+        conn.execute(
+            "UPDATE batches SET created_at = ? WHERE id = ?",
+            ("2026-07-22T16:00:00+00:00", "after-business-day"),
+        )
+
+    overview = AnalyticsService(db).get_overview(today="2026-07-22")
+
+    assert overview["today_batches"] == 1
 
 
 def test_empty_overview_is_complete_and_json_safe(tmp_path) -> None:

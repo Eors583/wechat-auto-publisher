@@ -4,7 +4,7 @@ from datetime import date, datetime
 from typing import Any
 
 from app.db import JOB_STATUSES, Database
-
+from app.time_utils import business_date, business_day_bounds_utc
 
 _PROCESSING_STATUSES = {
     "pending",
@@ -33,17 +33,25 @@ class AnalyticsService:
         """Return a detached, JSON-serializable operational overview."""
 
         today_text = _date_text(today)
+        day_start, day_end = business_day_bounds_utc(
+            date.fromisoformat(today_text)
+        )
+        day_start_text = day_start.isoformat(timespec="microseconds")
+        day_end_text = day_end.isoformat(timespec="microseconds")
         with self.db.connect() as conn:
             batch_row = conn.execute(
                 """
                 SELECT COUNT(*) AS total_batches,
-                       SUM(CASE WHEN substr(created_at, 1, 10) = ? THEN 1 ELSE 0 END)
+                       SUM(CASE
+                           WHEN created_at >= ? AND created_at < ? THEN 1
+                           ELSE 0
+                       END)
                            AS today_batches,
                        SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END)
                            AS archived_batches
                 FROM batches
                 """,
-                (today_text,),
+                (day_start_text, day_end_text),
             ).fetchone()
             status_rows = conn.execute(
                 """
@@ -56,12 +64,15 @@ class AnalyticsService:
             article_row = conn.execute(
                 """
                 SELECT COUNT(*) AS total_articles,
-                       SUM(CASE WHEN substr(j.created_at, 1, 10) = ? THEN 1 ELSE 0 END)
+                       SUM(CASE
+                           WHEN j.created_at >= ? AND j.created_at < ? THEN 1
+                           ELSE 0
+                       END)
                            AS today_articles
                 FROM batch_jobs AS bj
                 JOIN jobs AS j ON j.id = bj.job_id
                 """,
-                (today_text,),
+                (day_start_text, day_end_text),
             ).fetchone()
             review_rows = conn.execute(
                 """
@@ -122,7 +133,7 @@ class AnalyticsService:
 
 def _date_text(value: date | str | None) -> str:
     if value is None:
-        return datetime.now().astimezone().date().isoformat()
+        return business_date().isoformat()
     if isinstance(value, datetime):
         return value.date().isoformat()
     if isinstance(value, date):
