@@ -46,6 +46,9 @@ def set_button_loading(
     button: Any,
     loading: bool,
     message: str = DEFAULT_REQUEST_MESSAGE,
+    *,
+    on_background: Callable[[], None] | None = None,
+    background_label: str = "转入后台处理",
 ) -> None:
     """Show button feedback and a blocking overlay for an API request."""
     if button is None or bool(getattr(button, "is_deleted", False)):
@@ -56,7 +59,15 @@ def set_button_loading(
     if loading:
         button.props(add="loading")
         button.disable()
-        get_request_loading(button, message).show(message)
+        overlay = get_request_loading(button, message)
+        if on_background is None:
+            overlay.show(message)
+        else:
+            overlay.show(
+                message,
+                on_background=on_background,
+                background_label=background_label,
+            )
     else:
         button.props(remove="loading")
         button.enable()

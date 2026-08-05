@@ -215,6 +215,8 @@ def build_review_jury_panel(
         "review": latest_reviews[0] if latest_reviews else None,
         "application": None,
         "selected_issue_ids": set(),
+        "rewrite_running": False,
+        "rewrite_in_background": False,
     }
 
     review_expansion = ui.expansion(
@@ -248,6 +250,7 @@ def build_review_jury_panel(
                     comparison_host = ui.column().classes("w-full gap-3")
                 comparison_section.set_visibility(False)
         result_section.set_visibility(False)
+        rewrite_progress_host = ui.column().classes("w-full q-mt-sm")
         result_summary_host = ui.column().classes("w-full gap-2 q-mt-sm")
         start_action_host = ui.column().classes("w-full items-start q-mt-sm")
 
@@ -571,6 +574,50 @@ def build_review_jury_panel(
             comparison_section.set_visibility(True)
             return True
 
+        def render_rewrite_progress(status: str, detail: str) -> None:
+            rewrite_progress_host.clear()
+            presentation = {
+                "running": (
+                    "AI 后台改写中",
+                    "info",
+                    "blue-1",
+                    "blue-8",
+                    "#bbdefb",
+                ),
+                "completed": (
+                    "AI 改写已完成",
+                    "check_circle",
+                    "green-1",
+                    "green-8",
+                    "#c8e6c9",
+                ),
+                "failed": (
+                    "AI 改写失败",
+                    "error_outline",
+                    "red-1",
+                    "red-8",
+                    "#ffcdd2",
+                ),
+            }
+            title, indicator, background, color, border = presentation.get(
+                status,
+                presentation["running"],
+            )
+            with rewrite_progress_host:
+                with ui.card().classes(f"w-full q-pa-md bg-{background}").style(
+                    f"border:1px solid {border};box-shadow:none"
+                ):
+                    with ui.row().classes("w-full items-center no-wrap q-gutter-sm"):
+                        if status == "running":
+                            ui.spinner("dots", size="34px", color=color)
+                        else:
+                            ui.icon(indicator, size="30px", color=color)
+                        with ui.column().classes("gap-0"):
+                            ui.label(title).classes(
+                                f"text-weight-bold text-{color}"
+                            )
+                            ui.label(detail).classes("text-body2")
+
         def render_rewrite_controls(review: dict[str, Any]) -> None:
             review_status = str(review.get("status") or "")
             if review_status == "applied":
@@ -589,14 +636,41 @@ def build_review_jury_panel(
             async def smart_rewrite() -> None:
                 if not require_saved_editor():
                     return
+                if bool(runtime.get("rewrite_running")):
+                    ui.notify("AI 正在改写中，请勿重复提交", type="warning")
+                    return
                 selected_ids = sorted(runtime["selected_issue_ids"])
                 if not selected_ids:
                     ui.notify("请至少勾选一条要采纳的改进意见", type="warning")
                     return
+                runtime["rewrite_running"] = True
+                runtime["rewrite_in_background"] = False
+                render_rewrite_progress(
+                    "running",
+                    "正在根据已勾选意见优化全文并重新排版，请稍候。",
+                )
+
+                def enter_background_rewrite() -> None:
+                    runtime["rewrite_in_background"] = True
+                    if not ui_alive():
+                        return
+                    render_rewrite_progress(
+                        "running",
+                        "任务仍在执行，可继续审核其他文章或使用其他功能。",
+                    )
+                    ui.notify(
+                        "已转入后台改写，可继续使用其他功能；右侧可查看进度",
+                        type="info",
+                    )
+                    if on_enter_background is not None:
+                        on_enter_background()
+
                 set_button_loading(
                     smart_btn,
                     True,
                     "AI 正在按已勾选意见修改原文并重新排版，请稍候…",
+                    on_background=enter_background_rewrite,
+                    background_label="转入后台改写",
                 )
                 refreshed_review: dict[str, Any] | None = None
                 try:
@@ -634,12 +708,17 @@ def build_review_jury_panel(
                     )
                 except Exception as exc:  # noqa: BLE001
                     if ui_alive():
+                        render_rewrite_progress(
+                            "failed",
+                            f"{exc}。请检查模型配置或稍后重新提交。",
+                        )
                         ui.notify(
                             f"整篇优化失败：{exc}",
                             type="negative",
                             timeout=12000,
                         )
                 finally:
+                    runtime["rewrite_running"] = False
                     if ui_alive():
                         set_button_loading(smart_btn, False)
                 if refreshed_review is not None and ui_alive():
@@ -654,6 +733,10 @@ def build_review_jury_panel(
                         dict(runtime.get("application") or {}),
                     )
                     render_review_summary(refreshed_review)
+                    render_rewrite_progress(
+                        "completed",
+                        "正文和排版已更新，下方已生成改写前后对比，请检查后确认文章。",
+                    )
                     ui.notify(
                         "已按所选整体方向优化标题、开头和传播效果并刷新排版；"
                         "下方已展示改写前后内容对比，请检查后确认文章",

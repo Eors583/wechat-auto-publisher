@@ -307,6 +307,45 @@ def test_smart_rewrite_keeps_parent_review_workbench_open() -> None:
     assert "on_job_updated" in call_names
 
 
+def test_smart_rewrite_can_move_to_background_and_keeps_visible_progress() -> None:
+    """The long rewrite must not keep the whole workbench behind a blocker."""
+
+    smart_rewrite = _function("smart_rewrite", async_function=True)
+    literals = _string_literals(smart_rewrite)
+    loading_calls = _calls(smart_rewrite, "set_button_loading")
+    progress_calls = _calls(smart_rewrite, "render_rewrite_progress")
+
+    background_calls = [
+        call
+        for call in loading_calls
+        if any(keyword.arg == "on_background" for keyword in call.keywords)
+    ]
+    assert len(background_calls) == 1
+    assert isinstance(
+        _keyword(background_calls[0], "on_background"),
+        ast.Name,
+    )
+    assert (
+        _keyword(background_calls[0], "background_label").value
+        == "转入后台改写"
+    )
+    assert "任务仍在执行，可继续审核其他文章或使用其他功能。" in literals
+    assert "已转入后台改写，可继续使用其他功能；右侧可查看进度" in literals
+    assert _calls(smart_rewrite, "on_enter_background")
+    assert len(progress_calls) >= 3, (
+        "running, completed and failed states must remain visible in the panel"
+    )
+
+
+def test_rewrite_progress_has_running_completed_and_failed_states() -> None:
+    progress = _function("render_rewrite_progress")
+    literals = _string_literals(progress)
+
+    assert {"AI 后台改写中", "AI 改写已完成", "AI 改写失败"} <= literals
+    assert _calls(progress, "ui.spinner")
+    assert _calls(progress, "ui.icon")
+
+
 def test_article_comparison_uses_persisted_review_snapshots() -> None:
     """Before/after previews must survive closing and reopening the workbench.
 

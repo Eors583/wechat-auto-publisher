@@ -455,12 +455,20 @@ def build_tasks_panel(
             running_reviews = []
         persisted_jobs = {int(item.get("job_id") or 0) for item in running_reviews}
         for review in running_reviews:
+            is_rewrite = str(review.get("status") or "") == "rewriting"
             activities.append(
                 {
-                    "kind": "review",
-                    "title": f'{review.get("profile_name") or "AI 评审"}',
-                    "status": "AI 正在评审文章",
-                    "progress": 0.55,
+                    "kind": "rewrite" if is_rewrite else "review",
+                    "title": (
+                        f'{review.get("profile_name") or "AI 评审"}'
+                        + (" · 整篇优化" if is_rewrite else "")
+                    ),
+                    "status": (
+                        "AI 正在后台改写并重新排版"
+                        if is_rewrite
+                        else "AI 正在评审文章"
+                    ),
+                    "progress": 0.75 if is_rewrite else 0.55,
                     "batch_id": str(review.get("batch_id") or ""),
                     "job_id": int(review.get("job_id") or 0),
                 }

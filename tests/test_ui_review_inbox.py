@@ -496,6 +496,8 @@ def test_task_center_exposes_background_generation_and_review_progress() -> None
     assert "background-activity-dock" in source
     assert "start_background_review" in source
     assert "AI 正在评审文章" in source
+    assert "AI 正在后台改写并重新排版" in source
+    assert '"rewrite" if is_rewrite else "review"' in source
     assert "后台生成中" in source
     assert "查看详情" in source
     assert "ui.linear_progress(" in source
