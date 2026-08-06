@@ -60,6 +60,10 @@ class EditorialReviewConflict(ValueError):
     """The article or review changed after the requested operation was prepared."""
 
 
+class ReviewPayloadValidationError(ValueError):
+    """The model returned JSON which cannot satisfy the review contract."""
+
+
 class EditorialReviewService:
     """AI editorial jury domain service shared by desktop, HTTP and Feishu."""
 
@@ -273,16 +277,25 @@ class EditorialReviewService:
                 ) from exc
             self.db.update_batch_job_review(batch_id, job_id, "viewed")
             try:
-                result = normalize_review_result(
-                    complete_json(
+                degraded_review = False
+                try:
+                    review_payload = complete_json(
                         client,
                         prompt,
                         label="评审结果",
                         validator=validate_review_payload,
                         schema=review_result_schema(),
-                    ),
+                    )
+                except ReviewPayloadValidationError as exc:
+                    degraded_review = True
+                    review_payload = safe_incomplete_review_payload(str(exc))
+                result = normalize_review_result(
+                    review_payload,
                     config=review_config,
                 )
+                if degraded_review and result.get("issues"):
+                    result["issues"][0]["blocks_draft"] = True
+                    result["issues"][0]["can_auto_apply"] = False
                 result = self._carry_forward_open_blockers(
                     job_id=job_id,
                     current_review_id=review_id,
@@ -472,7 +485,12 @@ class EditorialReviewService:
                         instruction=instruction,
                     )
                     candidate = normalize_rewrite_candidate(
-                        complete_json(client, prompt, label="候选修改稿"),
+                        complete_json(
+                            client,
+                            prompt,
+                            label="候选修改稿",
+                            schema=rewrite_candidate_schema(),
+                        ),
                         source=dict(review["source_snapshot"]),
                         rewrite_mode=rewrite_mode,
                     )
@@ -928,7 +946,12 @@ class EditorialReviewService:
             paragraph_numbers=numbers,
             instruction=instruction,
         )
-        payload = complete_json(client, prompt, label="段落修改稿")
+        payload = complete_json(
+            client,
+            prompt,
+            label="段落修改稿",
+            schema=paragraph_rewrite_schema(),
+        )
         updates = payload.get("paragraph_updates")
         if not isinstance(updates, list):
             raise ValueError("模型没有返回有效的段落修改结果")
@@ -1787,6 +1810,73 @@ def review_result_schema() -> dict[str, Any]:
     }
 
 
+def rewrite_candidate_schema() -> dict[str, Any]:
+    """Return the complete structured contract for an article candidate."""
+
+    fields = ("title", "subtitle", "digest", "body", "change_summary")
+    return {
+        "type": "object",
+        "properties": {field: {"type": "string"} for field in fields},
+        "required": list(fields),
+        "additionalProperties": False,
+    }
+
+
+def paragraph_rewrite_schema() -> dict[str, Any]:
+    """Return the structured contract for targeted paragraph rewriting."""
+
+    return {
+        "type": "object",
+        "properties": {
+            "paragraph_updates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "number": {"type": "integer"},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["number", "text"],
+                    "additionalProperties": False,
+                },
+            },
+            "change_summary": {"type": "string"},
+        },
+        "required": ["paragraph_updates", "change_summary"],
+        "additionalProperties": False,
+    }
+
+
+def safe_incomplete_review_payload(reason: str) -> dict[str, Any]:
+    """Turn an irreparable partial review into a complete, fail-closed result."""
+
+    detail = str(reason or "模型返回的评审结构不完整").strip()
+    return {
+        "overall_score": 0,
+        "summary": (
+            "AI 本次没有完整返回评审协议，系统已生成安全复核结果，"
+            "不会将残缺结果当作可发布结论。"
+        ),
+        "strengths": [],
+        "dimensions": [],
+        "issues": [
+            {
+                "role_id": "fact_checker",
+                "category": "评审完整性",
+                "severity": "high",
+                "location": "全文",
+                "excerpt": "",
+                "problem": detail[:1000],
+                "suggestion": "请重新运行 AI 评审；在获得完整结果前请勿直接确认发布。",
+                "evidence_status": "unverifiable",
+                "can_auto_apply": False,
+                "blocks_draft": True,
+            }
+        ],
+        "conclusion": "评审结果不完整，需重新评审或人工复核后再发布。",
+    }
+
+
 def validate_review_payload(value: dict[str, Any]) -> None:
     required = {
         "overall_score",
@@ -1798,23 +1888,25 @@ def validate_review_payload(value: dict[str, Any]) -> None:
     }
     missing = sorted(required - set(value))
     if missing:
-        raise ValueError("评审结果缺少字段：" + "、".join(missing))
+        raise ReviewPayloadValidationError(
+            "评审结果缺少字段：" + "、".join(missing)
+        )
     try:
         float(value.get("overall_score"))
     except (TypeError, ValueError) as exc:
-        raise ValueError("评审总分不是有效数字") from exc
+        raise ReviewPayloadValidationError("评审总分不是有效数字") from exc
     if not isinstance(value.get("summary"), str) or not str(
         value.get("summary") or ""
     ).strip():
-        raise ValueError("评审总结为空")
+        raise ReviewPayloadValidationError("评审总结为空")
     if not isinstance(value.get("strengths"), list):
-        raise ValueError("评审优点必须是数组")
+        raise ReviewPayloadValidationError("评审优点必须是数组")
     if not isinstance(value.get("dimensions"), (list, dict)):
-        raise ValueError("评审维度格式错误")
+        raise ReviewPayloadValidationError("评审维度格式错误")
     if not isinstance(value.get("issues"), list):
-        raise ValueError("评审问题必须是数组")
+        raise ReviewPayloadValidationError("评审问题必须是数组")
     if not isinstance(value.get("conclusion"), str):
-        raise ValueError("评审发布结论格式错误")
+        raise ReviewPayloadValidationError("评审发布结论格式错误")
 
 
 def count_open_blockers(result: dict[str, Any]) -> int:

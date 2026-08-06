@@ -101,8 +101,13 @@ def _review_start_action(review: dict[str, Any] | None) -> tuple[str, bool, bool
 
     if not review:
         return "开始 AI 评审", False, False
-    if str(review.get("status") or "") in {"running", "rewriting"}:
+    status = str(review.get("status") or "")
+    if status == "running":
         return "AI 评审中", True, False
+    if status == "rewriting":
+        return "AI 改写中", True, False
+    if status == "candidate_ready":
+        return "修改稿待选择", True, False
     return "重新评审", False, True
 
 
@@ -122,11 +127,14 @@ def editorial_review_progress(
 
     current = dict(review or {})
     status = str(current.get("status") or "")
-    created_at = str(current.get("created_at") or "")
+    progress_started_at = str(
+        current.get("updated_at" if status == "rewriting" else "created_at")
+        or ""
+    )
     elapsed_seconds = 0
-    if created_at:
+    if progress_started_at:
         try:
-            started = datetime.fromisoformat(created_at)
+            started = datetime.fromisoformat(progress_started_at)
             if started.tzinfo is None:
                 started = started.replace(tzinfo=UTC)
             clock = now or datetime.now(UTC)
@@ -159,12 +167,22 @@ def editorial_review_progress(
         }
 
     if status == "rewriting":
+        if elapsed_seconds < 5:
+            value, stage = 0.12, "正在创建改写任务"
+        elif elapsed_seconds < 20:
+            value, stage = 0.32, "正在整理已勾选的改进意见"
+        elif elapsed_seconds < 60:
+            value, stage = 0.56, "正在改写正文并保持事实一致"
+        elif elapsed_seconds < 120:
+            value, stage = 0.76, "正在重新排版并生成完整候选稿"
+        else:
+            value, stage = 0.9, "模型仍在处理，正在等待完整修改稿"
         return {
             "status": status,
-            "value": 0.76,
-            "percent": "76%",
+            "value": value,
+            "percent": f"{round(value * 100)}%",
             "title": "AI 正在生成修改稿",
-            "stage": "正在按已勾选意见改写并重新排版",
+            "stage": stage,
             "elapsed_seconds": elapsed_seconds,
             "active": True,
             "failed": False,
@@ -945,6 +963,36 @@ def build_review_jury_panel(
                             )
                             ui.label(detail).classes("text-body2")
 
+        def sync_persisted_rewrite_progress(
+            review: dict[str, Any] | None,
+            application: dict[str, Any] | None,
+        ) -> None:
+            """Restore rewrite progress correctly when the workbench reopens."""
+
+            review_status = str((review or {}).get("status") or "")
+            application_status = str((application or {}).get("status") or "")
+            if review_status == "rewriting" or application_status == "generating":
+                progress = editorial_review_progress(review)
+                render_rewrite_progress("running", str(progress["stage"]))
+                return
+            if application_status == "candidate_ready":
+                render_rewrite_progress(
+                    "completed",
+                    "AI 候选稿已生成，正文仍保留原文；请在对比区选择最终版本。",
+                )
+                return
+            if application_status == "failed":
+                render_rewrite_progress(
+                    "failed",
+                    str(
+                        (application or {}).get("error")
+                        or (review or {}).get("error")
+                        or "修改稿生成失败，请重新提交。"
+                    ),
+                )
+                return
+            rewrite_progress_host.clear()
+
         def render_rewrite_controls(review: dict[str, Any]) -> None:
             review_status = str(review.get("status") or "")
             if review_status == "applied":
@@ -1607,7 +1655,7 @@ def build_review_jury_panel(
                 dict(runtime.get("review") or {}) or None
             )
             if disabled:
-                ui.notify("AI 评审正在进行中，请等待完成", type="info")
+                ui.notify(f"{_label}，请等待当前流程完成", type="info")
                 return
             if not requires_confirmation:
                 await start_review()
@@ -1645,6 +1693,10 @@ def build_review_jury_panel(
             start_btn.props(remove="unelevated outline flat color icon")
             if label == "重新评审":
                 start_btn.props(add="flat color=blue-grey-7 icon=refresh")
+            elif label == "AI 改写中":
+                start_btn.props(add="unelevated color=teal-7 icon=auto_fix_high")
+            elif label == "修改稿待选择":
+                start_btn.props(add="outline color=amber-9 icon=compare_arrows")
             else:
                 start_btn.props(add="unelevated color=indigo-7 icon=rate_review")
             if disabled:
@@ -1669,6 +1721,10 @@ def build_review_jury_panel(
             runtime["application"] = applications[0] if applications else None
             render_review_result(runtime["review"])
             render_review_summary(runtime["review"])
+            sync_persisted_rewrite_progress(
+                runtime["review"],
+                dict(runtime.get("application") or {}) or None,
+            )
             result_section.set_visibility(True)
 
         def refresh_active_review() -> None:
@@ -1695,7 +1751,20 @@ def build_review_jury_panel(
             runtime["review"] = refreshed
             render_review_summary(refreshed)
             if changed:
+                try:
+                    applications = service.list_editorial_review_applications(
+                        str(refreshed.get("id") or ""), limit=1
+                    )
+                except Exception:  # noqa: BLE001
+                    applications = []
+                runtime["application"] = (
+                    dict(applications[0]) if applications else None
+                )
                 render_review_result(refreshed)
+                sync_persisted_rewrite_progress(
+                    refreshed,
+                    dict(runtime.get("application") or {}) or None,
+                )
                 sync_start_button()
                 notify_review_updated(refreshed)
 

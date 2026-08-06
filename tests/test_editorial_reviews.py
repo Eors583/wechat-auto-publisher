@@ -16,7 +16,9 @@ from app.services.editorial_reviews import (
     merge_review_config,
     normalize_review_result,
     normalize_rewrite_candidate,
+    paragraph_rewrite_schema,
     review_result_schema,
+    rewrite_candidate_schema,
 )
 
 
@@ -539,6 +541,97 @@ def test_review_schema_requires_every_decision_field() -> None:
         "conclusion",
     }
     assert schema["additionalProperties"] is False
+
+
+def test_irreparable_missing_review_fields_become_a_blocking_safe_result(
+    tmp_path, monkeypatch
+) -> None:
+    service, batch_id, job_id = _ready_service(tmp_path)
+    client = _QueuedClient(
+        [
+            {"status": "partial"},
+            {"status": "invalid_input", "reason": "没有完整评审内容"},
+        ]
+    )
+    _patch_text_model(monkeypatch, client)
+
+    review = service.run_editorial_review(
+        batch_id,
+        job_id,
+        profile_id="professional_depth",
+    )
+
+    assert review["status"] == "completed"
+    assert review["error"] == ""
+    assert review["blocking_count"] == 1
+    result = review["result"]
+    assert set(review_result_schema()["required"]) <= set(result)
+    assert result["overall_score"] == 0
+    assert result["issues"][0]["blocks_draft"] is True
+    assert result["issues"][0]["can_auto_apply"] is False
+    assert "需重新评审或人工复核" in result["conclusion"]
+
+
+def test_rewrite_contracts_require_complete_candidate_fields() -> None:
+    candidate = rewrite_candidate_schema()
+    paragraphs = paragraph_rewrite_schema()
+
+    assert set(candidate["required"]) == {
+        "title",
+        "subtitle",
+        "digest",
+        "body",
+        "change_summary",
+    }
+    assert candidate["additionalProperties"] is False
+    assert paragraphs["required"] == ["paragraph_updates", "change_summary"]
+    assert paragraphs["properties"]["paragraph_updates"]["items"][
+        "required"
+    ] == ["number", "text"]
+
+
+def test_rewrite_uses_native_candidate_schema(tmp_path, monkeypatch) -> None:
+    service, batch_id, job_id = _ready_service(tmp_path)
+
+    class NativeClient:
+        def __init__(self) -> None:
+            self.schemas: list[dict] = []
+
+        def complete_json(
+            self,
+            _prompt: str,
+            schema: dict,
+            *,
+            title: str,
+        ) -> dict:
+            self.schemas.append(schema)
+            if title == "公众号评审结果":
+                return _review_payload()
+            return {
+                "title": "结构化修改后的标题",
+                "subtitle": "结构化副标题",
+                "digest": "结构化摘要",
+                "body": "结构化修改后的完整正文。",
+                "change_summary": "完成修改",
+            }
+
+    client = NativeClient()
+    _patch_text_model(monkeypatch, client)  # type: ignore[arg-type]
+    review = service.run_editorial_review(
+        batch_id,
+        job_id,
+        profile_id="professional_depth",
+    )
+    generated = service.generate_editorial_rewrite_candidate(
+        batch_id,
+        job_id,
+        review["id"],
+        issue_ids=[],
+        rewrite_mode="title_only",
+    )
+
+    assert generated["status"] == "candidate_ready"
+    assert client.schemas == [review_result_schema(), rewrite_candidate_schema()]
 
 
 def test_title_only_candidate_keeps_body_byte_for_byte(

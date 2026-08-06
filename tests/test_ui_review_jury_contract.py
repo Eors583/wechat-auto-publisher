@@ -41,6 +41,19 @@ def test_review_progress_uses_persisted_state_and_never_finishes_early() -> None
     assert completed["title"] == "AI 评审已完成"
     assert completed["active"] is False
 
+    rewrite_started = started + timedelta(minutes=10)
+    rewriting = editorial_review_progress(
+        {
+            "status": "rewriting",
+            "created_at": started.isoformat(),
+            "updated_at": rewrite_started.isoformat(),
+        },
+        now=rewrite_started + timedelta(seconds=8),
+    )
+    assert rewriting["percent"] == "32%"
+    assert rewriting["elapsed_seconds"] == 8
+    assert rewriting["title"] == "AI 正在生成修改稿"
+
 
 def test_open_review_workbench_polls_active_review_and_renders_progress() -> None:
     render_summary = _function("render_review_summary")
@@ -730,8 +743,24 @@ def test_review_start_has_running_and_rerun_states() -> None:
     action = _function("_review_start_action")
     literals = _string_literals(action)
 
-    assert {"开始 AI 评审", "AI 评审中", "重新评审"} <= literals
-    assert {"running", "rewriting"} <= literals
+    assert {
+        "开始 AI 评审",
+        "AI 评审中",
+        "AI 改写中",
+        "修改稿待选择",
+        "重新评审",
+    } <= literals
+    assert {"running", "rewriting", "candidate_ready"} <= literals
+
+
+def test_rewrite_state_restores_progress_and_refreshes_application() -> None:
+    sync_progress = _function("sync_persisted_rewrite_progress")
+    refresh = _function("refresh_active_review")
+    sync_literals = _string_literals(sync_progress)
+
+    assert {"generating", "candidate_ready", "failed"} <= sync_literals
+    assert len(_calls(sync_progress, "render_rewrite_progress")) == 3
+    assert _calls(refresh, "service.list_editorial_review_applications")
 
 
 def test_canceling_rerun_cannot_start_a_review_or_call_the_model() -> None:
