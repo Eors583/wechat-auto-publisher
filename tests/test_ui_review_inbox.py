@@ -458,11 +458,11 @@ def test_review_workbench_opens_directly_in_deep_edit_without_mode_switch() -> N
     assert "render_quick_review_summary()" in mode_source
     assert "尚未进行 AI 评审" in mode_source
     assert "手动开始 AI 评审" not in mode_source
-    assert "_quick_review_action(" in mode_source
+    assert "_quick_review_action(" not in mode_source
     assert '"查看完整评审"' not in mode_source
     assert "review_jury_actions.update(build_review_jury_panel(" in mode_source
     assert "await reveal_result()" in mode_source
-    assert "await reveal_settings()" in mode_source
+    assert "await reveal_settings()" not in mode_source
     assert mode_source.index("quick_summary_host =") < mode_source.index(
         "title_choice ="
     )
@@ -631,49 +631,20 @@ def test_confirmation_gate_blocks_running_and_open_risks() -> None:
     ) == ("AI 改写稿已生成，请先选择使用原文还是改写稿", 0)
 
 
-def test_quick_review_action_covers_unreviewed_running_completed_and_failed() -> None:
-    assert tasks._quick_review_action(None) == (  # noqa: SLF001
-        "开始 AI 评审",
-        "primary",
-        False,
-    )
-    assert tasks._quick_review_action(  # noqa: SLF001
-        {"status": "running"}
-    ) == ("AI 评审进行中…", "running", True)
-    assert tasks._quick_review_action(  # noqa: SLF001
-        {"status": "completed"}
-    ) == ("查看评审结论", "result", False)
-    assert tasks._quick_review_action(  # noqa: SLF001
-        {"status": "candidate_ready"}
-    ) == ("选择最终文章版本", "comparison", False)
-    assert tasks._quick_review_action(  # noqa: SLF001
-        {"status": "applied"}
-    ) == ("查看改写前后对比", "comparison", False)
-    assert tasks._quick_review_action(  # noqa: SLF001
-        {"status": "source_kept"}
-    ) == ("查看改写前后对比", "comparison", False)
-    assert tasks._quick_review_action(  # noqa: SLF001
-        {"status": "failed"}
-    ) == ("重新评审", "rerun", False)
-
-
-def test_quick_review_uses_the_shared_start_action_and_default_summary() -> None:
+def test_quick_review_summary_omits_duplicate_review_action_buttons() -> None:
     source = inspect.getsource(tasks.open_review_workbench)
 
-    assert 'review_jury_actions.get("start_review")' in source
     assert 'review_jury_actions.get("settings_summary")' in source
-    assert '"调整设置"' in source
-    assert "on_click=start_initial_review_from_quick" in source
-    assert 'button.set_text("AI 评审进行中…")' in source
-    assert "button.disable()" in source
-    assert "on_click=reveal_review_settings" in source
-    assert 'review_jury_actions.get("reveal_comparison")' in source
+    assert '"调整设置"' not in source
+    assert "on_click=start_initial_review_from_quick" not in source
+    assert "on_click=reveal_review_settings" not in source
+    assert 'review_jury_actions.get("reveal_comparison")' not in source
     assert '"当前版本：AI 改写后"' in source
     assert '"待选择：保留原文或采用 AI 改写稿"' in source
     assert '"已选择：保留改写前原文"' in source
     assert '"AI 改写后又有人工编辑"' in source
     assert "rewrite_matches_editor" in source
-    assert "on_click=reveal_article_comparison" in source
+    assert "on_click=reveal_article_comparison" not in source
 
 
 def test_confirm_rechecks_gate_before_invoking_confirmation_endpoint() -> None:

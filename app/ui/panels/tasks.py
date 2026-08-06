@@ -64,24 +64,6 @@ def _review_confirmation_gate(review: dict[str, Any] | None) -> tuple[str, int]:
     return "", 0
 
 
-def _quick_review_action(review: dict[str, Any] | None) -> tuple[str, str, bool]:
-    """Return the quick-card action label, visual role and disabled state."""
-
-    current = dict(review or {})
-    if not current:
-        return "开始 AI 评审", "primary", False
-    status = str(current.get("status") or "")
-    if status in {"running", "rewriting"}:
-        return "AI 评审进行中…", "running", True
-    if status == "candidate_ready":
-        return "选择最终文章版本", "comparison", False
-    if status in {"applied", "source_kept"}:
-        return "查看改写前后对比", "comparison", False
-    if status == "completed":
-        return "查看评审结论", "result", False
-    return "重新评审", "rerun", False
-
-
 INBOX_BUCKETS = {
     "review": {
         "label": "待审核",
@@ -1869,41 +1851,6 @@ def open_review_workbench(
                 once=True,
             )
 
-        async def reveal_article_comparison() -> None:
-            """Open deep review and focus the persisted before/after snapshots."""
-
-            apply_deep_review_mode()
-            reveal_comparison = review_jury_actions.get("reveal_comparison")
-            if callable(reveal_comparison):
-                await reveal_comparison()
-                return
-            await reveal_deep_review()
-
-        async def reveal_review_settings() -> None:
-            apply_deep_review_mode()
-            reveal_settings = review_jury_actions.get("reveal_settings")
-            if callable(reveal_settings):
-                await reveal_settings()
-
-        async def start_review_from_quick() -> None:
-            start_review = review_jury_actions.get("start_review")
-            if callable(start_review):
-                await start_review()
-                return
-            ui.notify("AI 评审入口仍在准备中，请稍后重试", type="warning")
-
-        async def start_initial_review_from_quick(event: Any) -> None:
-            """Show the shared running state before the background task is visible."""
-
-            button = event.sender
-            button.set_text("AI 评审进行中…")
-            button.disable()
-            try:
-                await start_review_from_quick()
-            finally:
-                if workbench_alive():
-                    render_quick_review_summary()
-
         def render_quick_review_summary() -> None:
             """Keep decision-critical context visible in quick review mode."""
 
@@ -1941,9 +1888,6 @@ def open_review_workbench(
                     ("digest", "digest"),
                     ("body", "body"),
                 )
-            )
-            action_label, action_kind, action_disabled = _quick_review_action(
-                latest_review or None
             )
             review_result = dict(latest_review.get("result") or {})
             review_summary = str(
@@ -2056,48 +2000,6 @@ def open_review_workbench(
                                 ui.label(
                                     f"AI 评审仍有 {blocking_count} 个阻断项"
                                 ).classes("text-warning text-caption")
-                        with ui.column().classes("items-end gap-1"):
-                            if action_kind == "primary":
-                                ui.button(
-                                    action_label,
-                                    on_click=start_initial_review_from_quick,
-                                ).props(
-                                    "unelevated color=indigo-7 no-caps icon=rate_review"
-                                )
-                            elif action_disabled:
-                                running_btn = ui.button(
-                                    action_label,
-                                ).props(
-                                    "outline color=indigo-7 no-caps icon=hourglass_top"
-                                )
-                                running_btn.disable()
-                            elif action_kind == "result":
-                                ui.button(
-                                    action_label,
-                                    on_click=reveal_deep_review,
-                                ).props(
-                                    "outline color=indigo-7 no-caps icon=rate_review"
-                                )
-                            elif action_kind == "comparison":
-                                ui.button(
-                                    action_label,
-                                    on_click=reveal_article_comparison,
-                                ).props(
-                                    "outline color=green-7 no-caps icon=compare_arrows"
-                                )
-                            else:
-                                ui.button(
-                                    action_label,
-                                    on_click=start_review_from_quick,
-                                ).props(
-                                    "flat color=blue-grey-7 no-caps icon=refresh"
-                                )
-                            ui.button(
-                                "调整设置",
-                                on_click=reveal_review_settings,
-                            ).props(
-                                "flat dense color=blue-grey-7 no-caps icon=tune"
-                            )
                     ui.separator().classes("q-my-sm")
                     with ui.row().classes("w-full items-center gap-3"):
                         if cover_preview_url or (
