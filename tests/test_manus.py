@@ -90,6 +90,16 @@ class ManusClientTests(unittest.TestCase):
             client.rewrite("改写要求")
             client.expand_rewrite("话题", "待扩写正文")
             client.complete("只回复 OK")
+            client.complete_json(
+                "返回对象",
+                {
+                    "type": "object",
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"],
+                    "additionalProperties": False,
+                },
+                title="公众号评审结果",
+            )
             client.optimize_titles("优化标题")
 
         self.assertEqual(
@@ -98,6 +108,7 @@ class ManusClientTests(unittest.TestCase):
                 "公众号文章改写",
                 "公众号文章扩写",
                 "公众号内容生成",
+                "公众号评审结果",
                 "公众号标题优化",
             },
         )

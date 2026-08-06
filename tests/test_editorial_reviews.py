@@ -16,6 +16,7 @@ from app.services.editorial_reviews import (
     merge_review_config,
     normalize_review_result,
     normalize_rewrite_candidate,
+    review_result_schema,
 )
 
 
@@ -487,6 +488,57 @@ def test_invalid_json_is_repaired_once(tmp_path, monkeypatch) -> None:
     assert review["status"] == "completed"
     assert len(client.prompts) == 2
     assert "修复为一个语法有效的严格 JSON" in client.prompts[1]
+    assert "必须严格符合以下 JSON Schema" in client.prompts[1]
+
+
+def test_review_uses_native_structured_schema_when_provider_supports_it(
+    tmp_path, monkeypatch
+) -> None:
+    service, batch_id, job_id = _ready_service(tmp_path)
+
+    class NativeClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str]] = []
+
+        def complete_json(
+            self,
+            prompt: str,
+            schema: dict,
+            *,
+            title: str,
+        ) -> dict:
+            self.calls.append((prompt, schema, title))
+            return _review_payload()
+
+        def complete(self, _prompt: str) -> str:
+            raise AssertionError("native structured provider must not use text wrapper")
+
+    client = NativeClient()
+    _patch_text_model(monkeypatch, client)  # type: ignore[arg-type]
+    review = service.run_editorial_review(
+        batch_id,
+        job_id,
+        profile_id="professional_depth",
+    )
+
+    assert review["status"] == "completed"
+    assert len(client.calls) == 1
+    assert client.calls[0][1] == review_result_schema()
+    assert client.calls[0][2] == "公众号评审结果"
+
+
+def test_review_schema_requires_every_decision_field() -> None:
+    schema = review_result_schema()
+
+    assert set(schema["required"]) == {
+        "overall_score",
+        "summary",
+        "strengths",
+        "dimensions",
+        "issues",
+        "conclusion",
+    }
+    assert schema["additionalProperties"] is False
 
 
 def test_title_only_candidate_keeps_body_byte_for_byte(

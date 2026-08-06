@@ -213,6 +213,23 @@ class ManusClient:
         )
         return str(value.get("text") or "").strip()
 
+    def complete_json(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        *,
+        title: str = "公众号结构化内容生成",
+    ) -> dict[str, Any]:
+        """Return a JSON object through Manus' native structured output.
+
+        Wrapping an object-shaped response in a single ``text`` field lets the
+        provider legally return an incomplete fragment such as ``"{"`` while
+        still marking structured extraction successful.  Callers that own a
+        concrete JSON contract should pass it directly instead.
+        """
+
+        return self._run_structured_task(prompt, schema, title=title)
+
     def optimize_titles(self, prompt: str) -> TitleResult:
         value = self._run_structured_task(
             prompt,

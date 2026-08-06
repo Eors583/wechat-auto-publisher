@@ -279,6 +279,7 @@ class EditorialReviewService:
                         prompt,
                         label="评审结果",
                         validator=validate_review_payload,
+                        schema=review_result_schema(),
                     ),
                     config=review_config,
                 )
@@ -1672,24 +1673,118 @@ def complete_json(
     *,
     label: str,
     validator: Callable[[dict[str, Any]], None] | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    raw = client.complete(prompt)
+    native_complete = getattr(client, "complete_json", None)
+
+    def request_value(request_prompt: str, *, repair: bool = False) -> Any:
+        if schema is not None and callable(native_complete):
+            return native_complete(
+                request_prompt,
+                schema,
+                title=f"公众号{label}{'修复' if repair else ''}",
+            )
+        return client.complete(request_prompt)
+
+    raw = request_value(prompt)
     try:
         value = parse_json_object(raw)
         if validator:
             validator(value)
         return value
     except ValueError:
+        raw_text = (
+            json.dumps(raw, ensure_ascii=False)
+            if isinstance(raw, dict)
+            else str(raw or "")
+        )
+        schema_contract = (
+            "\n必须严格符合以下 JSON Schema："
+            + json.dumps(schema, ensure_ascii=False)
+            if schema is not None
+            else ""
+        )
         repair_prompt = (
             f"请把下面的{label}修复为一个语法有效的严格 JSON 对象。"
             "补齐系统要求的全部字段及正确数据类型，不得增删业务判断，"
-            "不要输出 Markdown 代码块或解释。\n\n"
-            f"{str(raw or '')[:24000]}"
+            "不要输出 Markdown 代码块或解释。"
+            f"{schema_contract}\n\n待修复内容：\n{raw_text[:24000]}"
         )
-        value = parse_json_object(client.complete(repair_prompt))
+        value = parse_json_object(request_value(repair_prompt, repair=True))
         if validator:
             validator(value)
         return value
+
+
+def review_result_schema() -> dict[str, Any]:
+    """Return the provider-safe structured contract for editorial reviews."""
+
+    return {
+        "type": "object",
+        "properties": {
+            "overall_score": {"type": "number"},
+            "summary": {"type": "string"},
+            "strengths": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "dimensions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "score": {"type": "number"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["id", "name", "score", "summary"],
+                    "additionalProperties": False,
+                },
+            },
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "role_id": {"type": "string"},
+                        "category": {"type": "string"},
+                        "severity": {"type": "string"},
+                        "location": {"type": "string"},
+                        "excerpt": {"type": "string"},
+                        "problem": {"type": "string"},
+                        "suggestion": {"type": "string"},
+                        "evidence_status": {"type": "string"},
+                        "can_auto_apply": {"type": "boolean"},
+                        "blocks_draft": {"type": "boolean"},
+                    },
+                    "required": [
+                        "role_id",
+                        "category",
+                        "severity",
+                        "location",
+                        "excerpt",
+                        "problem",
+                        "suggestion",
+                        "evidence_status",
+                        "can_auto_apply",
+                        "blocks_draft",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "conclusion": {"type": "string"},
+        },
+        "required": [
+            "overall_score",
+            "summary",
+            "strengths",
+            "dimensions",
+            "issues",
+            "conclusion",
+        ],
+        "additionalProperties": False,
+    }
 
 
 def validate_review_payload(value: dict[str, Any]) -> None:
