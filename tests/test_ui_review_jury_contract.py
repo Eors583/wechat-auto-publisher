@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -8,11 +9,51 @@ import pytest
 from app.ui.panels.review_jury import (
     _comparison_plain_text,
     _format_dimension_score,
+    editorial_review_progress,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW_JURY_PANEL = ROOT / "app" / "ui" / "panels" / "review_jury.py"
 UI_STYLES = ROOT / "app" / "ui" / "styles.py"
+
+
+def test_review_progress_uses_persisted_state_and_never_finishes_early() -> None:
+    started = datetime(2026, 8, 6, 4, 0, tzinfo=UTC)
+    review = {"status": "running", "created_at": started.isoformat()}
+
+    assert editorial_review_progress(
+        review, now=started + timedelta(seconds=2)
+    )["percent"] == "12%"
+    assert editorial_review_progress(
+        review, now=started + timedelta(seconds=35)
+    )["percent"] == "48%"
+    waiting = editorial_review_progress(
+        review, now=started + timedelta(seconds=125)
+    )
+    assert waiting["percent"] == "88%"
+    assert waiting["active"] is True
+
+    completed = editorial_review_progress(
+        {**review, "status": "completed"},
+        now=started + timedelta(seconds=126),
+    )
+    assert completed["percent"] == "100%"
+    assert completed["title"] == "AI 评审已完成"
+    assert completed["active"] is False
+
+
+def test_open_review_workbench_polls_active_review_and_renders_progress() -> None:
+    render_summary = _function("render_review_summary")
+    refresh = _function("refresh_active_review")
+    source = REVIEW_JURY_PANEL.read_text(encoding="utf-8")
+
+    assert _calls(render_summary, "ui.linear_progress")
+    assert any(
+        "review-status-progress__percent" in value
+        for value in _string_literals(render_summary)
+    )
+    assert "service.list_editorial_reviews" in ast.unparse(refresh)
+    assert "client_timer(2.0, refresh_active_review, immediate=False)" in source
 
 
 def test_comparison_hides_markdown_authoring_markers() -> None:

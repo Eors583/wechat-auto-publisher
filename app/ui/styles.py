@@ -642,6 +642,14 @@ body, .q-page, .nicegui-content {
   border-radius: 15px !important;
   background: #fff !important;
 }
+.review-status-progress { gap: 10px !important; }
+.review-status-progress__percent {
+  min-width: 48px;
+  color: var(--accent-dark) !important;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.review-status-progress__bar { overflow: hidden; }
 .review-issue-card:hover {
   border-color: rgba(8, 122, 99, .28) !important;
 }

@@ -20,7 +20,10 @@ from app.ui.ip_whitelist_guide import (
     show_ip_whitelist_guide,
 )
 from app.ui.lifecycle import client_timer
-from app.ui.panels.review_jury import build_review_jury_panel
+from app.ui.panels.review_jury import (
+    build_review_jury_panel,
+    editorial_review_progress,
+)
 from app.ui.state import (
     STATUS_LABEL,
     AppState,
@@ -465,6 +468,7 @@ def build_tasks_panel(
             review_status = str(review.get("status") or "")
             is_rewrite = review_status == "rewriting"
             candidate_waiting = review_status == "candidate_ready"
+            review_progress = editorial_review_progress(review)
             activities.append(
                 {
                     "kind": "rewrite" if is_rewrite or candidate_waiting else "review",
@@ -476,16 +480,8 @@ def build_tasks_panel(
                             else ""
                         )
                     ),
-                    "status": (
-                        "AI 改写候选稿已生成，等待选择版本"
-                        if candidate_waiting
-                        else "AI 正在后台改写并生成候选稿"
-                        if is_rewrite
-                        else "AI 正在评审文章"
-                    ),
-                    "progress": (
-                        1.0 if candidate_waiting else 0.75 if is_rewrite else 0.55
-                    ),
+                    "status": str(review_progress["stage"]),
+                    "progress": float(review_progress["value"]),
                     "batch_id": str(review.get("batch_id") or ""),
                     "job_id": int(review.get("job_id") or 0),
                 }

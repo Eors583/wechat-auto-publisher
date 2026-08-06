@@ -498,9 +498,9 @@ def test_task_center_exposes_background_generation_and_review_progress() -> None
     assert "background-activity-dock" in source
     assert "start_background_review" in source
     assert "AI 正在评审文章" in source
-    assert "AI 正在后台改写并生成候选稿" in source
-    assert "AI 改写候选稿已生成，等待选择版本" in source
-    assert "1.0 if candidate_waiting" in source
+    assert "editorial_review_progress(review)" in source
+    assert 'review_progress["stage"]' in source
+    assert 'review_progress["value"]' in source
     assert "后台生成中" in source
     assert "查看详情" in source
     assert "ui.linear_progress(" in source

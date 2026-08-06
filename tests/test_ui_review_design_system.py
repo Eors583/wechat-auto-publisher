@@ -45,6 +45,7 @@ def test_review_design_system_is_responsive_and_token_driven() -> None:
         ".review-issue-card--safety {",
         ".review-choice-card {",
         ".review-progress-card--completed {",
+        ".review-status-progress__percent {",
     ):
         assert selector in APP_CSS
 

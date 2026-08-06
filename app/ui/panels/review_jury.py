@@ -4,6 +4,7 @@ import json
 import math
 import re
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from nicegui import run, ui
@@ -11,6 +12,7 @@ from nicegui import run, ui
 from app.config import load_config
 from app.editorial_review import REVIEW_ROLES
 from app.services.batches import BatchService
+from app.ui.lifecycle import client_timer
 from app.ui.state import set_button_loading
 
 SEVERITY_LABELS = {
@@ -102,6 +104,101 @@ def _review_start_action(review: dict[str, Any] | None) -> tuple[str, bool, bool
     if str(review.get("status") or "") in {"running", "rewriting"}:
         return "AI 评审中", True, False
     return "重新评审", False, True
+
+
+def editorial_review_progress(
+    review: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Map persisted review state to one shared UI progress contract.
+
+    Model providers do not expose token-by-token progress for this operation, so
+    an active review advances through conservative, time-based stages and never
+    reaches 100% until the persisted state is terminal.  Both the workbench and
+    the background activity dock consume this contract to avoid contradictory
+    labels or percentages.
+    """
+
+    current = dict(review or {})
+    status = str(current.get("status") or "")
+    created_at = str(current.get("created_at") or "")
+    elapsed_seconds = 0
+    if created_at:
+        try:
+            started = datetime.fromisoformat(created_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            clock = now or datetime.now(UTC)
+            if clock.tzinfo is None:
+                clock = clock.replace(tzinfo=UTC)
+            elapsed_seconds = max(0, int((clock - started).total_seconds()))
+        except (TypeError, ValueError):
+            elapsed_seconds = 0
+
+    if status == "running":
+        if elapsed_seconds < 5:
+            value, stage = 0.12, "正在创建评审任务"
+        elif elapsed_seconds < 20:
+            value, stage = 0.28, "正在整理文章与评审规则"
+        elif elapsed_seconds < 50:
+            value, stage = 0.48, "正在评估标题、开头与完读潜力"
+        elif elapsed_seconds < 90:
+            value, stage = 0.68, "正在汇总各评审角色意见"
+        else:
+            value, stage = 0.88, "模型仍在处理，正在等待完整结果"
+        return {
+            "status": status,
+            "value": value,
+            "percent": f"{round(value * 100)}%",
+            "title": "AI 评审进行中",
+            "stage": stage,
+            "elapsed_seconds": elapsed_seconds,
+            "active": True,
+            "failed": False,
+        }
+
+    if status == "rewriting":
+        return {
+            "status": status,
+            "value": 0.76,
+            "percent": "76%",
+            "title": "AI 正在生成修改稿",
+            "stage": "正在按已勾选意见改写并重新排版",
+            "elapsed_seconds": elapsed_seconds,
+            "active": True,
+            "failed": False,
+        }
+
+    terminal_titles = {
+        "completed": "AI 评审已完成",
+        "candidate_ready": "AI 修改稿已生成，等待选择版本",
+        "applied": "AI 修改稿已应用",
+        "source_kept": "已选择保留原文",
+    }
+    if status in terminal_titles:
+        return {
+            "status": status,
+            "value": 1.0,
+            "percent": "100%",
+            "title": terminal_titles[status],
+            "stage": "评审结论和改进意见已生成",
+            "elapsed_seconds": elapsed_seconds,
+            "active": False,
+            "failed": False,
+        }
+
+    failed = status in {"failed", "stale"}
+    return {
+        "status": status,
+        "value": 1.0 if failed else 0.0,
+        "percent": "100%" if failed else "0%",
+        "title": "AI 评审失败" if status == "failed" else "尚未开始 AI 评审",
+        "stage": str(current.get("error") or "尚未生成评审结果"),
+        "elapsed_seconds": elapsed_seconds,
+        "active": False,
+        "failed": failed,
+    }
 
 
 def _issue_can_auto_apply(issue: dict[str, Any]) -> bool:
@@ -1010,21 +1107,41 @@ def build_review_jury_panel(
             status = str(review.get("status") or "")
             if status in {"failed", "stale"}:
                 return
-            with result_summary_host:
-                with ui.card().classes(
-                    "review-summary-card w-full"
-                ).props("flat"):
-                    with ui.column().classes("gap-0"):
-                        ui.label("AI 评审已完成").classes(
-                            "text-subtitle1 text-weight-bold"
-                        )
-                        ui.label(
-                            str(
-                                result.get("conclusion")
-                                or result.get("summary")
-                                or "评审结论和改进意见已生成"
-                            )
-                        ).classes("muted")
+            progress = editorial_review_progress(review)
+            with result_summary_host, ui.card().classes(
+                "review-summary-card review-status-progress w-full"
+            ).props("flat"):
+                with ui.row().classes(
+                    "w-full items-center justify-between q-gutter-sm"
+                ):
+                    ui.label(str(progress["title"])).classes(
+                        "text-subtitle1 text-weight-bold"
+                    )
+                    ui.label(str(progress["percent"])).classes(
+                        "review-status-progress__percent text-weight-bold"
+                    )
+                ui.linear_progress(
+                    value=float(progress["value"]),
+                    show_value=False,
+                    size="12px",
+                ).props(
+                    "color=teal-8 track-color=teal-1 rounded"
+                ).classes("review-status-progress__bar w-full")
+                detail = (
+                    str(progress["stage"])
+                    if bool(progress["active"])
+                    else str(
+                        result.get("conclusion")
+                        or result.get("summary")
+                        or progress["stage"]
+                    )
+                )
+                ui.label(detail).classes("muted")
+                if bool(progress["active"]):
+                    elapsed = int(progress["elapsed_seconds"] or 0)
+                    ui.label(
+                        f"已处理 {elapsed // 60:02d}:{elapsed % 60:02d} · 完成后将自动刷新结果"
+                    ).classes("muted text-caption")
 
         def render_review_result(
             review: dict[str, Any] | None,
@@ -1098,7 +1215,7 @@ def build_review_jury_panel(
                             )
                 if review_status in {"running", "rewriting"}:
                     ui.label(
-                        "该评审仍在处理中，请稍后关闭并重新打开审核工作台查看结果。"
+                        "该评审仍在处理中，下方会自动显示当前进度并在完成后刷新结果。"
                     ).classes("text-info")
                     return
                 if review_status in {"failed", "stale"}:
@@ -1553,6 +1670,36 @@ def build_review_jury_panel(
             render_review_result(runtime["review"])
             render_review_summary(runtime["review"])
             result_section.set_visibility(True)
+
+        def refresh_active_review() -> None:
+            """Refresh an open workbench without requiring close-and-reopen."""
+
+            if not ui_alive():
+                return
+            current = dict(runtime.get("review") or {})
+            current_status = str(current.get("status") or "")
+            if current_status not in {"running", "rewriting"}:
+                return
+            try:
+                reviews = service.list_editorial_reviews(job_id=job_id, limit=1)
+            except Exception:  # noqa: BLE001
+                render_review_summary(current)
+                return
+            refreshed = dict(reviews[0]) if reviews else current
+            changed = (
+                str(refreshed.get("id") or "") != str(current.get("id") or "")
+                or str(refreshed.get("status") or "") != current_status
+                or int(refreshed.get("revision") or 0)
+                != int(current.get("revision") or 0)
+            )
+            runtime["review"] = refreshed
+            render_review_summary(refreshed)
+            if changed:
+                render_review_result(refreshed)
+                sync_start_button()
+                notify_review_updated(refreshed)
+
+        client_timer(2.0, refresh_active_review, immediate=False)
 
     return {
         "reveal_result": scroll_to_review_result,
