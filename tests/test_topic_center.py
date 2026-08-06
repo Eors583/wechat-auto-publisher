@@ -71,6 +71,31 @@ def test_topic_sources_are_bootstrapped_and_refreshed_independently(
     assert items[0]["title"] == "企业组织的新变化"
 
 
+def test_default_sources_are_initialized_only_once_per_service(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _config(tmp_path)
+    service = TopicSourceService(Database(config["_db_path"]), config)
+    original = service.db.get_topic_source
+    calls = 0
+
+    def counted(source_id: str):
+        nonlocal calls
+        calls += 1
+        return original(source_id)
+
+    monkeypatch.setattr(service.db, "get_topic_source", counted)
+    service.list_sources()
+    initialization_calls = calls
+    assert initialization_calls > 0
+
+    service.list_sources()
+    service.list_topics(days=7)
+    assert calls == initialization_calls
+    assert (service.db.owner_user_id or "__unscoped__") in service._defaults_ensured_for
+
+
 def test_default_topic_sources_are_isolated_between_users(
     tmp_path: Path,
 ) -> None:

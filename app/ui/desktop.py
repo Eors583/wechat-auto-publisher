@@ -373,13 +373,24 @@ def create_desktop_app() -> None:
             with ui.tab_panel(tab_settings):
                 settings_host = ui.column().classes("w-full")
 
+        for host in (topics_host, jobs_host, settings_host):
+            with host:
+                with ui.row().classes(
+                    "w-full items-center justify-center q-py-xl gap-2"
+                ):
+                    ui.spinner("dots", size="md", color="teal-9")
+                    ui.label("正在加载页面…").classes("muted")
+
         mounted_tabs: set[str] = set()
+        scheduled_tabs: set[str] = set()
 
         def mount_wizard() -> None:
+            wizard_host.clear()
             with wizard_host:
                 _build_wizard(tabs, tab_topics, tab_jobs, state=page_state)
 
         def mount_topics() -> None:
+            topics_host.clear()
             with topics_host:
                 build_topic_center(page_state, tabs, tab_wizard)
 
@@ -399,10 +410,12 @@ def create_desktop_app() -> None:
                     ),
                 )
                 page_state.pending_task_center_entry = None
+            jobs_host.clear()
             with jobs_host:
                 build_tasks_panel(page_state, **task_panel_kwargs)
 
         def mount_settings() -> None:
+            settings_host.clear()
             with settings_host:
                 settings_tabs = (
                     ui.tabs()
@@ -468,11 +481,24 @@ def create_desktop_app() -> None:
                 return
             tab_mounts[tab_name]()
             mounted_tabs.add(tab_name)
+            scheduled_tabs.discard(tab_name)
+
+        def schedule_tab(tab: Any) -> None:
+            tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+            if tab_name in mounted_tabs or tab_name in scheduled_tabs:
+                return
+            scheduled_tabs.add(tab_name)
+            client_timer(
+                0.01,
+                lambda: mount_tab(tab),
+                once=True,
+                immediate=False,
+            )
 
         # Only the requested panel contributes elements to the initial
         # NiceGUI payload. Hidden workspaces are built on their first visit.
         mount_tab(initial_tab)
-        tabs.on_value_change(lambda event: mount_tab(event.value))
+        tabs.on_value_change(lambda event: schedule_tab(event.value))
 
 
 def _build_wizard(

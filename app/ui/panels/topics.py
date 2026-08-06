@@ -14,6 +14,7 @@ from app.services.followed_content import (
 )
 from app.services.topic_sources import SOURCE_TYPES
 from app.ui.panels.followed_articles import open_followed_articles_dialog
+from app.ui.lifecycle import client_timer
 from app.ui.state import AppState, set_button_loading
 
 
@@ -38,21 +39,69 @@ def build_topic_center(
         sources_tab = ui.tab(TOPIC_CENTER_TABS[2])
     with ui.tab_panels(inner_tabs, value=hot_tab).classes("w-full bg-transparent"):
         with ui.tab_panel(hot_tab):
-            _build_hot_topics(
+            hot_host = ui.column().classes("w-full")
+        with ui.tab_panel(accounts_tab):
+            accounts_host = ui.column().classes("w-full")
+        with ui.tab_panel(sources_tab):
+            sources_host = ui.column().classes("w-full")
+
+    inner_mounts = {
+        str(hot_tab.props["name"]): (
+            hot_host,
+            lambda: _build_hot_topics(
                 state,
                 topic_service,
                 workspace_tabs,
                 tab_wizard,
-            )
-        with ui.tab_panel(accounts_tab):
-            _build_followed_accounts(
+            ),
+        ),
+        str(accounts_tab.props["name"]): (
+            accounts_host,
+            lambda: _build_followed_accounts(
                 state,
                 follow_service,
                 workspace_tabs,
                 tab_wizard,
-            )
-        with ui.tab_panel(sources_tab):
-            _build_sources(topic_service)
+            ),
+        ),
+        str(sources_tab.props["name"]): (
+            sources_host,
+            lambda: _build_sources(topic_service),
+        ),
+    }
+    mounted_inner_tabs: set[str] = set()
+    scheduled_inner_tabs: set[str] = set()
+
+    def mount_inner_tab(tab: Any) -> None:
+        tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+        if tab_name in mounted_inner_tabs:
+            return
+        host, builder = inner_mounts[tab_name]
+        host.clear()
+        with host:
+            builder()
+        mounted_inner_tabs.add(tab_name)
+        scheduled_inner_tabs.discard(tab_name)
+
+    def schedule_inner_tab(tab: Any) -> None:
+        tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+        if tab_name in mounted_inner_tabs or tab_name in scheduled_inner_tabs:
+            return
+        scheduled_inner_tabs.add(tab_name)
+        host, _ = inner_mounts[tab_name]
+        with host:
+            with ui.row().classes("w-full items-center justify-center q-py-xl gap-2"):
+                ui.spinner("dots", size="md", color="teal-9")
+                ui.label("正在加载页面…").classes("muted")
+        client_timer(
+            0.01,
+            lambda: mount_inner_tab(tab),
+            once=True,
+            immediate=False,
+        )
+
+    schedule_inner_tab(hot_tab)
+    inner_tabs.on_value_change(lambda event: schedule_inner_tab(event.value))
 
 
 def _build_hot_topics(
@@ -130,6 +179,9 @@ def _build_hot_topics(
         )
         if mode == "history":
             items = [item for item in items if bool(item.get("used"))]
+        account_options = state.account_options()
+        target_account_ids = list(account_options)
+        target_account_count = len(target_account_ids)
         visible_items = items[: int(result_runtime["visible_limit"])]
         result_host.clear()
         with result_host:
@@ -192,14 +244,16 @@ def _build_hot_topics(
                         ):
                             with ui.menu():
                                 ui.menu_item(
-                                    f"直接生成（高级 · {len(state.account_options())} 个公众号）",
-                                    on_click=lambda _=None, row=dict(item): _queue_for_wizard(
+                                    f"直接生成（高级 · {target_account_count} 个公众号）",
+                                    on_click=lambda _=None,
+                                    row=dict(item),
+                                    account_ids=list(target_account_ids): _queue_for_wizard(
                                         state,
                                         workspace_tabs,
                                         tab_wizard,
                                         row,
                                         auto_start=True,
-                                        account_ids=list(state.account_options()),
+                                        account_ids=account_ids,
                                         topic_item_id=str(row["id"]),
                                     ),
                                 )

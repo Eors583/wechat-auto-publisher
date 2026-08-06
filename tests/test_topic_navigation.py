@@ -11,7 +11,12 @@ from app.ui.panels.followed_articles import (
     next_followed_article_fetch_limit,
     open_followed_articles_dialog,
 )
-from app.ui.panels.topics import TOPIC_CENTER_TABS, _queue_for_wizard
+from app.ui.panels.topics import (
+    TOPIC_CENTER_TABS,
+    _build_hot_topics,
+    _queue_for_wizard,
+    build_topic_center,
+)
 
 
 class _FakeTabs:
@@ -27,6 +32,23 @@ class _FakeTabs:
 def test_topic_center_merges_articles_into_followed_accounts() -> None:
     assert TOPIC_CENTER_TABS == ("选题内容", "我的关注", "来源管理")
     assert "关注文章" not in TOPIC_CENTER_TABS
+
+
+def test_topic_center_mounts_each_inner_page_only_when_selected() -> None:
+    source = inspect.getsource(build_topic_center)
+    assert "mounted_inner_tabs" in source
+    assert "scheduled_inner_tabs" in source
+    assert "inner_tabs.on_value_change" in source
+    assert "lambda: mount_inner_tab(tab)" in source
+    assert "immediate=False" in source
+    assert 'ui.label("正在加载页面…")' in source
+
+
+def test_hot_topic_cards_reuse_one_account_options_query_per_render() -> None:
+    source = inspect.getsource(_build_hot_topics)
+    assert source.count("state.account_options()") == 1
+    assert "target_account_count = len(target_account_ids)" in source
+    assert "len(state.account_options())" not in source
 
 
 def test_followed_article_cover_uses_local_wechat_image_proxy() -> None:

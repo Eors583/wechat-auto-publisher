@@ -36,7 +36,10 @@ def test_desktop_only_mounts_the_initial_workspace_on_first_paint() -> None:
 def test_inactive_workspaces_are_mounted_from_tab_changes() -> None:
     source = DESKTOP.read_text(encoding="utf-8")
 
-    assert "tabs.on_value_change(lambda event: mount_tab(event.value))" in source
+    assert "tabs.on_value_change(lambda event: schedule_tab(event.value))" in source
+    assert "lambda: mount_tab(tab)" in source
+    assert "immediate=False" in source
+    assert 'ui.label("正在加载页面…")' in source
     assert 'str(tab_wizard.props["name"]): mount_wizard' in source
     assert 'str(tab_topics.props["name"]): mount_topics' in source
     assert 'str(tab_jobs.props["name"]): mount_jobs' in source

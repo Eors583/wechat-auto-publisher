@@ -53,8 +53,12 @@ class TopicSourceService:
     def __init__(self, db: Database, config: dict[str, Any]) -> None:
         self.db = db
         self.config = config
+        self._defaults_ensured_for: set[str] = set()
 
     def ensure_defaults(self) -> None:
+        owner_key = self.db.owner_user_id or "__unscoped__"
+        if owner_key in self._defaults_ensured_for:
+            return
         topics = dict(self.config.get("topics") or {})
         defaults: list[dict[str, Any]] = [
             {
@@ -155,6 +159,7 @@ class TopicSourceService:
                 if "api.vvhan.com/api/hotlist/" in current_url:
                     source["enabled"] = bool(existing.get("enabled", True))
                     self.db.upsert_topic_source(source)
+        self._defaults_ensured_for.add(owner_key)
 
     def list_sources(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
         self.ensure_defaults()
