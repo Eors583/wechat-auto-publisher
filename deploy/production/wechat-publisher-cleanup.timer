@@ -1,0 +1,13 @@
+[Unit]
+Description=Check WeChat Publisher deployment disk usage hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+AccuracySec=1m
+Persistent=true
+Unit=wechat-publisher-cleanup.service
+
+[Install]
+WantedBy=timers.target
+

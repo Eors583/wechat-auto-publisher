@@ -1,0 +1,15 @@
+[Unit]
+Description=Clean obsolete WeChat Publisher deployment artifacts
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Environment=DEPLOY_ROOT=/opt/wechat-publisher
+Environment=DISK_THRESHOLD=80
+Environment=RELEASE_KEEP=5
+Environment=IMAGE_KEEP=5
+Environment=BUILD_CACHE_MAX_AGE=72h
+ExecStart=/opt/wechat-publisher/shared/cleanup-deploy-artifacts.sh
+

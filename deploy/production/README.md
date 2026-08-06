@@ -59,3 +59,33 @@ Docker 镜像、执行健康检查并切换 `current` 软链接。生产密钥�
 
 服务器本身使用固定出口 IP 时保持 `WECHAT_RELAY_ENABLED=false`，并把服务器
 公网出口 IP 加入每个公众号的微信开发者 IP 白名单。
+
+## 自动清理部署产物
+
+安装磁盘阈值清理脚本和 systemd 定时器：
+
+```bash
+install -m 750 deploy/production/cleanup-deploy-artifacts.sh \
+  /opt/wechat-publisher/shared/cleanup-deploy-artifacts.sh
+install -m 644 deploy/production/wechat-publisher-cleanup.service \
+  /etc/systemd/system/wechat-publisher-cleanup.service
+install -m 644 deploy/production/wechat-publisher-cleanup.timer \
+  /etc/systemd/system/wechat-publisher-cleanup.timer
+systemctl daemon-reload
+systemctl enable --now wechat-publisher-cleanup.timer
+```
+
+定时器每小时检查一次系统盘。占用低于 80% 时不做修改；达到阈值后：
+
+- 保留当前版本和最近 5 个 Release；
+- 保留当前容器使用的镜像和最近 5 个应用镜像；
+- 删除更旧且未被容器使用的应用镜像；
+- 清理 72 小时以前的悬空镜像与无用构建缓存；
+- 不清理容器、数据库卷或其他持久化数据。
+
+清理任务与部署脚本共用 `deploy.lock`，部署期间会自动跳过。可用以下命令查看状态：
+
+```bash
+systemctl status wechat-publisher-cleanup.timer
+journalctl -u wechat-publisher-cleanup.service --since today
+```
