@@ -15,6 +15,7 @@ from app.services.editorial_reviews import (
     build_rewrite_prompt,
     merge_review_config,
     normalize_review_result,
+    normalize_rewrite_candidate,
 )
 
 
@@ -241,6 +242,31 @@ def test_candidate_only_uses_selected_safe_issue_and_keeps_original(
     ].startswith("第一段介绍背景")
     assert safe_issue["id"] in client.prompts[-1]
     assert fact_issue["id"] not in client.prompts[-1]
+
+
+def test_rewrite_candidate_restores_double_escaped_paragraphs() -> None:
+    source = {
+        "title": "原标题",
+        "subtitle": "原副标题",
+        "digest": "原摘要",
+        "body": "第一段。\n\n原小标题。\n\n第二段保留2025年和32%。",
+    }
+    candidate = normalize_rewrite_candidate(
+        {
+            "title": "新标题",
+            "subtitle": "新副标题",
+            "digest": "新摘要",
+            "body": r"第一段。\n\n## 开放反馈\n\n第二段保留2025年和32%。",
+            "change_summary": "增加小标题",
+        },
+        source=source,
+        rewrite_mode="selected_issues",
+    )
+
+    assert candidate["body"] == (
+        "第一段。\n\n## 开放反馈\n\n第二段保留2025年和32%。"
+    )
+    assert r"\n" not in candidate["body"]
 
 
 def test_operator_can_explicitly_keep_source_after_comparing_candidate(

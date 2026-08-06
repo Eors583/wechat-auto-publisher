@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.accounts import apply_account_selection, require_bound_text_model
+from app.ai import normalize_model_body
 from app.ai.model_registry import build_text_client
 from app.config import database_target, load_config
 from app.db import Database
@@ -1042,8 +1043,8 @@ class EditorialReviewService:
                 row.get("selected_issue_ids_json"), []
             ),
             "rewrite_mode": str(row.get("rewrite_mode") or ""),
-            "rewritten_snapshot": _loads_json(
-                row.get("rewritten_snapshot_json"), {}
+            "rewritten_snapshot": _normalize_snapshot_body(
+                _loads_json(row.get("rewritten_snapshot_json"), {})
             ),
             "blocking_count": max(0, int(row.get("blocking_count") or 0)),
             "revision": max(0, int(row.get("revision") or 0)),
@@ -1068,8 +1069,8 @@ class EditorialReviewService:
             ),
             "instruction": str(row.get("instruction") or ""),
             "source_hash": str(row.get("source_hash") or ""),
-            "candidate_snapshot": _loads_json(
-                row.get("candidate_snapshot_json"), {}
+            "candidate_snapshot": _normalize_snapshot_body(
+                _loads_json(row.get("candidate_snapshot_json"), {})
             ),
             "error": sanitize_failure_text(row.get("error")),
             "created_at": row.get("created_at"),
@@ -1316,7 +1317,9 @@ def build_rewrite_prompt(
         f"【原稿摘要】{source.get('digest') or ''}\n"
         f"【原稿正文】\n{source.get('body') or ''}\n\n"
         "只输出严格 JSON 对象，字段为 title、subtitle、digest、body、change_summary。"
-        "body 必须是完整正文。不要输出 Markdown 代码块或其他说明。"
+        "body 必须是完整正文，不得包含 HTML 标签。段落换行必须是 JSON 字符串"
+        "解析后的真实换行，不得在正文中保留字面量 \\n 或 \\r\\n；"
+        "Markdown 小标题必须位于换行后的独立行。不要输出 Markdown 代码块或其他说明。"
     )
 
 
@@ -1555,7 +1558,7 @@ def normalize_rewrite_candidate(
         or str(source.get("subtitle") or ""),
         "digest": _text(value.get("digest"), 600)
         or str(source.get("digest") or ""),
-        "body": str(value.get("body") or "").strip(),
+        "body": normalize_model_body(str(value.get("body") or "")),
         "change_summary": _text(value.get("change_summary"), 2000),
     }
     if rewrite_mode == "title_only":
@@ -1758,6 +1761,15 @@ def _loads_json(value: Any, fallback: Any) -> Any:
     except (json.JSONDecodeError, TypeError):
         return fallback
     return parsed
+
+
+def _normalize_snapshot_body(value: Any) -> dict[str, Any]:
+    """Keep legacy persisted AI snapshots free from escaped line-break text."""
+
+    snapshot = dict(value) if isinstance(value, dict) else {}
+    if "body" in snapshot:
+        snapshot["body"] = normalize_model_body(str(snapshot.get("body") or ""))
+    return snapshot
 
 
 def _text(value: Any, limit: int) -> str:

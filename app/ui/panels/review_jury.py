@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -62,6 +63,17 @@ def _format_dimension_score(
     if not math.isfinite(score):
         return "—"
     return str(int(score))
+
+
+def _comparison_plain_text(value: Any) -> str:
+    """Hide authoring markers while keeping comparison text easy to read."""
+
+    text = str(value or "").strip()
+    text = re.sub(r"(?m)^\s*#{1,6}\s+", "", text)
+    text = re.sub(r"\[([^\]\n]+)\]\([^)\n]+\)", r"\1", text)
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)
+    return text.strip()
 
 
 def _add_accessible_removal_chips(select: Any, *, item_name: str) -> None:
@@ -594,7 +606,7 @@ def build_review_jury_panel(
                 snapshot: dict[str, Any],
                 badge_color: str,
             ) -> None:
-                body = str(snapshot.get("body") or "").strip()
+                body = _comparison_plain_text(snapshot.get("body"))
                 with ui.column().classes("col-12 col-md-6"):
                     with ui.card().classes("w-full q-pa-md").style(
                         "border:1px solid #dfe8e5;box-shadow:none;height:100%"

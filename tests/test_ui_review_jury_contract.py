@@ -5,10 +5,19 @@ from pathlib import Path
 
 import pytest
 
-from app.ui.panels.review_jury import _format_dimension_score
+from app.ui.panels.review_jury import (
+    _comparison_plain_text,
+    _format_dimension_score,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW_JURY_PANEL = ROOT / "app" / "ui" / "panels" / "review_jury.py"
+
+
+def test_comparison_hides_markdown_authoring_markers() -> None:
+    assert _comparison_plain_text(
+        "## 开放反馈\n\n这里有 **重点** 和 [参考](https://example.com)。"
+    ) == "开放反馈\n\n这里有 重点 和 参考。"
 
 
 def _tree() -> ast.Module:

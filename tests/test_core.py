@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.ads.scheduler import render_ad_html, select_ad
 from app.ai import (
     build_rewrite_user_prompt,
     enforce_emphasis_rules,
@@ -14,12 +15,11 @@ from app.ai import (
     quality_check,
 )
 from app.ai.failover import FailoverRewriter
-from app.ads.scheduler import render_ad_html, select_ad
 from app.config import load_config
 from app.cover import resolve_cover
 from app.db import Database
-from app.render import TemplateRenderer, make_digest
 from app.layout_profiles import validate_layout
+from app.render import TemplateRenderer, make_digest
 
 
 class ParseTests(unittest.TestCase):
@@ -54,6 +54,10 @@ class ParseTests(unittest.TestCase):
         restored = normalize_model_body(body)
         self.assertIn("\n\n## 组织能力决定执行上限\n\n", restored)
         self.assertNotIn(r"\n", restored)
+
+    def test_single_escaped_model_line_break_is_also_restored(self) -> None:
+        restored = normalize_model_body(r"第一段\n第二段")
+        self.assertEqual(restored, "第一段\n第二段")
 
     def test_parse_rewrite_json(self) -> None:
         body = "这是一篇足够长的正文内容，用于测试解析与质检逻辑是否正常工作。" * 5

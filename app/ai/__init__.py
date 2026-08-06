@@ -94,7 +94,10 @@ def normalize_model_body(text: str) -> str:
     value = (text or "").strip()
     literal_breaks = value.count(r"\n") + value.count(r"\r\n")
     actual_breaks = value.count("\n")
-    if literal_breaks >= 2 and literal_breaks >= max(2, actual_breaks * 2):
+    if literal_breaks and (
+        actual_breaks == 0
+        or literal_breaks >= max(2, actual_breaks * 2)
+    ):
         value = value.replace(r"\r\n", "\n").replace(r"\n", "\n")
     return value.strip()
 
