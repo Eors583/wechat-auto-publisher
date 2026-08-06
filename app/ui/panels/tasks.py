@@ -688,7 +688,6 @@ def build_tasks_panel(
                                         int(pending_job["id"]),
                                         render,
                                         review_runtime=runtime,
-                                        initial_mode="quick",
                                     ),
                                 ).props(
                                     "unelevated color=teal-9 no-caps icon=rate_review"
@@ -955,7 +954,6 @@ def build_tasks_panel(
                     int(initial_job_id),
                     render,
                     review_runtime=runtime,
-                    initial_mode="quick",
                 )
             except (KeyError, ValueError) as exc:
                 ui.notify(
@@ -1665,7 +1663,7 @@ def _render_inbox_article_card(
         with ui.row().classes("w-full items-center justify-end q-mt-sm"):
             if is_reviewable:
                 ui.button(
-                    "快速审核",
+                    "打开审核",
                     on_click=lambda: open_review_workbench(
                         state,
                         service,
@@ -1673,24 +1671,9 @@ def _render_inbox_article_card(
                         job_id,
                         refresh,
                         review_runtime=review_runtime,
-                        initial_mode="quick",
                     ),
                 ).props(
                     "unelevated color=teal-9 no-caps icon=rate_review"
-                )
-                ui.button(
-                    "深度编辑",
-                    on_click=lambda: open_review_workbench(
-                        state,
-                        service,
-                        batch_id,
-                        job_id,
-                        refresh,
-                        review_runtime=review_runtime,
-                        initial_mode="deep",
-                    ),
-                ).props(
-                    "outline color=teal-9 no-caps icon=edit_note"
                 )
             else:
                 if status == "failed" and batch_id and job_id > 0:
@@ -1763,7 +1746,6 @@ def open_review_workbench(
     on_change: Callable[[], None],
     *,
     review_runtime: dict[str, bool] | None = None,
-    initial_mode: str = "quick",
 ) -> None:
     owner_client = ui.context.client
     workbench_state = {"open": True}
@@ -1839,18 +1821,6 @@ def open_review_workbench(
             note=f'正在审核：{job["account_name"]}',
             compact=True,
         )
-        mode_value = "deep" if initial_mode == "deep" else "quick"
-        review_mode = ui.toggle(
-            {
-                "quick": "快速审核",
-                "deep": "深度编辑",
-            },
-            value=mode_value,
-        ).classes("review-mode-toggle").props("no-caps color=teal-9 spread")
-        quick_review_hint = ui.label(
-            "快速审核聚焦标题、评审与阻断摘要、当前封面、最终预览和确认；"
-            "切换深度编辑不会重建页面或丢失输入。"
-        ).classes("muted text-caption")
         deep_review_controls: list[Any] = []
         deep_review_actions: list[Any] = []
         quick_review_actions: list[Any] = []
@@ -1885,8 +1855,7 @@ def open_review_workbench(
         }
 
         async def reveal_deep_review() -> None:
-            review_mode.value = "deep"
-            apply_review_mode("deep")
+            apply_deep_review_mode()
             reveal_result = review_jury_actions.get("reveal_result")
             if callable(reveal_result):
                 await reveal_result()
@@ -1903,8 +1872,7 @@ def open_review_workbench(
         async def reveal_article_comparison() -> None:
             """Open deep review and focus the persisted before/after snapshots."""
 
-            review_mode.value = "deep"
-            apply_review_mode("deep")
+            apply_deep_review_mode()
             reveal_comparison = review_jury_actions.get("reveal_comparison")
             if callable(reveal_comparison):
                 await reveal_comparison()
@@ -1912,8 +1880,7 @@ def open_review_workbench(
             await reveal_deep_review()
 
         async def reveal_review_settings() -> None:
-            review_mode.value = "deep"
-            apply_review_mode("deep")
+            apply_deep_review_mode()
             reveal_settings = review_jury_actions.get("reveal_settings")
             if callable(reveal_settings):
                 await reveal_settings()
@@ -3340,31 +3307,22 @@ def open_review_workbench(
             job["review_status"] = str(
                 updated.get("review_status") or "needs_changes"
             )
-            review_mode.value = "deep"
-            apply_review_mode("deep")
+            apply_deep_review_mode()
             render_quick_review_summary()
             ui.notify(
-                "已标记为需要修改，并切换到原位深度编辑",
+                "已标记为需要修改",
                 type="warning",
             )
 
-        def apply_review_mode(mode: str) -> None:
-            """Switch modes in place so controls, input values and scroll survive."""
+        def apply_deep_review_mode() -> None:
+            """Keep the workbench in the full deep-editing experience."""
 
-            show_deep_editor = mode == "deep"
             for control in deep_review_controls:
-                control.set_visibility(show_deep_editor)
+                control.set_visibility(True)
             for control in deep_review_actions:
-                control.set_visibility(show_deep_editor)
+                control.set_visibility(True)
             for control in quick_review_actions:
-                control.set_visibility(not show_deep_editor)
-            quick_review_hint.set_visibility(not show_deep_editor)
-
-        def switch_review_mode(event: Any) -> None:
-            mode = str(event.value or "quick")
-            apply_review_mode(mode)
-            if mode == "quick":
-                render_quick_review_summary()
+                control.set_visibility(False)
 
         ui.element("div").classes("review-action-spacer").props("aria-hidden=true")
         with ui.row().classes("review-action-bar w-full justify-end q-mt-md"):
@@ -3402,8 +3360,7 @@ def open_review_workbench(
             sync_confirm_gate()
         deep_review_actions.extend((more_btn, save_btn))
         quick_review_actions.append(needs_changes_btn)
-        review_mode.on_value_change(switch_review_mode)
-        apply_review_mode(mode_value)
+        apply_deep_review_mode()
     if review_runtime is not None:
         def sync_review_open_state(event: Any) -> None:
             is_open = bool(event.value)

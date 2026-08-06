@@ -564,23 +564,6 @@ body, .q-page, .nicegui-content {
   background: linear-gradient(145deg, var(--accent), var(--accent-2)) !important;
   box-shadow: 0 8px 20px rgba(8, 122, 99, .22);
 }
-.review-mode-toggle {
-  width: min(100%, 420px) !important;
-  margin: 2px 0 6px;
-  padding: 4px !important;
-  border: 1px solid var(--line);
-  border-radius: 14px !important;
-  background: #eef3f1 !important;
-}
-.review-mode-toggle .q-btn {
-  min-height: 40px;
-  border-radius: 10px !important;
-}
-.review-mode-toggle .q-btn.bg-teal-9 {
-  background: #fff !important;
-  color: var(--accent-dark) !important;
-  box-shadow: 0 4px 12px rgba(18, 46, 36, .10) !important;
-}
 .review-quick-summary,
 .review-surface,
 .review-summary-card,

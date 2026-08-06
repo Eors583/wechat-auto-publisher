@@ -346,14 +346,15 @@ def test_inbox_render_uses_server_search_without_loading_all_batches() -> None:
     assert "needle =" not in inbox_branch
 
 
-def test_inbox_review_actions_share_one_workbench_with_explicit_modes() -> None:
+def test_inbox_review_action_opens_the_deep_workbench_directly() -> None:
     source = inspect.getsource(tasks._render_inbox_article_card)  # noqa: SLF001
 
     assert "尚未评审" in source
     assert "推荐下一步" in source
-    assert source.count("open_review_workbench(") == 2
-    assert 'initial_mode="quick"' in source
-    assert 'initial_mode="deep"' in source
+    assert source.count("open_review_workbench(") == 1
+    assert '"打开审核"' in source
+    assert '"快速审核"' not in source
+    assert '"深度编辑"' not in source
 
 
 def test_failed_inbox_card_exposes_quick_retry_recovery_options_and_batch() -> None:
@@ -444,15 +445,16 @@ def test_retry_dialog_supports_steps_model_and_replacement_inputs() -> None:
     assert "await _retry_job_with_loading(" in source
 
 
-def test_review_workbench_is_quick_by_default_and_deep_edit_is_in_place() -> None:
+def test_review_workbench_opens_directly_in_deep_edit_without_mode_switch() -> None:
     signature = inspect.signature(tasks.open_review_workbench)
-    assert signature.parameters["initial_mode"].default == "quick"
+    assert "initial_mode" not in signature.parameters
 
     mode_source = inspect.getsource(tasks.open_review_workbench)
-    assert '"quick": "快速审核"' in mode_source
-    assert '"deep": "深度编辑"' in mode_source
+    assert "ui.toggle(" not in mode_source
+    assert "review-mode-toggle" not in mode_source
+    assert "apply_deep_review_mode()" in mode_source
     assert "deep_review_controls" in mode_source
-    assert "control.set_visibility(show_deep_editor)" in mode_source
+    assert "control.set_visibility(True)" in mode_source
     assert "render_quick_review_summary()" in mode_source
     assert "尚未进行 AI 评审" in mode_source
     assert "手动开始 AI 评审" not in mode_source
@@ -467,8 +469,8 @@ def test_review_workbench_is_quick_by_default_and_deep_edit_is_in_place() -> Non
     assert "当前封面" in mode_source
     assert "阻断摘要" in mode_source
 
-    start = mode_source.index("def apply_review_mode")
-    end = mode_source.index("def switch_review_mode", start)
+    start = mode_source.index("def apply_deep_review_mode")
+    end = mode_source.index('ui.element("div")', start)
     mode_action = mode_source[start:end]
     assert "set_visibility" in mode_action
     assert ".clear(" not in mode_action
@@ -604,7 +606,7 @@ def test_quick_review_separates_blockers_from_reminders() -> None:
     assert '"提醒摘要："' in summary
 
 
-def test_quick_footer_has_direct_decisions_and_deep_only_edit_actions() -> None:
+def test_deep_footer_keeps_edit_actions_and_hides_the_duplicate_quick_action() -> None:
     source = inspect.getsource(tasks.open_review_workbench)
 
     assert 'needs_changes_btn = ui.button(' in source
@@ -612,8 +614,8 @@ def test_quick_footer_has_direct_decisions_and_deep_only_edit_actions() -> None:
     assert '"确认此文章"' in source
     assert "deep_review_actions.extend((more_btn, save_btn))" in source
     assert "quick_review_actions.append(needs_changes_btn)" in source
-    assert "control.set_visibility(show_deep_editor)" in source
-    assert "control.set_visibility(not show_deep_editor)" in source
+    assert "control.set_visibility(True)" in source
+    assert "control.set_visibility(False)" in source
 
 
 def test_confirmation_gate_blocks_running_and_open_risks() -> None:
@@ -714,15 +716,14 @@ def test_ai_rewrite_names_state_their_scope_and_footer_has_clearance() -> None:
     assert "safe-area-inset-bottom" in styles
 
 
-def test_needs_changes_keeps_workbench_open_and_reveals_deep_editor() -> None:
+def test_needs_changes_keeps_the_deep_workbench_open() -> None:
     source = inspect.getsource(tasks.open_review_workbench)
     start = source.index("def needs_changes")
-    end = source.index("def apply_review_mode", start)
+    end = source.index("def apply_deep_review_mode", start)
     action = source[start:end]
 
     assert "service.request_job_changes" in action
-    assert 'review_mode.value = "deep"' in action
-    assert 'apply_review_mode("deep")' in action
+    assert "apply_deep_review_mode()" in action
     assert "dialog.close" not in action
     assert "open_review_workbench" not in action
     assert "on_change" not in action

@@ -16,7 +16,6 @@ def test_review_workbench_uses_named_quasar_component_surfaces() -> None:
     for class_name in (
         "review-workbench",
         "review-workbench__header",
-        "review-mode-toggle",
         "review-quick-summary",
         "review-body-editor",
     ):
