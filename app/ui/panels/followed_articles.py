@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -16,6 +17,36 @@ from app.ui.state import set_button_loading
 
 ARTICLE_LOAD_STEP = 8
 ARTICLE_LOAD_MAX = 100
+
+
+def followed_article_fetch_error_message(error: Any) -> str:
+    """Return a safe, actionable message for the persistent failure dialog."""
+
+    text = str(error or "").strip()
+    safe = re.sub(r"(?i)(token=)[^&\s]+", r"\1••••", text)
+    safe = re.sub(r"(?i)(cookie\s*[:=]\s*)[^\r\n]+", r"\1••••", safe)
+    lower = safe.casefold()
+    if "200013" in lower or "freq control" in lower or "频率" in safe:
+        return (
+            "微信公众平台暂时限制了查询频率。请稍后再试，避免连续点击；"
+            "如果持续失败，也可以重新配置并验证公众号后台登录态。"
+        )
+    if any(
+        marker in lower
+        for marker in (
+            "登录态",
+            "200003",
+            "invalid session",
+            "http 401",
+            "http 403",
+            "非 json",
+        )
+    ):
+        return (
+            "公众号后台登录态已失效或需要重新验证。请重新登录微信公众平台，"
+            "复制新的 Token 和 Cookie 后再获取文章。"
+        )
+    return safe[:500] if safe else "暂时无法从公众号后台获取文章，请检查登录态后重试。"
 
 
 def followed_article_cover_preview_url(cover_url: str) -> str:
@@ -39,6 +70,7 @@ def open_followed_articles_dialog(
     *,
     target_account_count: int,
     on_queue: Callable[[dict[str, Any], bool], None],
+    on_configure_backend: Callable[[], None],
 ) -> None:
     """Show one followed account's recent public articles in a focused dialog."""
 
@@ -106,6 +138,38 @@ def open_followed_articles_dialog(
             "limit": min(ARTICLE_LOAD_MAX, max(ARTICLE_LOAD_STEP, known_article_count)),
             "has_more": known_article_count < ARTICLE_LOAD_MAX,
         }
+
+        def show_fetch_failure(error: Any) -> None:
+            message = followed_article_fetch_error_message(error)
+            with ui.dialog().props("persistent") as error_dialog, ui.card().classes(
+                "w-full q-pa-lg"
+            ).style("max-width:620px"):
+                with ui.row().classes("w-full items-start gap-3 no-wrap"):
+                    ui.icon("error_outline", size="36px", color="red-7")
+                    with ui.column().classes("gap-1").style("min-width:0;flex:1"):
+                        ui.label("获取公众号文章失败").classes(
+                            "text-h6 text-weight-bold"
+                        )
+                        ui.label(message).classes("text-body1")
+                        ui.label(
+                            "你可以关闭后稍后重试，或者前往配置公众号后台登录态。"
+                        ).classes("muted text-caption q-mt-xs")
+
+                def configure_backend() -> None:
+                    error_dialog.close()
+                    dialog.close()
+                    on_configure_backend()
+
+                with ui.row().classes("w-full justify-end gap-2 q-mt-md"):
+                    ui.button("关闭", on_click=error_dialog.close).props(
+                        "flat color=grey-8 no-caps"
+                    )
+                    ui.button(
+                        "去配置登录态",
+                        icon="key",
+                        on_click=configure_backend,
+                    ).props("unelevated color=teal-9 no-caps")
+            error_dialog.open()
 
         def update_article(article_id: str, **updates: Any) -> None:
             service.update_article(article_id, **updates)
@@ -242,16 +306,18 @@ def open_followed_articles_dialog(
                     lambda: service.discover_account(account_id)
                 )
                 if report.get("error"):
-                    ui.notify(str(report["error"]), type="warning", timeout=10000)
-                ui.notify(
-                    f'获取完成，发现并同步 {report.get("added", 0)} 篇文章',
-                    type="positive",
-                )
-                render()
-                fetch_state["has_more"] = True
-                update_load_more_button()
+                    render()
+                    show_fetch_failure(report["error"])
+                else:
+                    ui.notify(
+                        f'获取完成，发现并同步 {report.get("added", 0)} 篇文章',
+                        type="positive",
+                    )
+                    render()
+                    fetch_state["has_more"] = True
+                    update_load_more_button()
             except Exception as exc:  # noqa: BLE001
-                ui.notify(f"获取失败：{exc}", type="negative", timeout=10000)
+                show_fetch_failure(exc)
             finally:
                 set_button_loading(refresh_btn, False)
 
@@ -296,8 +362,9 @@ def open_followed_articles_dialog(
                     next_limit < ARTICLE_LOAD_MAX and found_count >= next_limit
                 )
                 if report.get("error"):
-                    ui.notify(str(report["error"]), type="warning", timeout=10000)
-                if new_count:
+                    render()
+                    show_fetch_failure(report["error"])
+                elif new_count:
                     ui.notify(
                         f"已加载 {new_count} 篇更早文章；若当前列表未显示，请扩大日期范围",
                         type="positive",
@@ -311,7 +378,7 @@ def open_followed_articles_dialog(
                     ui.notify("已经加载完可获取的文章", type="info")
                 render()
             except Exception as exc:  # noqa: BLE001
-                ui.notify(f"加载更多失败：{exc}", type="negative", timeout=10000)
+                show_fetch_failure(exc)
             finally:
                 set_button_loading(load_more_btn, False)
                 update_load_more_button()

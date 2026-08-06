@@ -372,6 +372,7 @@ def _build_followed_accounts(
             account_id,
             target_account_count=len(state.account_options()),
             on_queue=queue_article,
+            on_configure_backend=backend_config_dialog,
         )
 
     def refresh_backend_status() -> None:

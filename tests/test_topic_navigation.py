@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from app.ui.panels.followed_articles import (
     ARTICLE_LOAD_MAX,
     followed_article_cover_preview_url,
+    followed_article_fetch_error_message,
     next_followed_article_fetch_limit,
+    open_followed_articles_dialog,
 )
 from app.ui.panels.topics import TOPIC_CENTER_TABS, _queue_for_wizard
 
@@ -41,6 +44,31 @@ def test_followed_article_fetch_limit_grows_from_existing_count_and_caps() -> No
     assert next_followed_article_fetch_limit(20, 16) == 28
     assert next_followed_article_fetch_limit(97, 24) == ARTICLE_LOAD_MAX
     assert next_followed_article_fetch_limit(ARTICLE_LOAD_MAX, 24) == ARTICLE_LOAD_MAX
+
+
+def test_followed_article_fetch_error_is_safe_and_actionable() -> None:
+    expired = followed_article_fetch_error_message(
+        "登录态失效 token=secret&lang=zh_CN Cookie: private"
+    )
+    assert "重新登录微信公众平台" in expired
+    assert "secret" not in expired
+    assert "private" not in expired
+
+    limited = followed_article_fetch_error_message(
+        "获取公众号文章失败（200013）：freq control"
+    )
+    assert "限制了查询频率" in limited
+
+
+def test_followed_article_fetch_failure_uses_persistent_configuration_dialog() -> None:
+    source = inspect.getsource(open_followed_articles_dialog)
+    assert 'ui.dialog().props("persistent")' in source
+    assert '"获取公众号文章失败"' in source
+    assert '"去配置登录态"' in source
+    assert "dialog.close()" in source
+    assert "on_configure_backend()" in source
+    assert 'ui.notify(f"获取失败：' not in source
+    assert 'ui.notify(f"加载更多失败：' not in source
 
 
 def test_immediate_rewrite_pushes_workspace_tab_to_browser(monkeypatch) -> None:
