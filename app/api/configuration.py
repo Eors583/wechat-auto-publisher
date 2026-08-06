@@ -108,13 +108,14 @@ def create_configuration_router(
     configuration: ConfigurationService,
     plans: CreationPlanService,
     onboarding: OnboardingService,
+    require_token: Callable[..., Any],
     require_admin: Callable[..., Any],
 ) -> APIRouter:
     """Expose account, model-adjacent and external-service settings to the SPA."""
 
     router = APIRouter(
         prefix="/api/v1/configuration",
-        dependencies=[Depends(require_admin)],
+        dependencies=[Depends(require_token)],
     )
 
     @router.get("/accounts")
@@ -238,7 +239,10 @@ def create_configuration_router(
     def list_prompt_templates() -> list[dict[str, Any]]:
         return configuration.list_prompt_templates()
 
-    @router.post("/prompt-templates")
+    @router.post(
+        "/prompt-templates",
+        dependencies=[Depends(require_admin)],
+    )
     def save_prompt_template(payload: PromptTemplateRequest) -> dict[str, Any]:
         return _domain_call(
             configuration.save_prompt_template,
@@ -249,7 +253,10 @@ def create_configuration_router(
             enabled=payload.enabled,
         )
 
-    @router.delete("/prompt-templates/{template_id}")
+    @router.delete(
+        "/prompt-templates/{template_id}",
+        dependencies=[Depends(require_admin)],
+    )
     def delete_prompt_template(template_id: str) -> dict[str, Any]:
         return _domain_call(configuration.delete_prompt_template, template_id)
 
@@ -257,7 +264,10 @@ def create_configuration_router(
     def list_creation_plans() -> list[dict[str, Any]]:
         return plans.list_plans(include_builtin=True)
 
-    @router.post("/creation-plans")
+    @router.post(
+        "/creation-plans",
+        dependencies=[Depends(require_admin)],
+    )
     def save_creation_plan(payload: CreationPlanRequest) -> dict[str, Any]:
         return _domain_call(
             plans.save_plan,
@@ -273,7 +283,10 @@ def create_configuration_router(
             enabled=payload.enabled,
         )
 
-    @router.delete("/creation-plans/{plan_id}")
+    @router.delete(
+        "/creation-plans/{plan_id}",
+        dependencies=[Depends(require_admin)],
+    )
     def delete_creation_plan(plan_id: str) -> dict[str, Any]:
         return _domain_call(plans.delete_plan, plan_id)
 
@@ -288,14 +301,14 @@ def create_configuration_router(
     ) -> dict[str, Any]:
         return _domain_call(plans.apply_to_account, account_id, payload.plan_id)
 
-    @router.get("/feishu")
+    @router.get("/feishu", dependencies=[Depends(require_admin)])
     def get_feishu() -> dict[str, Any]:
         return {
             "settings": public_feishu_settings(configuration.db),
             "runtime": get_feishu_runtime(configuration.db),
         }
 
-    @router.post("/feishu/test")
+    @router.post("/feishu/test", dependencies=[Depends(require_admin)])
     def test_feishu_credentials(
         payload: FeishuCredentialTestRequest,
     ) -> dict[str, Any]:
@@ -305,15 +318,15 @@ def create_configuration_router(
             app_secret=payload.app_secret,
         )
 
-    @router.get("/feishu/pairing")
+    @router.get("/feishu/pairing", dependencies=[Depends(require_admin)])
     def get_feishu_pairing() -> dict[str, Any]:
         return onboarding.feishu_pairing_status()
 
-    @router.post("/feishu/pairing")
+    @router.post("/feishu/pairing", dependencies=[Depends(require_admin)])
     def create_feishu_pairing() -> dict[str, Any]:
         return _domain_call(onboarding.create_feishu_pairing_code)
 
-    @router.put("/feishu")
+    @router.put("/feishu", dependencies=[Depends(require_admin)])
     def save_feishu(payload: FeishuSettingsRequest) -> dict[str, Any]:
         _domain_call(
             save_feishu_settings,
@@ -325,14 +338,14 @@ def create_configuration_router(
             "runtime": get_feishu_runtime(configuration.db),
         }
 
-    @router.get("/wechat-relay")
+    @router.get("/wechat-relay", dependencies=[Depends(require_admin)])
     def get_wechat_relay() -> dict[str, Any]:
         return {
             "settings": public_wechat_relay_settings(configuration.db),
             "connection": public_wechat_relay_connection_info(),
         }
 
-    @router.put("/wechat-relay")
+    @router.put("/wechat-relay", dependencies=[Depends(require_admin)])
     def save_wechat_relay(payload: WechatRelaySettingsRequest) -> dict[str, Any]:
         if str(payload.access_code or "").strip():
             settings = _domain_call(

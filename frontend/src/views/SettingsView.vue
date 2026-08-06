@@ -114,7 +114,7 @@ const articleTemplates = computed(() => promptTemplates.value.filter((item) => i
 const imageTemplates = computed(() => promptTemplates.value.filter((item) => item.purpose === 'image'))
 const imageProviderTypes = new Set(['image_alibaba', 'image_minimax', 'image_volcengine', 'image_zhipu', 'openai_image'])
 const isImageModel = (model) => imageProviderTypes.has(String(model?.provider_type || ''))
-const adminSections = new Set(['prompts', 'plans', 'feishu', 'relay', 'users'])
+const adminSections = new Set(['models', 'prompts', 'plans', 'feishu', 'relay', 'users'])
 
 function asLines(values) {
   return (values || []).join('\n')
@@ -139,50 +139,52 @@ function jsonObject(value, label) {
 async function load() {
   loading.value = true
   try {
-    const [profileRows, reviewOptions] = await Promise.all([api.editorialProfiles(), api.editorialOptions()])
+    const [profileRows, reviewOptions, accountRows, promptRows, planRows] = await Promise.all([
+      api.editorialProfiles(),
+      api.editorialOptions(),
+      api.configurationAccounts(),
+      api.promptTemplates(),
+      api.creationPlans(),
+    ])
     profiles.value = profileRows
     options.value = reviewOptions
+    accounts.value = accountRows
+    promptTemplates.value = promptRows
+    creationPlans.value = planRows
 
     if (isAdmin.value) {
-      const [accountRows, modelRows, userRows, promptRows, planRows, feishuData, relayData, pairingData] = await Promise.all([
-        api.configurationAccounts(),
+      const [modelRows, userRows, feishuData, relayData, pairingData] = await Promise.all([
         api.adminModels(),
         api.adminUsers(),
-        api.promptTemplates(),
-        api.creationPlans(),
         api.feishuSettings(),
         api.wechatRelaySettings(),
         api.feishuPairing(),
       ])
-      accounts.value = accountRows
       models.value = modelRows
       users.value = userRows
-      promptTemplates.value = promptRows
-      creationPlans.value = planRows
       hydrateFeishu(feishuData)
       hydrateRelay(relayData)
       pairing.value = pairingData
-      const planEntries = await Promise.all(accountRows.map(async (account) => {
-        try {
-          return [account.id, await api.accountCreationPlan(account.id)]
-        } catch {
-          return [account.id, null]
-        }
-      }))
-      accountPlans.value = Object.fromEntries(planEntries)
-      const reviewEntries = await Promise.all(accountRows.map(async (account) => {
-        try {
-          return [account.id, await api.editorialDefault(account.id)]
-        } catch {
-          return [account.id, null]
-        }
-      }))
-      accountReviewDefaults.value = Object.fromEntries(reviewEntries)
     } else {
-      accounts.value = await api.accounts()
       models.value = await api.models('text')
       if (adminSections.has(active.value)) active.value = 'accounts'
     }
+    const planEntries = await Promise.all(accountRows.map(async (account) => {
+      try {
+        return [account.id, await api.accountCreationPlan(account.id)]
+      } catch {
+        return [account.id, null]
+      }
+    }))
+    accountPlans.value = Object.fromEntries(planEntries)
+    const reviewEntries = await Promise.all(accountRows.map(async (account) => {
+      try {
+        return [account.id, await api.editorialDefault(account.id)]
+      } catch {
+        return [account.id, null]
+      }
+    }))
+    accountReviewDefaults.value = Object.fromEntries(reviewEntries)
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -730,14 +732,14 @@ onMounted(load)
 
       <section class="settings-content">
         <el-card v-if="active === 'accounts'" class="surface-card" shadow="never">
-          <template #header><div class="card-header-row"><div><h3>公众号配置</h3><p>每个公众号独立绑定模型、审核优先级和默认创作方案</p></div><el-button v-if="isAdmin" type="primary" :icon="Plus" @click="editAccount()">添加公众号</el-button></div></template>
+          <template #header><div class="card-header-row"><div><h3>公众号配置</h3><p>每个公众号独立绑定模型、审核优先级和默认创作方案</p></div><el-button type="primary" :icon="Plus" @click="editAccount()">添加公众号</el-button></div></template>
           <el-table :data="accounts" style="width: 100%">
             <el-table-column prop="name" label="公众号" min-width="160" />
             <el-table-column prop="app_id" label="AppID" min-width="190" show-overflow-tooltip />
             <el-table-column prop="model_name" label="文字模型" min-width="160"><template #default="{ row }">{{ row.model_name || '暂未绑定模型' }}</template></el-table-column>
             <el-table-column label="创作方案" min-width="160"><template #default="{ row }">{{ accountPlans[row.id]?.plan?.name || '系统默认方案' }}</template></el-table-column>
             <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="row.enabled === false ? 'info' : 'success'" effect="light">{{ row.enabled === false ? '停用' : '可用' }}</el-tag></template></el-table-column>
-            <el-table-column v-if="isAdmin" label="操作" width="390" fixed="right"><template #default="{ row }"><el-button link type="primary" :icon="Connection" :loading="testingAccountId === row.id" @click="testAccount(row)">测试连接</el-button><el-button link type="primary" :icon="Edit" @click="editAccount(row)">基础信息</el-button><el-button link :icon="Operation" @click="editAccountLayout(row)">排版与图片</el-button><el-button link :icon="Document" @click="openTemplateManager(row)">草稿模板</el-button><el-button link type="danger" :icon="Delete" @click="deleteAccount(row)">删除</el-button></template></el-table-column>
+            <el-table-column label="操作" width="390" fixed="right"><template #default="{ row }"><el-button link type="primary" :icon="Connection" :loading="testingAccountId === row.id" @click="testAccount(row)">测试连接</el-button><el-button link type="primary" :icon="Edit" @click="editAccount(row)">基础信息</el-button><el-button link :icon="Operation" @click="editAccountLayout(row)">排版与图片</el-button><el-button link :icon="Document" @click="openTemplateManager(row)">草稿模板</el-button><el-button link type="danger" :icon="Delete" @click="deleteAccount(row)">删除</el-button></template></el-table-column>
           </el-table>
           <el-alert class="settings-note" type="info" :closable="false" show-icon title="AppSecret 等凭证会在服务器加密保存；编辑时留空表示保留已有密钥，页面不会回显明文。" />
         </el-card>

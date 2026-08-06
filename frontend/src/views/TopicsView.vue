@@ -29,6 +29,10 @@ const articleForm = reactive({ url: '', followed_account_id: '' })
 const backendSession = reactive({ enabled: false, token: '', cookie: '', session_label: '', has_token: false, has_cookie: false })
 
 const unreadCount = computed(() => followedArticles.value.filter((item) => !item.is_read).length)
+const queriedAccount = computed(() => {
+  if (articleFilters.account_ids.length !== 1) return null
+  return followedAccounts.value.find((item) => item.id === articleFilters.account_ids[0]) || null
+})
 
 function topicParams() {
   const params = new URLSearchParams({ days: String(filters.days), limit: '200' })
@@ -86,12 +90,29 @@ async function refreshFollowed(account = null) {
   try {
     const result = account ? await api.refreshFollowedAccount(account.id) : await api.refreshFollowedAccounts()
     ElMessage.success(`关注文章已刷新${result?.added != null ? `，新增 ${result.added} 篇` : ''}`)
-    await load()
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
     actionId.value = ''
+    // Even when the external refresh fails (for example, the backend login
+    // session has expired), still show the locally collected articles for the
+    // selected account instead of leaving the previous global list on screen.
+    await load()
   }
+}
+
+async function queryFollowedArticles(account) {
+  articleFilters.keyword = ''
+  articleFilters.account_ids = [account.id]
+  articleFilters.unread_only = false
+  articleFilters.favorite_only = false
+  active.value = 'followed'
+  await refreshFollowed(account)
+}
+
+async function clearFollowedAccountQuery() {
+  articleFilters.account_ids = []
+  await load()
 }
 
 async function addManual() {
@@ -289,14 +310,18 @@ onMounted(load)
     </template>
 
     <template v-else-if="active === 'followed'">
+      <el-alert v-if="queriedAccount" class="account-query-alert" type="success" show-icon closable @close="clearFollowedAccountQuery">
+        <template #title>正在查看“{{ queriedAccount.name }}”的文章列表</template>
+        查询操作会先从已配置的公众号后台更新文章，再按该公众号筛选展示；也可以继续使用下方条件缩小范围。
+      </el-alert>
       <el-card class="surface-card filter-card" shadow="never"><div class="topic-filters"><el-input v-model="articleFilters.keyword" :prefix-icon="Search" placeholder="搜索文章或公众号" clearable @keyup.enter="load" /><el-select v-model="articleFilters.account_ids" multiple collapse-tags placeholder="全部关注公众号" style="min-width:220px" @change="load"><el-option v-for="account in followedAccounts" :key="account.id" :label="account.name" :value="account.id" /></el-select><el-select v-model="articleFilters.days" style="width:140px" @change="load"><el-option label="最近 7 天" :value="7" /><el-option label="最近 30 天" :value="30" /><el-option label="最近一年" :value="365" /></el-select><el-checkbox v-model="articleFilters.unread_only" @change="load">仅未读</el-checkbox><el-checkbox v-model="articleFilters.favorite_only" @change="load">仅收藏</el-checkbox><el-button type="primary" @click="load">筛选</el-button></div></el-card>
       <div v-if="followedArticles.length" class="followed-article-list"><el-card v-for="article in followedArticles" :key="article.id" class="surface-card followed-article" shadow="hover"><div class="followed-article__main"><div class="topic-card-el__meta"><el-tag size="small" effect="plain">{{ article.account_name || '关注公众号' }}</el-tag><span>{{ formatDateTime(article.published_at || article.discovered_at) }}</span><el-tag v-if="!article.is_read" size="small" type="warning">未读</el-tag></div><h3>{{ article.title }}</h3><p>{{ article.summary || '该文章暂未提供摘要，可打开原文查看。' }}</p></div><div class="followed-article__actions"><el-button link tag="a" :href="article.url" target="_blank" @click="updateArticle(article, { is_read: true })">查看原文</el-button><el-button text :type="article.is_favorite ? 'warning' : 'info'" @click="updateArticle(article, { is_favorite: !article.is_favorite })">{{ article.is_favorite ? '已收藏' : '收藏' }}</el-button><el-button type="primary" plain @click="createFromArticle(article)">用此文创作</el-button><el-button text type="danger" @click="updateArticle(article, { is_ignored: true })">忽略</el-button></div></el-card></div>
-      <el-empty v-else-if="!loading" description="还没有关注文章"><el-button type="primary" @click="articleDialog = true">投递第一篇文章</el-button></el-empty>
+      <el-empty v-else-if="!loading" :description="queriedAccount ? `暂未查询到“${queriedAccount.name}”的文章` : '还没有关注文章'"><el-button v-if="queriedAccount" type="primary" :loading="actionId === queriedAccount.id" @click="queryFollowedArticles(queriedAccount)">重新查询该公众号</el-button><el-button v-else type="primary" @click="active = 'sources'">管理关注公众号</el-button></el-empty>
     </template>
 
     <template v-else>
       <div class="source-management-grid">
-        <el-card class="surface-card" shadow="never"><template #header><div class="card-header-row"><div><h3>关注公众号</h3><p>维护需要持续关注的公众号和文章获取方式</p></div><div class="hero-actions"><el-button :type="backendSession.enabled ? 'success' : 'default'" plain @click="backendDialog = true">后台登录态{{ backendSession.enabled ? '已启用' : '未配置' }}</el-button><el-button type="primary" :icon="Plus" @click="editFollowed()">添加关注</el-button></div></div></template><el-table :data="followedAccounts"><el-table-column prop="name" label="公众号" min-width="160" /><el-table-column prop="category" label="分类" min-width="120" /><el-table-column prop="fetch_method" label="获取方式" min-width="160" /><el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="操作" width="210"><template #default="{ row }"><el-button link type="primary" :loading="actionId === row.id" @click="refreshFollowed(row)">刷新</el-button><el-button link :icon="Edit" @click="editFollowed(row)">编辑</el-button><el-button link type="danger" :icon="Delete" @click="deleteFollowed(row)">删除</el-button></template></el-table-column></el-table></el-card>
+        <el-card class="surface-card" shadow="never"><template #header><div class="card-header-row"><div><h3>关注公众号</h3><p>维护需要持续关注的公众号，并可直接查询每个公众号的文章列表</p></div><div class="hero-actions"><el-button :type="backendSession.enabled ? 'success' : 'default'" plain @click="backendDialog = true">后台登录态{{ backendSession.enabled ? '已启用' : '未配置' }}</el-button><el-button type="primary" :icon="Plus" @click="editFollowed()">添加关注</el-button></div></div></template><el-table :data="followedAccounts"><el-table-column prop="name" label="公众号" min-width="160" /><el-table-column prop="category" label="分类" min-width="120" /><el-table-column prop="fetch_method" label="获取方式" min-width="160" /><el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="操作" width="240"><template #default="{ row }"><el-button link type="primary" :icon="Search" :loading="actionId === row.id" @click="queryFollowedArticles(row)">查询文章</el-button><el-button link :icon="Edit" @click="editFollowed(row)">编辑</el-button><el-button link type="danger" :icon="Delete" @click="deleteFollowed(row)">删除</el-button></template></el-table-column></el-table></el-card>
         <el-card class="surface-card" shadow="never"><template #header><div class="card-header-row"><div><h3>选题来源</h3><p>管理 RSS、热榜接口、新闻搜索和内部素材源</p></div><el-button type="primary" :icon="Plus" @click="editSource()">添加来源</el-button></div></template><el-table :data="sources"><el-table-column prop="name" label="来源" min-width="160" /><el-table-column prop="source_type" label="类型" min-width="140" /><el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="操作" width="150"><template #default="{ row }"><el-button link :icon="Edit" @click="editSource(row)">编辑</el-button><el-button link type="danger" :icon="Delete" @click="deleteSource(row)">删除</el-button></template></el-table-column></el-table></el-card>
       </div>
     </template>

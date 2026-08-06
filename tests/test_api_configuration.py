@@ -160,7 +160,9 @@ def test_element_settings_configuration_contract(tmp_path) -> None:
         assert relay.json()["settings"]["gateway_url"].startswith("https://")
 
 
-def test_configuration_and_user_state_require_admin(tmp_path) -> None:
+def test_users_manage_their_own_accounts_but_platform_settings_require_admin(
+    tmp_path,
+) -> None:
     with _client(tmp_path) as client:
         admin_headers = _admin_headers(client)
         registered = client.post(
@@ -172,9 +174,57 @@ def test_configuration_and_user_state_require_admin(tmp_path) -> None:
             "Authorization": f"Bearer {registered.json()['token']}"
         }
 
-        assert client.get(
+        initial_accounts = client.get(
             "/api/v1/configuration/accounts", headers=user_headers
-        ).status_code == 403
+        )
+        assert initial_accounts.status_code == 200
+        assert initial_accounts.json() == []
+
+        created = client.post(
+            "/api/v1/configuration/accounts",
+            headers=user_headers,
+            json={
+                "name": "用户自己的公众号",
+                "app_id": "wx-customer-owned",
+                "app_secret": "customer-secret",
+                "model_id": "",
+                "enabled": True,
+            },
+        )
+        assert created.status_code == 200
+        assert created.json()["name"] == "用户自己的公众号"
+        assert created.json()["has_app_secret"] is True
+
+        listed = client.get(
+            "/api/v1/configuration/accounts", headers=user_headers
+        )
+        assert listed.status_code == 200
+        assert [item["id"] for item in listed.json()] == [created.json()["id"]]
+
+        plans = client.get(
+            "/api/v1/configuration/creation-plans", headers=user_headers
+        )
+        assert plans.status_code == 200
+        assert any(item["id"] == "builtin:default" for item in plans.json())
+
+        forbidden_prompt = client.post(
+            "/api/v1/configuration/prompt-templates",
+            headers=user_headers,
+            json={
+                "name": "不允许修改的平台模板",
+                "purpose": "article",
+                "content": "测试",
+                "enabled": True,
+            },
+        )
+        assert forbidden_prompt.status_code == 403
+
+        forbidden_feishu = client.put(
+            "/api/v1/configuration/feishu",
+            headers=user_headers,
+            json={"enabled": False},
+        )
+        assert forbidden_feishu.status_code == 403
 
         user_id = registered.json()["user"]["id"]
         disabled = client.patch(

@@ -593,6 +593,7 @@ def create_api_app(
             configuration_service,
             creation_plan_service,
             onboarding_service,
+            require_token,
             require_admin,
         )
     )

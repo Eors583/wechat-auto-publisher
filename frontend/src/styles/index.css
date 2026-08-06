@@ -189,6 +189,7 @@ h1, h2, h3, h4, h5, p { margin: 0; }
 .topic-card-el__stats span { display: flex; align-items: center; gap: 4px; }.topic-card-el__stats svg { width: 13px; }
 .topic-card-el__actions { display: flex; justify-content: space-between; align-items: center; margin-top: 13px; }
 .library-tabs { align-self: flex-start; }
+.account-query-alert { margin-bottom: 2px; }
 .followed-article-list { display: flex; flex-direction: column; gap: 12px; }
 .followed-article > .el-card__body { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 20px; }
 .followed-article__main { min-width: 0; flex: 1; }
