@@ -374,12 +374,11 @@ def create_desktop_app() -> None:
                 settings_host = ui.column().classes("w-full")
 
         for host in (topics_host, jobs_host, settings_host):
-            with host:
-                with ui.row().classes(
-                    "w-full items-center justify-center q-py-xl gap-2"
-                ):
-                    ui.spinner("dots", size="md", color="teal-9")
-                    ui.label("正在加载页面…").classes("muted")
+            with host, ui.row().classes(
+                "w-full items-center justify-center q-py-xl gap-2"
+            ):
+                ui.spinner("dots", size="md", color="teal-9")
+                ui.label("正在加载页面…").classes("muted")
 
         mounted_tabs: set[str] = set()
         scheduled_tabs: set[str] = set()
@@ -434,39 +433,136 @@ def create_desktop_app() -> None:
                     settings_plans = ui.tab("创作方案")
                     settings_feishu = ui.tab("飞书")
                     settings_help = ui.tab("系统设置")
-                with ui.tab_panels(
+                initial_settings_tab = (
+                    settings_models
+                    if open_requested_admin and settings_models is not None
+                    else settings_help
+                    if open_requested_config and not requested_config_repair
+                    else settings_accounts
+                )
+                settings_panels = ui.tab_panels(
                     settings_tabs,
-                    value=(
-                        settings_models
-                        if open_requested_admin and settings_models is not None
-                        else settings_help
-                        if open_requested_config and not requested_config_repair
-                        else settings_accounts
-                    ),
-                ).classes("w-full bg-transparent"):
+                    value=initial_settings_tab,
+                ).classes("w-full bg-transparent")
+                with settings_panels:
                     with ui.tab_panel(settings_accounts):
-                        refresh_accounts_panel = _build_accounts_panel(
-                            page_state,
-                            initial_account_id=requested_config_account_id,
-                            initial_action=requested_config_repair,
-                        )
+                        settings_accounts_host = ui.column().classes("w-full")
                     if settings_models is not None:
                         with ui.tab_panel(settings_models):
-                            build_model_management_panel(page_state)
+                            settings_models_host = ui.column().classes("w-full")
                     with ui.tab_panel(settings_plans):
+                        settings_plans_host = ui.column().classes("w-full")
+                    with ui.tab_panel(settings_feishu):
+                        settings_feishu_host = ui.column().classes("w-full")
+                    with ui.tab_panel(settings_help):
+                        settings_help_host = ui.column().classes("w-full")
+
+                settings_hosts = {
+                    str(settings_accounts.props["name"]): settings_accounts_host,
+                    str(settings_plans.props["name"]): settings_plans_host,
+                    str(settings_feishu.props["name"]): settings_feishu_host,
+                    str(settings_help.props["name"]): settings_help_host,
+                }
+                if settings_models is not None:
+                    settings_hosts[str(settings_models.props["name"])] = (
+                        settings_models_host
+                    )
+                for host in settings_hosts.values():
+                    with host, ui.row().classes(
+                        "w-full items-center justify-center q-py-lg gap-2"
+                    ):
+                        ui.spinner("dots", size="sm", color="teal-9")
+                        ui.label("正在加载设置…").classes("muted")
+
+                settings_callbacks: dict[str, Callable[[], None]] = {
+                    "refresh_accounts": lambda: None,
+                }
+
+                def mount_settings_accounts() -> None:
+                    settings_accounts_host.clear()
+                    with settings_accounts_host:
+                        settings_callbacks["refresh_accounts"] = (
+                            _build_accounts_panel(
+                                page_state,
+                                initial_account_id=requested_config_account_id,
+                                initial_action=requested_config_repair,
+                            )
+                        )
+
+                def mount_settings_models() -> None:
+                    settings_models_host.clear()
+                    with settings_models_host:
+                        build_model_management_panel(page_state)
+
+                def mount_settings_plans() -> None:
+                    settings_plans_host.clear()
+                    with settings_plans_host:
                         build_creation_plans_panel(
                             page_state,
-                            on_plans_change=refresh_accounts_panel,
+                            on_plans_change=lambda: settings_callbacks[
+                                "refresh_accounts"
+                            ](),
                         )
-                    with ui.tab_panel(settings_feishu):
+
+                def mount_settings_feishu() -> None:
+                    settings_feishu_host.clear()
+                    with settings_feishu_host:
                         build_feishu_panel(page_state)
-                    with ui.tab_panel(settings_help):
+
+                def mount_settings_help() -> None:
+                    settings_help_host.clear()
+                    with settings_help_host:
                         if onboarding_service is not None and page_is_admin:
                             build_onboarding_settings(
                                 page_state,
                                 service=onboarding_service,
                             )
                         _build_help_panel()
+
+                settings_mounts: dict[str, Callable[[], None]] = {
+                    str(settings_accounts.props["name"]): mount_settings_accounts,
+                    str(settings_plans.props["name"]): mount_settings_plans,
+                    str(settings_feishu.props["name"]): mount_settings_feishu,
+                    str(settings_help.props["name"]): mount_settings_help,
+                }
+                if settings_models is not None:
+                    settings_mounts[str(settings_models.props["name"])] = (
+                        mount_settings_models
+                    )
+                mounted_settings: set[str] = set()
+                scheduled_settings: set[str] = set()
+
+                def mount_settings_tab(tab: Any) -> None:
+                    tab_name = str(
+                        tab.props["name"] if hasattr(tab, "props") else tab
+                    )
+                    if tab_name in mounted_settings:
+                        return
+                    settings_mounts[tab_name]()
+                    mounted_settings.add(tab_name)
+                    scheduled_settings.discard(tab_name)
+
+                def schedule_settings_tab(tab: Any) -> None:
+                    tab_name = str(
+                        tab.props["name"] if hasattr(tab, "props") else tab
+                    )
+                    if (
+                        tab_name in mounted_settings
+                        or tab_name in scheduled_settings
+                    ):
+                        return
+                    scheduled_settings.add(tab_name)
+                    client_timer(
+                        0.01,
+                        lambda: mount_settings_tab(tab),
+                        once=True,
+                        immediate=False,
+                    )
+
+                schedule_settings_tab(initial_settings_tab)
+                settings_tabs.on_value_change(
+                    lambda event: schedule_settings_tab(event.value)
+                )
 
         tab_mounts = {
             str(tab_wizard.props["name"]): mount_wizard,

@@ -79,7 +79,7 @@ def test_settings_entries_do_not_inflate_the_initial_workbench_payload(
     assert "微信公众号云中转" not in texts
 
 
-def test_model_management_contains_all_text_and_image_sections(
+def test_model_management_defers_hidden_text_and_image_sections(
     tmp_path,
     monkeypatch: Any,
 ) -> None:
@@ -102,10 +102,10 @@ def test_model_management_contains_all_text_and_image_sections(
     assert "全部" in texts
     assert "文章模型" in texts
     assert "图片模型" in texts
-    assert rendered_purposes == ["text", "image"]
+    assert rendered_purposes == []
 
 
-def test_creation_plans_contains_writing_image_rules_and_ai_review(
+def test_creation_plans_defers_hidden_writing_and_review_sections(
     tmp_path,
     monkeypatch: Any,
 ) -> None:
@@ -155,7 +155,4 @@ def test_creation_plans_contains_writing_image_rules_and_ai_review(
     assert "AI 评审方案" in texts
     assert "方案管理" in texts
     assert "系统默认方案" in texts
-    assert rendered == [
-        ("prompts", on_change),
-        ("reviews", on_change),
-    ]
+    assert rendered == []

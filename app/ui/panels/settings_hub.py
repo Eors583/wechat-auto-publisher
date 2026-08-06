@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import json
+from collections.abc import Callable
 from typing import Any
 
 from nicegui import ui
@@ -16,6 +16,7 @@ from app.prompt_templates import (
 )
 from app.services.configuration import ConfigurationService
 from app.services.creation_plans import CreationPlanService
+from app.ui.lifecycle import client_timer
 from app.ui.panels.models import build_models_panel
 from app.ui.panels.prompts import build_prompt_templates_panel
 from app.ui.panels.review_jury import build_editorial_review_profiles_panel
@@ -147,6 +148,24 @@ def build_model_management_panel(state: AppState) -> None:
         image_tab = ui.tab("图片模型")
     with ui.tab_panels(tabs, value=all_tab).classes("w-full bg-transparent"):
         with ui.tab_panel(all_tab).classes("q-pa-none q-pt-md"):
+            all_host = ui.column().classes("w-full")
+        with ui.tab_panel(text_tab).classes("q-pa-none q-pt-md"):
+            text_host = ui.column().classes("w-full")
+        with ui.tab_panel(image_tab).classes("q-pa-none q-pt-md"):
+            image_host = ui.column().classes("w-full")
+
+    hosts = {
+        str(all_tab.props["name"]): all_host,
+        str(text_tab.props["name"]): text_host,
+        str(image_tab.props["name"]): image_host,
+    }
+    for host in hosts.values():
+        with host:
+            ui.label("正在加载…").classes("muted q-pa-md")
+
+    def mount_overview() -> None:
+        all_host.clear()
+        with all_host:
             with ui.element("div").classes("card w-full"):
                 ui.label("模型管理").classes("text-h6 text-weight-bold")
                 ui.label(
@@ -168,10 +187,47 @@ def build_model_management_panel(state: AppState) -> None:
                         "管理图片模型",
                         on_click=lambda: tabs.set_value(image_tab),
                     ).props("outline color=teal-9 no-caps icon=image")
-        with ui.tab_panel(text_tab).classes("q-pa-none q-pt-md"):
+
+    def mount_text_models() -> None:
+        text_host.clear()
+        with text_host:
             build_models_panel(state, purpose="text")
-        with ui.tab_panel(image_tab).classes("q-pa-none q-pt-md"):
+
+    def mount_image_models() -> None:
+        image_host.clear()
+        with image_host:
             build_models_panel(state, purpose="image")
+
+    mounts = {
+        str(all_tab.props["name"]): mount_overview,
+        str(text_tab.props["name"]): mount_text_models,
+        str(image_tab.props["name"]): mount_image_models,
+    }
+    mounted: set[str] = set()
+    scheduled: set[str] = set()
+
+    def mount_tab(tab: Any) -> None:
+        name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+        if name in mounted:
+            return
+        mounts[name]()
+        mounted.add(name)
+        scheduled.discard(name)
+
+    def schedule_tab(tab: Any) -> None:
+        name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+        if name in mounted or name in scheduled:
+            return
+        scheduled.add(name)
+        client_timer(
+            0.01,
+            lambda: mount_tab(tab),
+            once=True,
+            immediate=False,
+        )
+
+    mount_tab(all_tab)
+    tabs.on_value_change(lambda event: schedule_tab(event.value))
 
 
 def build_creation_plans_panel(
@@ -202,20 +258,75 @@ def build_creation_plans_panel(
         review_tab = ui.tab("AI 评审方案")
     with ui.tab_panels(tabs, value=plans_tab).classes("w-full bg-transparent"):
         with ui.tab_panel(plans_tab).classes("q-pa-none q-pt-md"):
+            plans_host = ui.column().classes("w-full")
+        with ui.tab_panel(prompt_tab).classes("q-pa-none q-pt-md"):
+            prompt_host = ui.column().classes("w-full")
+        with ui.tab_panel(review_tab).classes("q-pa-none q-pt-md"):
+            review_host = ui.column().classes("w-full")
+
+    hosts = {
+        str(plans_tab.props["name"]): plans_host,
+        str(prompt_tab.props["name"]): prompt_host,
+        str(review_tab.props["name"]): review_host,
+    }
+    for host in hosts.values():
+        with host:
+            ui.label("正在加载…").classes("muted q-pa-md")
+
+    def mount_plans() -> None:
+        plans_host.clear()
+        with plans_host:
             _build_creation_plan_manager(
                 state,
                 on_plans_change=on_plans_change,
             )
-        with ui.tab_panel(prompt_tab).classes("q-pa-none q-pt-md"):
+
+    def mount_prompts() -> None:
+        prompt_host.clear()
+        with prompt_host:
             build_prompt_templates_panel(
                 state,
                 on_templates_change=on_plans_change,
             )
-        with ui.tab_panel(review_tab).classes("q-pa-none q-pt-md"):
+
+    def mount_reviews() -> None:
+        review_host.clear()
+        with review_host:
             build_editorial_review_profiles_panel(
                 state,
                 on_profiles_change=on_plans_change,
             )
+
+    mounts = {
+        str(plans_tab.props["name"]): mount_plans,
+        str(prompt_tab.props["name"]): mount_prompts,
+        str(review_tab.props["name"]): mount_reviews,
+    }
+    mounted: set[str] = set()
+    scheduled: set[str] = set()
+
+    def mount_tab(tab: Any) -> None:
+        name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+        if name in mounted:
+            return
+        mounts[name]()
+        mounted.add(name)
+        scheduled.discard(name)
+
+    def schedule_tab(tab: Any) -> None:
+        name = str(tab.props["name"] if hasattr(tab, "props") else tab)
+        if name in mounted or name in scheduled:
+            return
+        scheduled.add(name)
+        client_timer(
+            0.01,
+            lambda: mount_tab(tab),
+            once=True,
+            immediate=False,
+        )
+
+    mount_tab(plans_tab)
+    tabs.on_value_change(lambda event: schedule_tab(event.value))
 
 
 def _build_creation_plan_manager(

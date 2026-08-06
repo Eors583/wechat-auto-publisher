@@ -19,6 +19,12 @@ def test_lcp_containers_do_not_start_transparent() -> None:
     assert "animation:" not in card_rule
 
 
+def test_main_theme_avoids_continuous_paint_and_backdrop_blur() -> None:
+    assert "@keyframes" not in APP_CSS
+    assert "animation:" not in APP_CSS
+    assert "backdrop-filter:" not in APP_CSS
+
+
 def test_robots_route_returns_valid_private_app_policy() -> None:
     response = robots_txt()
 

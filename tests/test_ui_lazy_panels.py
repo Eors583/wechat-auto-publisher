@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "app" / "ui" / "desktop.py"
 
@@ -44,3 +43,13 @@ def test_inactive_workspaces_are_mounted_from_tab_changes() -> None:
     assert 'str(tab_topics.props["name"]): mount_topics' in source
     assert 'str(tab_jobs.props["name"]): mount_jobs' in source
     assert 'str(tab_settings.props["name"]): mount_settings' in source
+
+
+def test_settings_children_are_mounted_only_after_their_tab_is_selected() -> None:
+    source = DESKTOP.read_text(encoding="utf-8")
+
+    assert "def schedule_settings_tab(tab: Any) -> None:" in source
+    assert "settings_tabs.on_value_change(" in source
+    assert "lambda event: schedule_settings_tab(event.value)" in source
+    assert "schedule_settings_tab(initial_settings_tab)" in source
+    assert "settings_mounts[tab_name]()" in source

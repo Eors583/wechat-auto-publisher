@@ -8,15 +8,6 @@ HEAD_HTML = """
 """
 
 APP_CSS = style_css_variables() + """
-@keyframes fade-up {
-  from { opacity: 0; transform: translateY(7px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes soft-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(12, 92, 75, 0.0); }
-  50% { box-shadow: 0 0 0 6px rgba(12, 92, 75, 0.08); }
-}
-
 html, body {
   margin: 0;
   min-width: 320px;
@@ -75,7 +66,6 @@ body, .q-page, .nicegui-content {
   background: rgba(255,255,255,0.78);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
-  backdrop-filter: blur(14px);
   overflow: hidden;
   position: relative;
 }
@@ -210,7 +200,6 @@ body, .q-page, .nicegui-content {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: rgba(255,255,255,.84);
-  transition: border-color .18s ease, background .18s ease, transform .18s ease;
 }
 .workflow-step__number {
   width: 24px;
@@ -282,19 +271,16 @@ body, .q-page, .nicegui-content {
 }
 
 .card {
-  background: var(--panel);
+  background: var(--panel-solid);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 20px;
   margin: 0;
   box-shadow: var(--shadow);
-  backdrop-filter: blur(12px);
   min-width: 0;
-  transition: border-color .2s ease, box-shadow .2s ease;
 }
 .card:hover {
   border-color: var(--line-strong);
-  box-shadow: var(--shadow-hover);
 }
 .action-card {
   background: linear-gradient(145deg, rgba(255,255,255,.98), rgba(240,249,246,.96));
@@ -335,13 +321,10 @@ body, .q-page, .nicegui-content {
   padding: 12px 14px;
   margin-bottom: 8px;
   background: var(--panel-solid);
-  transition: border-color .18s ease, transform .18s ease, background .18s ease, box-shadow .18s ease;
 }
 .topic-item:hover {
   border-color: rgba(8,122,99,0.34);
-  transform: translateY(-2px);
   background: #fbfffd;
-  box-shadow: 0 8px 20px rgba(16,34,27,.06);
 }
 .article-item {
   border: 1px solid var(--line);
@@ -350,12 +333,10 @@ body, .q-page, .nicegui-content {
   margin: 6px 0;
   cursor: pointer;
   background: #f7faf9;
-  transition: background .18s ease, border-color .18s ease, transform .18s ease;
 }
 .article-item:hover {
   border-color: rgba(12,92,75,0.4);
   background: var(--accent-soft);
-  transform: translateX(2px);
 }
 
 .preview-frame {
@@ -415,7 +396,6 @@ body, .q-page, .nicegui-content {
 }
 .request-loading-dialog .q-dialog__backdrop {
   background: rgba(9, 37, 36, 0.42);
-  backdrop-filter: blur(2px);
 }
 .request-loading-card {
   min-width: 320px;
@@ -456,7 +436,6 @@ body, .q-page, .nicegui-content {
   background: var(--warn-soft);
   color: var(--warn);
   border-color: rgba(138,90,18,0.14);
-  animation: soft-pulse 2.4s ease infinite;
 }
 
 .rewrite-progress {
@@ -513,7 +492,6 @@ body, .q-page, .nicegui-content {
 
 .job-row {
   border-radius: 12px;
-  transition: background .15s ease;
 }
 .job-row:hover { background: rgba(12,92,75,0.05); }
 
@@ -555,7 +533,6 @@ body, .q-page, .nicegui-content {
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, .94);
   box-shadow: 0 8px 24px rgba(16, 34, 27, .06);
-  backdrop-filter: blur(16px);
 }
 .review-workbench__title-row { min-width: 0; }
 .review-workbench__icon {
@@ -664,12 +641,9 @@ body, .q-page, .nicegui-content {
   padding: 16px !important;
   border-radius: 15px !important;
   background: #fff !important;
-  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
 }
 .review-issue-card:hover {
-  transform: translateY(-1px);
   border-color: rgba(8, 122, 99, .28) !important;
-  box-shadow: 0 12px 28px rgba(16, 34, 27, .075) !important;
 }
 .review-issue-card--safety {
   border-left: 4px solid #f59e0b !important;
@@ -758,7 +732,6 @@ body, .q-page, .nicegui-content {
   border-radius: 16px;
   background: rgba(255,255,255,.97);
   box-shadow: 0 18px 50px rgba(16,34,27,.16);
-  backdrop-filter: blur(14px);
 }
 .background-activity-card {
   border: 1px solid var(--line);
