@@ -679,7 +679,7 @@ def test_duplicate_review_click_is_rejected_before_second_model_charge(
     assert not errors
 
 
-def test_candidate_cannot_invent_or_silently_change_material_numbers(
+def test_candidate_number_changes_are_preserved_as_confirmation_warnings(
     tmp_path, monkeypatch
 ) -> None:
     service, batch_id, job_id = _ready_service(tmp_path)
@@ -704,13 +704,58 @@ def test_candidate_cannot_invent_or_silently_change_material_numbers(
         for item in review["result"]["issues"]
         if item["role_id"] == "chief_editor"
     )
-    with pytest.raises(ValueError, match="候选稿改变了正文关键数字"):
-        service.generate_editorial_rewrite_candidate(
-            batch_id,
-            job_id,
-            review["id"],
-            issue_ids=[safe_issue["id"]],
-        )
+    generated = service.generate_editorial_rewrite_candidate(
+        batch_id,
+        job_id,
+        review["id"],
+        issue_ids=[safe_issue["id"]],
+    )
+
+    application = generated["application"]
+    candidate = application["candidate_snapshot"]
+    assert application["status"] == "candidate_ready"
+    assert candidate["body"].startswith("第一段介绍背景")
+    assert candidate["risk_warnings"] == [
+        {
+            "code": "body_material_numbers_changed",
+            "severity": "high",
+            "title": "候选正文的关键数字与原稿不一致",
+            "message": "新增 2026年、45%；删除 2025年、32%",
+            "added": ["2026年", "45%"],
+            "removed": ["2025年", "32%"],
+            "requires_confirmation": True,
+        }
+    ]
+    current = service.get_batch(batch_id, include_content=True)["jobs"][0]
+    assert "2025年" in current["body"]
+    assert "32%" in current["body"]
+    assert "2026年" not in current["body"]
+
+
+def test_candidate_header_numbers_are_warnings_instead_of_errors() -> None:
+    source = {
+        "title": "原标题",
+        "subtitle": "原副标题",
+        "digest": "原摘要",
+        "body": "第一段介绍背景。\n\n第二段给出行动建议。",
+    }
+
+    candidate = normalize_rewrite_candidate(
+        {
+            "title": "2026年企业经营新答案",
+            "subtitle": "原副标题",
+            "digest": "效率提升40%的实践方法",
+            "body": source["body"],
+            "change_summary": "优化标题和摘要",
+        },
+        source=source,
+        rewrite_mode="selected_issues",
+    )
+
+    warning = candidate["risk_warnings"][0]
+    assert warning["code"] == "header_material_numbers_added"
+    assert warning["added"] == ["2026年", "40%"]
+    assert warning["requires_confirmation"] is True
 
 
 def test_same_risk_cannot_be_downgraded_by_a_later_model_review(

@@ -20,6 +20,23 @@ def test_comparison_hides_markdown_authoring_markers() -> None:
     ) == "开放反馈\n\n这里有 重点 和 参考。"
 
 
+def test_number_risks_are_presented_as_confirmable_candidate_warnings() -> None:
+    comparison_literals = _string_literals(
+        _function("render_article_comparison")
+    )
+    rewrite_literals = _string_literals(
+        _function("smart_rewrite", async_function=True)
+    )
+
+    assert "候选稿包含关键数字变化，请人工核对" in comparison_literals
+    assert any(
+        "这不是系统错误，候选稿已正常生成且尚未覆盖原文。" in text
+        for text in comparison_literals
+    )
+    assert "确认数字变化并采用 AI 改写稿" in comparison_literals
+    assert any("检测到关键数字变化" in text for text in rewrite_literals)
+
+
 def _tree() -> ast.Module:
     return ast.parse(REVIEW_JURY_PANEL.read_text(encoding="utf-8"))
 

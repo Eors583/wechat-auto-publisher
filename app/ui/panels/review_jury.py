@@ -486,6 +486,11 @@ def build_review_jury_panel(
             after = dict(review.get("rewritten_snapshot") or {})
             if not after:
                 after = dict((application or {}).get("candidate_snapshot") or {})
+            risk_warnings = [
+                dict(item)
+                for item in (after.get("risk_warnings") or [])
+                if isinstance(item, dict)
+            ]
             if not str(before.get("body") or "").strip() or not str(
                 after.get("body") or ""
             ).strip():
@@ -679,6 +684,26 @@ def build_review_jury_panel(
                             )
                         ).classes("muted")
                     ui.badge("内容对比").props("outline color=indigo-7")
+                if risk_warnings:
+                    with ui.card().classes("w-full q-pa-md bg-deep-orange-1").style(
+                        "border:1px solid #ffab91;box-shadow:none"
+                    ):
+                        with ui.row().classes("items-center q-gutter-sm"):
+                            ui.icon("warning").classes("text-deep-orange-8 text-h5")
+                            ui.label("候选稿包含关键数字变化，请人工核对").classes(
+                                "text-subtitle1 text-weight-bold text-deep-orange-10"
+                            )
+                        ui.label(
+                            "这不是系统错误，候选稿已正常生成且尚未覆盖原文。"
+                            "数字可能是格式调整，也可能是 AI 新增或删除的事实；"
+                            "采用前请逐项确认。"
+                        ).classes("text-body2 text-deep-orange-10")
+                        for warning in risk_warnings:
+                            title = str(warning.get("title") or "关键数字变化")
+                            message = str(warning.get("message") or "").strip()
+                            ui.label(
+                                f"{title}：{message}" if message else title
+                            ).classes("text-body2 text-weight-medium")
                 change_summary = str(after.get("change_summary") or "").strip()
                 if change_summary:
                     with ui.card().classes("w-full q-pa-sm bg-indigo-1").style(
@@ -737,9 +762,17 @@ def build_review_jury_panel(
                                     "outline color=blue-grey-8 no-caps icon=history"
                                 )
                                 use_rewrite_btn = ui.button(
-                                    "采用 AI 改写稿",
+                                    (
+                                        "确认数字变化并采用 AI 改写稿"
+                                        if risk_warnings
+                                        else "采用 AI 改写稿"
+                                    ),
                                 ).props(
-                                    "unelevated color=indigo-7 no-caps icon=auto_fix_high"
+                                    (
+                                        "unelevated color=deep-orange-8 no-caps icon=warning"
+                                        if risk_warnings
+                                        else "unelevated color=indigo-7 no-caps icon=auto_fix_high"
+                                    )
                                 )
                                 keep_source_btn.on_click(
                                     lambda event: select_version(
@@ -917,14 +950,34 @@ def build_review_jury_panel(
                         dict(runtime.get("application") or {}),
                     )
                     render_review_summary(refreshed_review)
+                    candidate_snapshot = dict(
+                        (runtime.get("application") or {}).get(
+                            "candidate_snapshot"
+                        )
+                        or {}
+                    )
+                    has_number_risks = bool(
+                        candidate_snapshot.get("risk_warnings")
+                    )
                     render_rewrite_progress(
                         "completed",
-                        "AI 候选稿已生成，当前正文仍保留原文；请在下方对比后选择最终版本。",
+                        (
+                            "AI 候选稿已生成，检测到关键数字变化；当前仍保留原文，"
+                            "请在对比区核对后选择最终版本。"
+                            if has_number_risks
+                            else "AI 候选稿已生成，当前正文仍保留原文；"
+                            "请在下方对比后选择最终版本。"
+                        ),
                     )
                     ui.notify(
-                        "AI 改写候选稿已生成，尚未覆盖原文；"
-                        "请在下方对比后选择保留原文或采用改写稿",
-                        type="positive",
+                        (
+                            "AI 候选稿已生成，并检测到关键数字变化；"
+                            "请在对比区人工核对，原文尚未被覆盖"
+                            if has_number_risks
+                            else "AI 改写候选稿已生成，尚未覆盖原文；"
+                            "请在下方对比后选择保留原文或采用改写稿"
+                        ),
+                        type="warning" if has_number_risks else "positive",
                         timeout=10000,
                     )
                     if bool(comparison_section.visible):

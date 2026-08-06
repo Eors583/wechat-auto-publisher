@@ -1571,18 +1571,17 @@ def normalize_rewrite_candidate(
     source_body = str(source.get("body") or "")
     source_numbers = set(_material_number_tokens(source_body))
     candidate_numbers = set(_material_number_tokens(candidate["body"]))
+    risk_warnings: list[dict[str, Any]] = []
     if candidate_numbers != source_numbers:
         added = sorted(candidate_numbers - source_numbers)
         removed = sorted(source_numbers - candidate_numbers)
-        details: list[str] = []
-        if added:
-            details.append("新增 " + "、".join(added[:8]))
-        if removed:
-            details.append("删除 " + "、".join(removed[:8]))
-        raise ValueError(
-            "候选稿改变了正文关键数字（"
-            + "；".join(details)
-            + "），为避免擅改事实已拒绝覆盖"
+        risk_warnings.append(
+            _number_change_warning(
+                code="body_material_numbers_changed",
+                title="候选正文的关键数字与原稿不一致",
+                added=added,
+                removed=removed,
+            )
         )
     source_all_numbers = source_numbers | set(
         _material_number_tokens(
@@ -1604,16 +1603,43 @@ def normalize_rewrite_candidate(
         candidate_header_numbers - source_all_numbers
     )
     if invented_header_numbers:
-        raise ValueError(
-            "候选标题、摘要或副标题出现原稿中不存在的关键数字（"
-            + "、".join(invented_header_numbers[:8])
-            + "），已拒绝覆盖"
+        risk_warnings.append(
+            _number_change_warning(
+                code="header_material_numbers_added",
+                title="候选标题、摘要或副标题新增了关键数字",
+                added=invented_header_numbers,
+                removed=[],
+            )
         )
+    candidate["risk_warnings"] = risk_warnings
     if rewrite_mode != "title_only" and len(candidate["body"]) < max(
         20, int(len(source_body) * 0.45)
     ):
         raise ValueError("模型返回的候选正文过短，已拒绝覆盖原稿")
     return candidate
+
+
+def _number_change_warning(
+    *,
+    code: str,
+    title: str,
+    added: list[str],
+    removed: list[str],
+) -> dict[str, Any]:
+    details: list[str] = []
+    if added:
+        details.append("新增 " + "、".join(added[:8]))
+    if removed:
+        details.append("删除 " + "、".join(removed[:8]))
+    return {
+        "code": code,
+        "severity": "high",
+        "title": title,
+        "message": "；".join(details),
+        "added": added,
+        "removed": removed,
+        "requires_confirmation": True,
+    }
 
 
 def parse_json_object(raw: Any) -> dict[str, Any]:
