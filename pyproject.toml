@@ -15,6 +15,8 @@ dependencies = [
   "readability-lxml>=0.8.1",
   "apscheduler>=3.10.0",
   "google-genai>=1.0.0",
+  "nicegui>=2.5.0",
+  "pywebview>=5.0",
   "pillow>=10.0.0",
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
@@ -25,7 +27,7 @@ dependencies = [
 
 [project.scripts]
 wechat-auto = "app.cli:app"
-wechat-auto-ui = "app.frontend.server:main"
+wechat-auto-ui = "app.ui.desktop:main"
 wechat-auto-api = "app.api.server:main"
 
 [build-system]
@@ -37,4 +39,4 @@ where = ["."]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["render/templates/*.j2", "frontend/dist/**"]
+app = ["render/templates/*.j2"]

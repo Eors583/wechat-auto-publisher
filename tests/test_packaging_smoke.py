@@ -67,7 +67,7 @@ def test_packaging_remote_url_rejects_invalid_address() -> None:
 def test_remote_storage_contract_does_not_require_database() -> None:
     detail = _runtime_storage_contract({}, "https://publisher.example")
 
-    assert detail == "remote-browser=https://publisher.example"
+    assert detail == "remote-client=https://publisher.example"
 
 
 def test_postgres_storage_contract_only_validates_driver_and_address() -> None:

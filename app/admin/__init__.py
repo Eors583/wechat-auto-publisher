@@ -1,0 +1,2 @@
+"""Standalone merchant administration console."""
+

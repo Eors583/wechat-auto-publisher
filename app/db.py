@@ -3083,10 +3083,7 @@ class Database:
         if self.owner_user_id:
             if not self.get_official_account(account_id):
                 raise ValueError("公众号不存在")
-            if (
-                creation_plan_id != "builtin:default"
-                and not self.get_creation_plan(creation_plan_id)
-            ):
+            if not self.get_creation_plan(creation_plan_id):
                 raise ValueError("创作方案不存在")
         now = _utc_now()
         with self.connect() as conn:

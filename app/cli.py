@@ -244,10 +244,10 @@ def _parse_local_dt(value: str) -> datetime:
 
 @app.command("desktop")
 def desktop() -> None:
-    """启动本地 API 与 Vue/Element Plus 工作台并打开浏览器。"""
-    from app.launcher import main as launcher_main
+    """打开运营人员桌面端界面。"""
+    from app.ui.desktop import main as ui_main
 
-    raise typer.Exit(code=launcher_main())
+    ui_main()
 
 
 if __name__ == "__main__":

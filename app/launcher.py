@@ -8,7 +8,6 @@ import socket
 import sys
 import time
 import uuid
-import webbrowser
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -55,16 +54,23 @@ def _remote_ui_url(argv: list[str] | None = None) -> str:
 
 
 def _run_remote_desktop(url: str) -> int:
-    """Open the hosted Vue application in the user's default browser."""
+    """Open the hosted NiceGUI application without starting local services."""
 
-    if not webbrowser.open(url, new=1, autoraise=True):
-        _show_warning(f"无法自动打开浏览器，请手动访问：{url}")
-        return 1
+    import webview
+
+    webview.create_window(
+        "公众号智能运营助手",
+        url,
+        width=1180,
+        height=860,
+        min_size=(980, 720),
+    )
+    webview.start()
     return 0
 
 
 def _ensure_standard_streams() -> None:
-    """Give windowed frozen processes valid streams for Uvicorn.
+    """Give windowed frozen processes valid streams for Uvicorn/NiceGUI.
 
     PyInstaller's windowed mode sets ``sys.stdout`` and ``sys.stderr`` to
     ``None``.  Uvicorn's default log formatter calls ``isatty()`` on those
@@ -116,10 +122,6 @@ def _api_port() -> int:
         return 18766
 
 
-def _frontend_port() -> int:
-    return int(os.getenv("WECHAT_PUBLISHER_FRONTEND_PORT") or "18765")
-
-
 def _port_is_open(port: int) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", int(port)), timeout=0.4):
@@ -161,19 +163,6 @@ def _api_is_healthy(
     return True
 
 
-def _frontend_is_healthy(port: int) -> bool:
-    try:
-        with urlopen(f"http://127.0.0.1:{int(port)}/health", timeout=1.5) as response:
-            payload: Any = json.loads(response.read().decode("utf-8"))
-        return bool(
-            isinstance(payload, dict)
-            and payload.get("ok") is True
-            and payload.get("frontend") == "vue-element-plus"
-        )
-    except (OSError, URLError, ValueError, json.JSONDecodeError):
-        return False
-
-
 def _wait_for_api(
     port: int,
     timeout: float = 20.0,
@@ -197,19 +186,6 @@ def _run_api_service() -> None:
         main()
     except BaseException:  # noqa: BLE001
         logger.exception("Bundled API service stopped unexpectedly")
-        raise
-
-
-def _run_frontend_service() -> None:
-    _ensure_standard_streams()
-    _configure_file_logging("frontend.log")
-    logger.info("Starting bundled Vue and Element Plus frontend")
-    try:
-        from app.frontend.server import main
-
-        main()
-    except BaseException:  # noqa: BLE001
-        logger.exception("Bundled frontend service stopped unexpectedly")
         raise
 
 
@@ -257,8 +233,19 @@ def _run_self_test() -> int:
 
 def _run_ui_smoke_server(port: int) -> None:
     _configure_file_logging("ui-smoke.log")
-    os.environ["WECHAT_PUBLISHER_FRONTEND_PORT"] = str(int(port))
-    _run_frontend_service()
+    from nicegui import ui
+
+    from app.ui.desktop import create_desktop_app
+
+    ui.run(
+        root=create_desktop_app,
+        title="公众号改写助手安装验证",
+        native=False,
+        reload=False,
+        show=False,
+        port=int(port),
+        storage_secret=f"package-smoke-{uuid.uuid4().hex}",
+    )
 
 
 def main() -> int:
@@ -310,47 +297,12 @@ def main() -> int:
     except ApiProcessControlError as exc:
         _show_warning(str(exc))
 
-    frontend_port = _frontend_port()
-    frontend_process: multiprocessing.Process | None = None
-    if not _frontend_is_healthy(frontend_port):
-        if _port_is_open(frontend_port):
-            api_controller.shutdown()
-            clear_api_process_controller(api_controller)
-            _show_warning(f"端口 {frontend_port} 已被其他程序占用")
-            return 2
-        frontend_process = multiprocessing.Process(
-            target=_run_frontend_service,
-            name="wechat-publisher-frontend",
-            daemon=True,
-        )
-        frontend_process.start()
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline and not _frontend_is_healthy(frontend_port):
-            if not frontend_process.is_alive():
-                break
-            time.sleep(0.2)
-    if not _frontend_is_healthy(frontend_port):
-        api_controller.shutdown()
-        clear_api_process_controller(api_controller)
-        _show_warning("Vue 前端服务启动失败，请查看 data/logs/frontend.log")
-        return 2
-
-    url = f"http://127.0.0.1:{frontend_port}/"
-    if not webbrowser.open(url, new=1, autoraise=True):
-        _show_warning(f"无法自动打开浏览器，请手动访问：{url}")
-    logger.info("Local browser workspace is ready: %s", url)
     try:
-        while True:
-            if frontend_process is not None and not frontend_process.is_alive():
-                _show_warning("Vue 前端服务意外停止，请查看运行日志")
-                return 2
-            time.sleep(1.0)
-    except KeyboardInterrupt:
+        from app.ui.desktop import main as desktop_main
+
+        desktop_main()
         return 0
     finally:
-        if frontend_process is not None and frontend_process.is_alive():
-            frontend_process.terminate()
-            frontend_process.join(timeout=5)
         api_controller.shutdown()
         clear_api_process_controller(api_controller)
 

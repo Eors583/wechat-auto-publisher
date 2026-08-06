@@ -4,7 +4,6 @@ x-app-build: &app_build
   context: .
   dockerfile: Dockerfile
   args:
-    NODE_IMAGE: docker.m.daocloud.io/library/node:22-alpine
     PYTHON_IMAGE: docker.m.daocloud.io/library/python:3.12-slim
     DEBIAN_MIRROR: http://mirrors.aliyun.com/debian
     DEBIAN_SECURITY_MIRROR: http://mirrors.aliyun.com/debian-security
@@ -77,7 +76,7 @@ services:
     command:
       - python
       - -m
-      - app.frontend.server
+      - app.ui.server
     environment: *app_environment
     volumes:
       - app_data:/app/data
@@ -96,10 +95,10 @@ services:
     command:
       - python
       - -m
-      - app.frontend.server
+      - app.admin.server
     environment:
       <<: *app_environment
-      WECHAT_PUBLISHER_FRONTEND_PORT: "18767"
+      WECHAT_PUBLISHER_ADMIN_ROOT_PATH: /admin
     volumes:
       - app_data:/app/data
     ports:

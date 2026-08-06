@@ -20,6 +20,8 @@ if (-not $env:CREDENTIAL_ENCRYPTION_KEY) {
     $env:CREDENTIAL_ENCRYPTION_KEY = 'local-docker-credential-key-change-before-production'
 }
 
-# Use the same launcher as the packaged build. It starts the API and the
-# Vue/Element Plus frontend as owned child processes, then opens the browser.
+# Use the same launcher as the frozen desktop build.  The launcher retains the
+# exact Process handle it created, so the Feishu settings page can safely
+# restart that API/long-connection child without looking up or killing a
+# process merely because it happens to occupy port 18766.
 & $python -m app.launcher

@@ -12,13 +12,12 @@ from typing import Any
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
 from app.api.editorial_reviews import create_editorial_review_router
-from app.api.configuration import create_configuration_router
 from app.config import load_config
 from app.db import customer_data_scope
 from app.services import (
@@ -29,7 +28,6 @@ from app.services import (
 )
 from app.services.auth import AuthService
 from app.services.configuration import ConfigurationService
-from app.services.creation_plans import CreationPlanService
 from app.services.failures import (
     classify_job_failure,
     public_failure,
@@ -239,13 +237,6 @@ class FollowedArticleStateRequest(BaseModel):
     rewritten_batch_id: str | None = None
 
 
-class WechatBackendSessionRequest(BaseModel):
-    enabled: bool = False
-    token: str = ""
-    cookie: str = ""
-    session_label: str = Field(default="", max_length=120)
-
-
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     password: str = Field(min_length=6, max_length=128)
@@ -254,10 +245,6 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=32)
     password: str = Field(min_length=1, max_length=128)
-
-
-class UserStateRequest(BaseModel):
-    enabled: bool
 
 
 class AdminModelRequest(BaseModel):
@@ -344,7 +331,6 @@ def create_api_app(
     onboarding_service = OnboardingService(batch_service.db, cfg)
     auth_service = AuthService(batch_service.db)
     configuration_service = ConfigurationService(batch_service.db, cfg)
-    creation_plan_service = CreationPlanService(batch_service.db, cfg)
 
     @app.exception_handler(StarletteHTTPException)
     async def sanitized_http_error(
@@ -510,24 +496,6 @@ def create_api_app(
     def admin_users() -> list[dict[str, Any]]:
         return auth_service.list_users()
 
-    @app.patch(
-        "/api/v1/admin/users/{user_id}",
-        dependencies=[Depends(require_admin)],
-    )
-    def update_admin_user(
-        user_id: str,
-        payload: UserStateRequest,
-        principal: dict[str, Any] = Depends(require_admin),
-    ) -> dict[str, Any]:
-        try:
-            return auth_service.set_user_enabled(
-                user_id,
-                payload.enabled,
-                actor_user_id=str(principal.get("id") or ""),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
     @app.get(
         "/api/v1/admin/models",
         dependencies=[Depends(require_admin)],
@@ -563,18 +531,6 @@ def create_api_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post(
-        "/api/v1/admin/models/{model_id}/test-image",
-        dependencies=[Depends(require_admin)],
-        response_class=FileResponse,
-    )
-    def test_admin_image_model(model_id: str) -> FileResponse:
-        try:
-            result = configuration_service.generate_model_test_image(model_id)
-            return FileResponse(str(result["path"]))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     @app.delete(
         "/api/v1/admin/models/{model_id}",
         dependencies=[Depends(require_admin)],
@@ -587,15 +543,6 @@ def create_api_app(
 
     app.include_router(
         create_editorial_review_router(batch_service, require_token)
-    )
-    app.include_router(
-        create_configuration_router(
-            configuration_service,
-            creation_plan_service,
-            onboarding_service,
-            require_token,
-            require_admin,
-        )
     )
 
     @app.get("/health")
@@ -790,49 +737,6 @@ def create_api_app(
     def list_followed_accounts(enabled_only: bool = Query(default=False)) -> list[dict[str, Any]]:
         return followed_service.list_accounts(enabled_only=enabled_only)
 
-    @app.get(
-        "/api/v1/followed-accounts/backend-session",
-        dependencies=[Depends(require_token)],
-    )
-    def get_followed_backend_session() -> dict[str, Any]:
-        return followed_service.get_backend_search_settings()
-
-    @app.put(
-        "/api/v1/followed-accounts/backend-session",
-        dependencies=[Depends(require_token)],
-    )
-    def save_followed_backend_session(
-        payload: WechatBackendSessionRequest,
-    ) -> dict[str, Any]:
-        try:
-            return followed_service.save_backend_search_settings(
-                **payload.model_dump()
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post(
-        "/api/v1/followed-accounts/backend-session/test",
-        dependencies=[Depends(require_token)],
-    )
-    def test_followed_backend_session(
-        payload: WechatBackendSessionRequest,
-    ) -> dict[str, Any]:
-        try:
-            return followed_service.test_backend_search_settings(
-                token=payload.token,
-                cookie=payload.cookie,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.delete(
-        "/api/v1/followed-accounts/backend-session",
-        dependencies=[Depends(require_token)],
-    )
-    def clear_followed_backend_session() -> dict[str, Any]:
-        return followed_service.clear_backend_search_settings()
-
     @app.post("/api/v1/followed-accounts", dependencies=[Depends(require_token)])
     def save_followed_account(payload: FollowedAccountRequest) -> dict[str, Any]:
         try:
@@ -848,17 +752,9 @@ def create_api_app(
     @app.post("/api/v1/followed-accounts/{account_id}/refresh", dependencies=[Depends(require_token)])
     def refresh_followed_account(account_id: str) -> dict[str, Any]:
         try:
-            report = followed_service.discover_account(account_id)
+            return followed_service.discover_account(account_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        # Discovery is also used by scheduled bulk refreshes, where one
-        # account failure must not stop the remaining accounts.  The service
-        # therefore records provider failures in its report.  An interactive
-        # single-account query, however, must expose that failure to the UI
-        # instead of pretending that an empty result was successful.
-        if report.get("error") and not int(report.get("found") or 0):
-            raise HTTPException(status_code=422, detail=str(report["error"]))
-        return report
 
     @app.post("/api/v1/followed-accounts/refresh", dependencies=[Depends(require_token)])
     def refresh_all_followed_accounts() -> dict[str, Any]:

@@ -14,14 +14,4 @@ if (-not $env:CREDENTIAL_ENCRYPTION_KEY) {
     $env:CREDENTIAL_ENCRYPTION_KEY = 'local-docker-credential-key-change-before-production'
 }
 
-$env:WECHAT_PUBLISHER_API_PORT = '18776'
-$apiProcess = Start-Process -FilePath $python -ArgumentList @('-m', 'app.api.server') -PassThru -WindowStyle Hidden
-try {
-    Set-Location (Join-Path $projectRoot 'frontend')
-    & pnpm dev
-}
-finally {
-    if ($apiProcess -and -not $apiProcess.HasExited) {
-        Stop-Process -Id $apiProcess.Id
-    }
-}
+& $python -m app.ui.server

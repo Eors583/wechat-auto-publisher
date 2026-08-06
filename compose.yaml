@@ -44,6 +44,7 @@ services:
     ports:
       - "18776:18766"
     volumes:
+      - ./app:/app/app:ro
       - wechat_app_data:/app/data
     restart: unless-stopped
 
@@ -54,7 +55,7 @@ services:
     command:
       - python
       - -m
-      - app.frontend.server
+      - app.ui.server
     environment: *app_environment
     depends_on:
       postgres:
@@ -64,6 +65,7 @@ services:
     ports:
       - "18775:18765"
     volumes:
+      - ./app:/app/app:ro
       - wechat_app_data:/app/data
     restart: unless-stopped
 
@@ -72,10 +74,8 @@ services:
     command:
       - python
       - -m
-      - app.frontend.server
-    environment:
-      <<: *app_environment
-      WECHAT_PUBLISHER_FRONTEND_PORT: "18767"
+      - app.admin.server
+    environment: *app_environment
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,6 +84,7 @@ services:
     ports:
       - "18777:18767"
     volumes:
+      - ./app:/app/app:ro
       - wechat_app_data:/app/data
     restart: unless-stopped
 
