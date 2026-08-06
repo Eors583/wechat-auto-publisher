@@ -848,9 +848,17 @@ def create_api_app(
     @app.post("/api/v1/followed-accounts/{account_id}/refresh", dependencies=[Depends(require_token)])
     def refresh_followed_account(account_id: str) -> dict[str, Any]:
         try:
-            return followed_service.discover_account(account_id)
+            report = followed_service.discover_account(account_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # Discovery is also used by scheduled bulk refreshes, where one
+        # account failure must not stop the remaining accounts.  The service
+        # therefore records provider failures in its report.  An interactive
+        # single-account query, however, must expose that failure to the UI
+        # instead of pretending that an empty result was successful.
+        if report.get("error") and not int(report.get("found") or 0):
+            raise HTTPException(status_code=422, detail=str(report["error"]))
+        return report
 
     @app.post("/api/v1/followed-accounts/refresh", dependencies=[Depends(require_token)])
     def refresh_all_followed_accounts() -> dict[str, Any]:

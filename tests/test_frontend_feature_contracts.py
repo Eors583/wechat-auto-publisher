@@ -15,7 +15,10 @@ def test_followed_account_can_query_its_article_list() -> None:
     assert "articleFilters.account_ids = [account.id]" in source
     assert '@click="queryFollowedArticles(row)"' in source
     assert "查询文章</el-button>" in source
-    assert "正在查看“{{ queriedAccount.name }}”的文章列表" in source
+    assert "正在查看“${queriedAccount.name}”的文章列表" in source
+    assert "backendSearchReady" in source
+    assert "请先配置并保存公众号后台 Token 和 Cookie" in source
+    assert "加密保存并继续" in source
 
 
 def test_every_authenticated_user_sees_add_official_account_action() -> None:

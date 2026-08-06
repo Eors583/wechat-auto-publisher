@@ -261,7 +261,9 @@ class FollowedContentService:
             if method == "backend_search":
                 backend = effective_backend_settings(self.db)
                 if not backend.get("enabled"):
-                    raise ValueError("公众号后台搜索尚未启用，请先配置并测试后台登录态")
+                    raise ValueError(
+                        "公众号后台搜索尚未启用，请先配置 Token 和 Cookie 并验证登录态"
+                    )
                 candidates = search_backend_account_articles(
                     str(account["name"]),
                     wechat_id=str(account.get("wechat_id") or ""),

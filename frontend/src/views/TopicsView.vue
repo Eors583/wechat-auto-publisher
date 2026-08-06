@@ -20,6 +20,7 @@ const followedDialog = ref(false)
 const sourceDialog = ref(false)
 const articleDialog = ref(false)
 const backendDialog = ref(false)
+const pendingBackendQuery = ref(null)
 const filters = reactive({ keyword: '', days: 7, source_ids: [] })
 const articleFilters = reactive({ keyword: '', account_ids: [], days: 30, unread_only: false, favorite_only: false })
 const manual = reactive({ title: '', url: '', summary: '', category: '' })
@@ -33,6 +34,9 @@ const queriedAccount = computed(() => {
   if (articleFilters.account_ids.length !== 1) return null
   return followedAccounts.value.find((item) => item.id === articleFilters.account_ids[0]) || null
 })
+const backendSearchReady = computed(() => (
+  backendSession.enabled && backendSession.has_token && backendSession.has_cookie
+))
 
 function topicParams() {
   const params = new URLSearchParams({ days: String(filters.days), limit: '200' })
@@ -89,7 +93,11 @@ async function refreshFollowed(account = null) {
   actionId.value = account?.id || 'followed'
   try {
     const result = account ? await api.refreshFollowedAccount(account.id) : await api.refreshFollowedAccounts()
-    ElMessage.success(`关注文章已刷新${result?.added != null ? `，新增 ${result.added} 篇` : ''}`)
+    if (result?.error) {
+      ElMessage.warning(`已查询到 ${result.found || 0} 篇文章，但部分内容处理失败：${result.error}`)
+    } else {
+      ElMessage.success(`公众号文章查询完成${result?.found != null ? `，找到 ${result.found} 篇` : ''}${result?.added != null ? `，新增 ${result.added} 篇` : ''}`)
+    }
   } catch (error) {
     ElMessage.error(error.message)
   } finally {
@@ -101,12 +109,23 @@ async function refreshFollowed(account = null) {
   }
 }
 
+function openBackendSession(account = null) {
+  pendingBackendQuery.value = account
+  if (account) backendSession.enabled = true
+  backendDialog.value = true
+}
+
 async function queryFollowedArticles(account) {
   articleFilters.keyword = ''
   articleFilters.account_ids = [account.id]
   articleFilters.unread_only = false
   articleFilters.favorite_only = false
   active.value = 'followed'
+  if (account.fetch_method === 'backend_search' && !backendSearchReady.value) {
+    openBackendSession(account)
+    ElMessage.warning('请先配置并保存公众号后台 Token 和 Cookie，保存后会自动继续查询')
+    return
+  }
   await refreshFollowed(account)
 }
 
@@ -263,6 +282,9 @@ async function saveBackendSession(testOnly = false) {
       Object.assign(backendSession, result, { token: '', cookie: '' })
       backendDialog.value = false
       ElMessage.success('公众号后台登录态已加密保存')
+      const account = pendingBackendQuery.value
+      pendingBackendQuery.value = null
+      if (account) await queryFollowedArticles(account)
     }
   } catch (error) {
     ElMessage.error(error.message)
@@ -276,6 +298,7 @@ async function clearBackendSession() {
     await ElMessageBox.confirm('确定清除已保存的公众号后台 Token 和 Cookie 吗？', '清除登录态', { type: 'warning' })
     const result = await api.clearFollowedBackendSession()
     Object.assign(backendSession, result, { token: '', cookie: '' })
+    pendingBackendQuery.value = null
     ElMessage.success('公众号后台登录态已清除')
   } catch (error) {
     if (error !== 'cancel') ElMessage.error(error.message || String(error))
@@ -310,18 +333,21 @@ onMounted(load)
     </template>
 
     <template v-else-if="active === 'followed'">
-      <el-alert v-if="queriedAccount" class="account-query-alert" type="success" show-icon closable @close="clearFollowedAccountQuery">
-        <template #title>正在查看“{{ queriedAccount.name }}”的文章列表</template>
-        查询操作会先从已配置的公众号后台更新文章，再按该公众号筛选展示；也可以继续使用下方条件缩小范围。
+      <el-alert v-if="queriedAccount" class="account-query-alert" :type="queriedAccount.fetch_method === 'backend_search' && !backendSearchReady ? 'warning' : 'success'" show-icon closable @close="clearFollowedAccountQuery">
+        <template #title>{{ queriedAccount.fetch_method === 'backend_search' && !backendSearchReady ? `查询“${queriedAccount.name}”前需要配置后台登录态` : `正在查看“${queriedAccount.name}”的文章列表` }}</template>
+        <template v-if="queriedAccount.fetch_method === 'backend_search' && !backendSearchReady">
+          公众号名称搜索依赖微信公众号后台 Token 和 Cookie。<el-button link type="primary" @click="openBackendSession(queriedAccount)">立即配置并继续查询</el-button>
+        </template>
+        <template v-else>查询操作会先通过公众号后台按名称搜索并更新文章，再按该公众号筛选展示。</template>
       </el-alert>
       <el-card class="surface-card filter-card" shadow="never"><div class="topic-filters"><el-input v-model="articleFilters.keyword" :prefix-icon="Search" placeholder="搜索文章或公众号" clearable @keyup.enter="load" /><el-select v-model="articleFilters.account_ids" multiple collapse-tags placeholder="全部关注公众号" style="min-width:220px" @change="load"><el-option v-for="account in followedAccounts" :key="account.id" :label="account.name" :value="account.id" /></el-select><el-select v-model="articleFilters.days" style="width:140px" @change="load"><el-option label="最近 7 天" :value="7" /><el-option label="最近 30 天" :value="30" /><el-option label="最近一年" :value="365" /></el-select><el-checkbox v-model="articleFilters.unread_only" @change="load">仅未读</el-checkbox><el-checkbox v-model="articleFilters.favorite_only" @change="load">仅收藏</el-checkbox><el-button type="primary" @click="load">筛选</el-button></div></el-card>
       <div v-if="followedArticles.length" class="followed-article-list"><el-card v-for="article in followedArticles" :key="article.id" class="surface-card followed-article" shadow="hover"><div class="followed-article__main"><div class="topic-card-el__meta"><el-tag size="small" effect="plain">{{ article.account_name || '关注公众号' }}</el-tag><span>{{ formatDateTime(article.published_at || article.discovered_at) }}</span><el-tag v-if="!article.is_read" size="small" type="warning">未读</el-tag></div><h3>{{ article.title }}</h3><p>{{ article.summary || '该文章暂未提供摘要，可打开原文查看。' }}</p></div><div class="followed-article__actions"><el-button link tag="a" :href="article.url" target="_blank" @click="updateArticle(article, { is_read: true })">查看原文</el-button><el-button text :type="article.is_favorite ? 'warning' : 'info'" @click="updateArticle(article, { is_favorite: !article.is_favorite })">{{ article.is_favorite ? '已收藏' : '收藏' }}</el-button><el-button type="primary" plain @click="createFromArticle(article)">用此文创作</el-button><el-button text type="danger" @click="updateArticle(article, { is_ignored: true })">忽略</el-button></div></el-card></div>
-      <el-empty v-else-if="!loading" :description="queriedAccount ? `暂未查询到“${queriedAccount.name}”的文章` : '还没有关注文章'"><el-button v-if="queriedAccount" type="primary" :loading="actionId === queriedAccount.id" @click="queryFollowedArticles(queriedAccount)">重新查询该公众号</el-button><el-button v-else type="primary" @click="active = 'sources'">管理关注公众号</el-button></el-empty>
+      <el-empty v-else-if="!loading" :description="queriedAccount ? `暂未查询到“${queriedAccount.name}”的文章` : '还没有关注文章'"><el-button v-if="queriedAccount && queriedAccount.fetch_method === 'backend_search' && !backendSearchReady" type="primary" @click="openBackendSession(queriedAccount)">配置 Token / Cookie 后查询</el-button><el-button v-else-if="queriedAccount" type="primary" :loading="actionId === queriedAccount.id" @click="queryFollowedArticles(queriedAccount)">重新查询该公众号</el-button><el-button v-else type="primary" @click="active = 'sources'">管理关注公众号</el-button></el-empty>
     </template>
 
     <template v-else>
       <div class="source-management-grid">
-        <el-card class="surface-card" shadow="never"><template #header><div class="card-header-row"><div><h3>关注公众号</h3><p>维护需要持续关注的公众号，并可直接查询每个公众号的文章列表</p></div><div class="hero-actions"><el-button :type="backendSession.enabled ? 'success' : 'default'" plain @click="backendDialog = true">后台登录态{{ backendSession.enabled ? '已启用' : '未配置' }}</el-button><el-button type="primary" :icon="Plus" @click="editFollowed()">添加关注</el-button></div></div></template><el-table :data="followedAccounts"><el-table-column prop="name" label="公众号" min-width="160" /><el-table-column prop="category" label="分类" min-width="120" /><el-table-column prop="fetch_method" label="获取方式" min-width="160" /><el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="操作" width="240"><template #default="{ row }"><el-button link type="primary" :icon="Search" :loading="actionId === row.id" @click="queryFollowedArticles(row)">查询文章</el-button><el-button link :icon="Edit" @click="editFollowed(row)">编辑</el-button><el-button link type="danger" :icon="Delete" @click="deleteFollowed(row)">删除</el-button></template></el-table-column></el-table></el-card>
+        <el-card class="surface-card" shadow="never"><template #header><div class="card-header-row"><div><h3>关注公众号</h3><p>通过微信公众号后台 Token + Cookie，按公众号名称查询文章列表</p></div><div class="hero-actions"><el-button :type="backendSearchReady ? 'success' : 'warning'" plain @click="openBackendSession()">后台登录态{{ backendSearchReady ? '已配置' : '待配置' }}</el-button><el-button type="primary" :icon="Plus" @click="editFollowed()">添加关注</el-button></div></div></template><el-table :data="followedAccounts"><el-table-column prop="name" label="公众号" min-width="160" /><el-table-column prop="category" label="分类" min-width="120" /><el-table-column prop="fetch_method" label="获取方式" min-width="160" /><el-table-column label="状态" width="110"><template #default="{ row }"><el-tooltip v-if="row.last_error" :content="row.last_error" placement="top"><el-tag type="danger">查询异常</el-tag></el-tooltip><el-tag v-else :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="操作" width="240"><template #default="{ row }"><el-button link type="primary" :icon="Search" :loading="actionId === row.id" @click="queryFollowedArticles(row)">查询文章</el-button><el-button link :icon="Edit" @click="editFollowed(row)">编辑</el-button><el-button link type="danger" :icon="Delete" @click="deleteFollowed(row)">删除</el-button></template></el-table-column></el-table></el-card>
         <el-card class="surface-card" shadow="never"><template #header><div class="card-header-row"><div><h3>选题来源</h3><p>管理 RSS、热榜接口、新闻搜索和内部素材源</p></div><el-button type="primary" :icon="Plus" @click="editSource()">添加来源</el-button></div></template><el-table :data="sources"><el-table-column prop="name" label="来源" min-width="160" /><el-table-column prop="source_type" label="类型" min-width="140" /><el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="操作" width="150"><template #default="{ row }"><el-button link :icon="Edit" @click="editSource(row)">编辑</el-button><el-button link type="danger" :icon="Delete" @click="deleteSource(row)">删除</el-button></template></el-table-column></el-table></el-card>
       </div>
     </template>
@@ -334,6 +360,6 @@ onMounted(load)
 
     <el-dialog v-model="articleDialog" title="投递公众号文章" width="min(560px, 92vw)" append-to-body><el-form label-position="top"><el-form-item label="微信公众号原文链接" required><el-input v-model="articleForm.url" type="textarea" :rows="3" placeholder="https://mp.weixin.qq.com/s/..." /></el-form-item><el-form-item label="归属关注公众号（可选）"><el-select v-model="articleForm.followed_account_id" clearable style="width:100%"><el-option v-for="account in followedAccounts" :key="account.id" :label="account.name" :value="account.id" /></el-select></el-form-item></el-form><template #footer><el-button @click="articleDialog = false">取消</el-button><el-button type="primary" :loading="actionId === 'article'" @click="addArticle">读取并加入素材库</el-button></template></el-dialog>
 
-    <el-dialog v-model="backendDialog" title="配置公众号后台搜索登录态" width="min(680px, 94vw)" append-to-body><el-alert type="warning" :closable="false" show-icon title="仅使用你有权管理的公众号后台登录态；Token 与 Cookie 会在服务器加密保存且不会回显。" /><el-form label-position="top" class="dialog-form-spaced"><el-switch v-model="backendSession.enabled" active-text="启用公众号后台搜索" /><el-form-item :label="`后台 Token${backendSession.has_token ? '（已保存，留空不修改）' : ''}`"><el-input v-model="backendSession.token" type="password" show-password /></el-form-item><el-form-item :label="`后台 Cookie${backendSession.has_cookie ? '（已保存，留空不修改）' : ''}`"><el-input v-model="backendSession.cookie" type="textarea" :rows="5" /></el-form-item><el-form-item label="会话说明"><el-input v-model="backendSession.session_label" placeholder="例如：运营账号 2026-08-06 登录" /></el-form-item></el-form><template #footer><el-button type="danger" text @click="clearBackendSession">清除登录态</el-button><el-button @click="backendDialog = false">取消</el-button><el-button :loading="actionId === 'test-backend'" @click="saveBackendSession(true)">验证连接</el-button><el-button type="primary" :loading="actionId === 'save-backend'" @click="saveBackendSession(false)">加密保存</el-button></template></el-dialog>
+    <el-dialog v-model="backendDialog" title="配置公众号后台搜索登录态" width="min(680px, 94vw)" append-to-body><el-alert type="warning" :closable="false" show-icon title="仅使用你有权管理的公众号后台登录态；Token 与 Cookie 会在服务器加密保存且不会回显。" description="先登录 mp.weixin.qq.com；Token 可粘贴后台完整网址或 token= 后的值，Cookie 可粘贴浏览器开发者工具 Network → Request Headers 中完整的 Cookie: 行。" /><el-form label-position="top" class="dialog-form-spaced"><el-switch v-model="backendSession.enabled" active-text="启用公众号后台搜索" /><el-form-item :label="`后台 Token${backendSession.has_token ? '（已保存，留空不修改）' : ''}`"><el-input v-model="backendSession.token" type="password" show-password placeholder="后台完整网址，或 token= 后面的内容" /></el-form-item><el-form-item :label="`后台 Cookie${backendSession.has_cookie ? '（已保存，留空不修改）' : ''}`"><el-input v-model="backendSession.cookie" type="textarea" :rows="5" placeholder="Cookie: appmsg_token=...; wxuin=...; ..." /></el-form-item><el-form-item label="会话说明"><el-input v-model="backendSession.session_label" placeholder="例如：运营账号 2026-08-06 登录" /></el-form-item></el-form><template #footer><el-button type="danger" text @click="clearBackendSession">清除登录态</el-button><el-button @click="backendDialog = false">取消</el-button><el-button :loading="actionId === 'test-backend'" @click="saveBackendSession(true)">验证连接</el-button><el-button type="primary" :loading="actionId === 'save-backend'" @click="saveBackendSession(false)">加密保存并继续</el-button></template></el-dialog>
   </div>
 </template>
