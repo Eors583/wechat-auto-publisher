@@ -236,28 +236,40 @@ def build_review_jury_panel(
         "AI 评审团（手动触发）",
         icon="groups",
         value=False,
-    ).classes("w-full").props("header-class=text-indigo-9")
+    ).classes("review-jury w-full").props(
+        "header-class=review-jury__header"
+    )
     with review_expansion:
-        ui.label(
-            "AI 只从整篇运营效果出发，重点评估标题、开头、完读潜力、"
-            "点赞潜力和转发潜力，不做逐段校对或逐句挑字眼。"
-            "评审只在点击按钮后运行，不会自动覆盖当前文章。"
-        ).classes("muted")
-        ui.label(
-            "优先级：事实与合规底线 ＞ 公众号品牌规则 ＞ 用户选择的目标风格"
-        ).classes("text-warning text-caption")
+        with ui.card().classes("review-jury-intro w-full").props("flat"):
+            with ui.row().classes("w-full items-start no-wrap q-gutter-md"):
+                with ui.row().classes(
+                    "review-jury-intro__icon items-center justify-center"
+                ):
+                    ui.icon("auto_awesome", size="22px")
+                with ui.column().classes("gap-1"):
+                    ui.label("先评审，再决定是否改写").classes(
+                        "text-subtitle2 text-weight-bold"
+                    )
+                    ui.label(
+                        "AI 从整篇运营效果出发，重点评估标题、开头、完读潜力、"
+                        "点赞潜力和转发潜力，不做逐句挑字；只有点击后才会运行，"
+                        "候选稿也不会自动覆盖当前文章。"
+                    ).classes("muted")
+                    ui.label(
+                        "事实与合规底线 ＞ 公众号品牌规则 ＞ 用户选择的目标风格"
+                    ).classes("text-warning text-caption text-weight-medium")
 
         result_section = ui.column().classes(
             "editorial-review-result-anchor w-full gap-3 q-mt-md"
         )
         with result_section:
-            result_card = ui.card().classes("w-full q-pa-md").style(
-                "border:1px solid #cbded8;box-shadow:none"
-            ).props(f"id={result_anchor_id}")
+            result_card = ui.card().classes(
+                "review-surface w-full"
+            ).props(f"flat id={result_anchor_id}")
             with result_card:
                 result_host = ui.column().classes("w-full gap-3")
                 comparison_section = ui.column().classes(
-                    "w-full gap-3 q-mt-md"
+                    "review-comparison w-full gap-3 q-mt-md"
                 ).props(f"id={comparison_anchor_id}")
                 with comparison_section:
                     comparison_host = ui.column().classes("w-full gap-3")
@@ -294,7 +306,9 @@ def build_review_jury_panel(
                 "调整本次评审设置",
                 icon="tune",
                 value=False,
-            ).classes("w-full").props("dense header-class=text-blue-grey-8")
+            ).classes("review-settings w-full").props(
+                "dense header-class=text-blue-grey-8"
+            )
             with settings_expansion:
                 profile_in = ui.select(
                     profile_options,
@@ -610,12 +624,13 @@ def build_review_jury_panel(
                 label: str,
                 snapshot: dict[str, Any],
                 badge_color: str,
+                card_class: str = "",
             ) -> None:
                 body = _comparison_plain_text(snapshot.get("body"))
                 with ui.column().classes("col-12 col-md-6"):
-                    with ui.card().classes("w-full q-pa-md").style(
-                        "border:1px solid #dfe8e5;box-shadow:none;height:100%"
-                    ):
+                    with ui.card().classes(
+                        f"review-comparison-card {card_class} w-full"
+                    ).props("flat"):
                         with ui.row().classes(
                             "w-full items-center justify-between no-wrap"
                         ):
@@ -640,9 +655,8 @@ def build_review_jury_panel(
                                 "text-caption text-blue-grey-7"
                             )
                         ui.separator()
-                        with ui.column().classes("w-full q-pr-sm").style(
-                            "max-height:560px;overflow-y:auto;"
-                            "overscroll-behavior:contain"
+                        with ui.column().classes(
+                            "review-comparison-body w-full"
                         ):
                             ui.label(body).classes("text-body1").style(
                                 "white-space:pre-wrap;line-height:1.9;"
@@ -685,9 +699,9 @@ def build_review_jury_panel(
                         ).classes("muted")
                     ui.badge("内容对比").props("outline color=indigo-7")
                 if risk_warnings:
-                    with ui.card().classes("w-full q-pa-md bg-deep-orange-1").style(
-                        "border:1px solid #ffab91;box-shadow:none"
-                    ):
+                    with ui.card().classes(
+                        "review-risk-card w-full"
+                    ).props("flat"):
                         with ui.row().classes("items-center q-gutter-sm"):
                             ui.icon("warning").classes("text-deep-orange-8 text-h5")
                             ui.label("候选稿包含关键数字变化，请人工核对").classes(
@@ -740,11 +754,12 @@ def build_review_jury_panel(
                         ),
                         snapshot=after,
                         badge_color="indigo-7",
+                        card_class="review-comparison-card--candidate",
                     )
                 if review_status == "candidate_ready":
-                    with ui.card().classes("w-full q-pa-md bg-amber-1").style(
-                        "border:1px solid #ffe082;box-shadow:none"
-                    ):
+                    with ui.card().classes(
+                        "review-choice-card w-full"
+                    ).props("flat"):
                         ui.label("请选择最终使用的文章版本").classes(
                             "text-subtitle1 text-weight-bold"
                         )
@@ -801,33 +816,27 @@ def build_review_jury_panel(
                 "running": (
                     "AI 后台改写中",
                     "info",
-                    "blue-1",
                     "blue-8",
-                    "#bbdefb",
                 ),
                 "completed": (
                     "AI 改写已完成",
                     "check_circle",
-                    "green-1",
                     "green-8",
-                    "#c8e6c9",
                 ),
                 "failed": (
                     "AI 改写失败",
                     "error_outline",
-                    "red-1",
                     "red-8",
-                    "#ffcdd2",
                 ),
             }
-            title, indicator, background, color, border = presentation.get(
+            title, indicator, color = presentation.get(
                 status,
                 presentation["running"],
             )
             with rewrite_progress_host:
-                with ui.card().classes(f"w-full q-pa-md bg-{background}").style(
-                    f"border:1px solid {border};box-shadow:none"
-                ):
+                with ui.card().classes(
+                    f"review-progress-card review-progress-card--{status} w-full"
+                ).props("flat"):
                     with ui.row().classes("w-full items-center no-wrap q-gutter-sm"):
                         if status == "running":
                             ui.spinner("dots", size="34px", color=color)
@@ -991,7 +1000,7 @@ def build_review_jury_panel(
                 smart_btn = ui.button(
                     "按所选建议优化整篇",
                     on_click=smart_rewrite,
-                ).props("unelevated color=indigo-7 no-caps icon=auto_fix_high")
+                ).props("unelevated color=teal-8 no-caps icon=auto_fix_high")
 
         def render_review_summary(review: dict[str, Any] | None) -> None:
             result_summary_host.clear()
@@ -1002,9 +1011,9 @@ def build_review_jury_panel(
             if status in {"failed", "stale"}:
                 return
             with result_summary_host:
-                with ui.card().classes("w-full q-pa-md").style(
-                    "border:1px solid #dbe8e4;box-shadow:none"
-                ):
+                with ui.card().classes(
+                    "review-summary-card w-full"
+                ).props("flat"):
                     with ui.column().classes("gap-0"):
                         ui.label("AI 评审已完成").classes(
                             "text-subtitle1 text-weight-bold"
@@ -1057,7 +1066,9 @@ def build_review_jury_panel(
                     "failed": "red-7",
                     "stale": "orange-8",
                 }
-                with ui.row().classes("w-full items-center justify-between"):
+                with ui.row().classes(
+                    "review-result-header w-full items-center justify-between"
+                ):
                     with ui.column().classes("gap-0"):
                         ui.label(
                             f'评审结果 · {review.get("profile_name") or "AI 评审团"}'
@@ -1140,16 +1151,18 @@ def build_review_jury_panel(
                             "这是旧版评审维度；重新点击“开始 AI 评审”后，"
                             "将改为标题、开头、完读、点赞和转发五项运营潜力。"
                         ).classes("muted text-caption")
-                    with ui.grid(columns=5).classes("w-full gap-2"):
+                    with ui.grid(columns=5).classes(
+                        "review-score-grid w-full"
+                    ):
                         for dimension in dimensions:
                             score_text = _format_dimension_score(
                                 dimension.get("score"),
                                 summary=dimension.get("summary"),
                                 score_available=dimension.get("score_available"),
                             )
-                            with ui.card().classes("q-pa-sm").style(
-                                "border:1px solid #dfe8e5;box-shadow:none"
-                            ):
+                            with ui.card().classes(
+                                "review-score-card"
+                            ).props("flat"):
                                 ui.label(
                                     str(dimension.get("name") or "运营潜力")
                                 ).classes("text-caption text-weight-bold")
@@ -1181,9 +1194,9 @@ def build_review_jury_panel(
                             else "发布风险（需人工核实）"
                         ).classes("text-subtitle1 text-weight-bold q-mt-sm")
                         issue_group = next_group
-                    with ui.card().classes("w-full q-pa-md").style(
-                        "border:1px solid #e3e9e7;box-shadow:none"
-                    ):
+                    with ui.card().classes(
+                        f"review-issue-card review-issue-card--{next_group} w-full"
+                    ).props("flat"):
                         with ui.row().classes(
                             "w-full items-center justify-between"
                         ):

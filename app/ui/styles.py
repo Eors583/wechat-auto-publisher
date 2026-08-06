@@ -535,6 +535,234 @@ body, .q-page, .nicegui-content {
   scroll-margin-bottom: calc(104px + env(safe-area-inset-bottom));
 }
 
+/* Quasar review workbench ------------------------------------------------- */
+.review-workbench {
+  width: min(1320px, calc(100vw - 40px)) !important;
+  max-width: 1320px !important;
+  max-height: 94vh !important;
+  padding: 0 24px 28px !important;
+  overflow-y: auto;
+  border: 1px solid rgba(213, 223, 218, .92);
+  border-radius: 24px !important;
+  background: #f7faf9 !important;
+  box-shadow: 0 28px 80px rgba(18, 42, 34, .20) !important;
+}
+.review-workbench__header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  margin: 0 -24px 18px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, .94);
+  box-shadow: 0 8px 24px rgba(16, 34, 27, .06);
+  backdrop-filter: blur(16px);
+}
+.review-workbench__title-row { min-width: 0; }
+.review-workbench__icon {
+  color: #fff !important;
+  background: linear-gradient(145deg, var(--accent), var(--accent-2)) !important;
+  box-shadow: 0 8px 20px rgba(8, 122, 99, .22);
+}
+.review-mode-toggle {
+  width: min(100%, 420px) !important;
+  margin: 2px 0 6px;
+  padding: 4px !important;
+  border: 1px solid var(--line);
+  border-radius: 14px !important;
+  background: #eef3f1 !important;
+}
+.review-mode-toggle .q-btn {
+  min-height: 40px;
+  border-radius: 10px !important;
+}
+.review-mode-toggle .q-btn.bg-teal-9 {
+  background: #fff !important;
+  color: var(--accent-dark) !important;
+  box-shadow: 0 4px 12px rgba(18, 46, 36, .10) !important;
+}
+.review-quick-summary,
+.review-surface,
+.review-summary-card,
+.review-comparison-card,
+.review-progress-card,
+.review-choice-card,
+.review-risk-card,
+.review-issue-card,
+.review-score-card {
+  border: 1px solid var(--line) !important;
+  box-shadow: 0 8px 24px rgba(16, 34, 27, .045) !important;
+}
+.review-quick-summary {
+  border-radius: 18px !important;
+  background: #fff !important;
+}
+.review-jury {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+.review-jury > .q-expansion-item__container > .q-item {
+  min-height: 64px;
+  padding: 0 18px;
+  color: var(--ink) !important;
+  background: linear-gradient(135deg, #fff, #f0f8f5);
+}
+.review-jury > .q-expansion-item__container > .q-item .q-item__label {
+  font-size: 16px;
+  font-weight: 800;
+}
+.review-jury > .q-expansion-item__container > .q-expansion-item__content {
+  padding: 0 18px 18px;
+}
+.review-jury-intro {
+  margin-top: 4px;
+  padding: 14px 16px;
+  border: 1px solid rgba(8, 122, 99, .14) !important;
+  border-radius: 14px !important;
+  background: linear-gradient(135deg, #f0faf7, #fff) !important;
+  box-shadow: none !important;
+}
+.review-jury-intro__icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 12px;
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+}
+.review-settings {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fbfdfc;
+}
+.review-settings > .q-expansion-item__container > .q-item {
+  min-height: 50px;
+  padding: 0 14px;
+}
+.review-settings > .q-expansion-item__container > .q-expansion-item__content {
+  padding: 0 14px 14px;
+}
+.review-surface {
+  padding: 20px !important;
+  border-radius: 18px !important;
+  background: #fff !important;
+}
+.review-summary-card {
+  padding: 16px 18px !important;
+  border-radius: 16px !important;
+  border-color: rgba(8, 122, 99, .18) !important;
+  background: linear-gradient(135deg, #fff, #f2faf7) !important;
+}
+.review-result-header {
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.review-score-grid {
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+}
+.review-score-card {
+  min-width: 0;
+  padding: 14px !important;
+  border-radius: 14px !important;
+  background: linear-gradient(160deg, #fff, #f6faf8) !important;
+}
+.review-score-card .text-h6 {
+  color: var(--accent-dark) !important;
+  font-size: 24px;
+  font-weight: 900;
+}
+.review-issue-card {
+  padding: 16px !important;
+  border-radius: 15px !important;
+  background: #fff !important;
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.review-issue-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(8, 122, 99, .28) !important;
+  box-shadow: 0 12px 28px rgba(16, 34, 27, .075) !important;
+}
+.review-issue-card--safety {
+  border-left: 4px solid #f59e0b !important;
+  background: linear-gradient(90deg, #fffaf0, #fff 18%) !important;
+}
+.review-comparison {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #f8fbfa;
+}
+.review-comparison-card {
+  height: 100%;
+  padding: 18px !important;
+  border-radius: 16px !important;
+  background: #fff !important;
+}
+.review-comparison-card--candidate {
+  border-color: rgba(8, 122, 99, .26) !important;
+  background: linear-gradient(180deg, #fff, #f7fcfa) !important;
+}
+.review-comparison-body {
+  max-height: 560px;
+  padding: 4px 8px 4px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #c8d7d1 transparent;
+}
+.review-risk-card {
+  padding: 16px !important;
+  border-color: #fdba74 !important;
+  border-radius: 15px !important;
+  background: #fff7ed !important;
+}
+.review-choice-card {
+  padding: 16px 18px !important;
+  border-color: rgba(8, 122, 99, .22) !important;
+  border-radius: 15px !important;
+  background: #f0faf7 !important;
+}
+.review-progress-card {
+  padding: 15px 16px !important;
+  border-radius: 15px !important;
+  box-shadow: none !important;
+}
+.review-progress-card--running { border-color: #bfdbfe !important; background: #eff6ff !important; }
+.review-progress-card--completed { border-color: #bbf7d0 !important; background: #f0fdf4 !important; }
+.review-progress-card--failed { border-color: #fecaca !important; background: #fef2f2 !important; }
+.review-body-editor .q-field__control { min-height: 440px; }
+.review-body-editor textarea.q-field__native {
+  min-height: 400px !important;
+  line-height: 1.8 !important;
+  resize: vertical !important;
+}
+
+@media (max-width: 980px) {
+  .review-workbench {
+    width: calc(100vw - 20px) !important;
+    padding: 0 16px 22px !important;
+    border-radius: 18px !important;
+  }
+  .review-workbench__header { margin: 0 -16px 14px; padding: 14px 16px; }
+  .review-score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+
+@media (max-width: 620px) {
+  .review-workbench { width: 100vw !important; max-height: 100vh !important; border-radius: 0 !important; }
+  .review-workbench__header { align-items: flex-start; }
+  .review-jury > .q-expansion-item__container > .q-expansion-item__content { padding: 0 12px 12px; }
+  .review-score-grid { grid-template-columns: 1fr !important; }
+  .review-comparison { padding: 12px; }
+  .review-choice-card .q-btn { width: 100%; }
+}
+
 .background-activity-dock {
   position: fixed;
   top: 92px;

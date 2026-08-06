@@ -1805,9 +1805,9 @@ def open_review_workbench(
     )
     if review_runtime is not None:
         review_runtime["review_open"] = True
-    with ui.dialog() as dialog, ui.card().classes("w-full").style(
-        "max-width:1180px;max-height:94vh;overflow-y:auto"
-    ):
+    with ui.dialog() as dialog, ui.card().classes(
+        "review-workbench w-full"
+    ).props("flat"):
         def close_workbench() -> None:
             workbench_state["open"] = False
             if review_runtime is not None:
@@ -1815,15 +1815,23 @@ def open_review_workbench(
             dialog.close()
             on_change()
 
-        with ui.row().classes("w-full items-center justify-between"):
-            with ui.column().classes("gap-0"):
-                ui.label(f'文章审核工作台 · {job["account_name"]}').classes(
-                    "text-h6 text-weight-bold"
+        with ui.row().classes(
+            "review-workbench__header w-full items-center justify-between no-wrap"
+        ):
+            with ui.row().classes(
+                "review-workbench__title-row items-center no-wrap q-gutter-md"
+            ):
+                ui.avatar(icon="article", size="44px").classes(
+                    "review-workbench__icon"
                 )
-                ui.label(
-                    f'批次 #{batch["display_id"]} · '
-                    f'第 {article_position}/{len(batch["jobs"])} 篇'
-                ).classes("muted")
+                with ui.column().classes("gap-0"):
+                    ui.label(
+                        f'文章审核工作台 · {job["account_name"]}'
+                    ).classes("text-h6 text-weight-bold")
+                    ui.label(
+                        f'批次 #{batch["display_id"]} · '
+                        f'第 {article_position}/{len(batch["jobs"])} 篇'
+                    ).classes("muted")
             ui.button("关闭", on_click=close_workbench).props("flat icon=close")
 
         render_workflow_guide(
@@ -1838,7 +1846,7 @@ def open_review_workbench(
                 "deep": "深度编辑",
             },
             value=mode_value,
-        ).props("no-caps color=teal-9")
+        ).classes("review-mode-toggle").props("no-caps color=teal-9 spread")
         quick_review_hint = ui.label(
             "快速审核聚焦标题、评审与阻断摘要、当前封面、最终预览和确认；"
             "切换深度编辑不会重建页面或丢失输入。"
@@ -2021,9 +2029,9 @@ def open_review_workbench(
                 str(cover_meta.get("local_path") or "")
             )
             with quick_summary_host:
-                with ui.card().classes("w-full q-pa-md").style(
-                    "border:1px solid #dbe8e4;box-shadow:none"
-                ):
+                with ui.card().classes(
+                    "review-quick-summary w-full q-pa-md"
+                ).props("flat"):
                     with ui.row().classes(
                         "w-full items-start justify-between"
                     ):
@@ -2329,7 +2337,9 @@ def open_review_workbench(
         deep_review_controls.append(subtitle_editor)
         body_in = ui.textarea(
             "正文纯文本", value=str(job.get("body") or "")
-        ).classes("w-full").props("outlined rows=18 stack-label")
+        ).classes("review-body-editor w-full").props(
+            "outlined rows=18 stack-label"
+        )
         deep_review_controls.append(body_in)
 
         async def scroll_to_updated_article() -> None:
@@ -2371,7 +2381,9 @@ def open_review_workbench(
             render_quick_review_summary()
             sync_confirm_gate(updated_review)
 
-        with ui.column().classes("w-full gap-2") as review_jury_host:
+        with ui.column().classes(
+            "review-jury-host w-full gap-3"
+        ) as review_jury_host:
             background_review = (
                 review_runtime.get("start_background_review")
                 if review_runtime is not None
