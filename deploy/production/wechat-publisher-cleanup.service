@@ -6,10 +6,16 @@ Requires=docker.service
 [Service]
 Type=oneshot
 User=root
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUWeight=10
+IOWeight=10
+OOMScoreAdjust=500
+TimeoutStartSec=20min
 Environment=DEPLOY_ROOT=/opt/wechat-publisher
 Environment=DISK_THRESHOLD=80
 Environment=RELEASE_KEEP=5
 Environment=IMAGE_KEEP=5
 Environment=BUILD_CACHE_MAX_AGE=72h
 ExecStart=/opt/wechat-publisher/shared/cleanup-deploy-artifacts.sh
-

@@ -11,6 +11,17 @@ IMAGE_KEEP="${IMAGE_KEEP:-5}"
 BUILD_CACHE_MAX_AGE="${BUILD_CACHE_MAX_AGE:-72h}"
 FORCE_CLEANUP="${FORCE_CLEANUP:-false}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-wechat-auto-publisher}"
+REQUIRED_CONTAINERS=(
+  wechat-publisher-postgres-1
+  wechat-publisher-api-1
+  wechat-publisher-web-1
+  wechat-publisher-admin-1
+)
+HEALTH_URLS=(
+  http://127.0.0.1:18776/health
+  http://127.0.0.1:18775/
+  http://127.0.0.1:18777/admin/
+)
 
 log() {
   printf '[%s] %s\n' "$(date -Is)" "$*"
@@ -44,6 +55,26 @@ disk_usage_percent() {
   df -P "${DEPLOY_ROOT}" | awk 'NR == 2 {gsub(/%/, "", $5); print $5}'
 }
 
+production_healthy() {
+  local container state url
+  for container in "${REQUIRED_CONTAINERS[@]}"; do
+    state="$(
+      docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null \
+        || true
+    )"
+    if [[ "${state}" != "true" ]]; then
+      log "required container is not running: ${container}"
+      return 1
+    fi
+  done
+  for url in "${HEALTH_URLS[@]}"; do
+    if ! curl --fail --silent --show-error --max-time 15 "${url}" >/dev/null; then
+      log "production health check failed: ${url}"
+      return 1
+    fi
+  done
+}
+
 before_usage="$(disk_usage_percent)"
 if [[ "${FORCE_CLEANUP}" != "true" ]] && (( before_usage < DISK_THRESHOLD )); then
   log "disk usage ${before_usage}% is below ${DISK_THRESHOLD}%; nothing to clean"
@@ -52,6 +83,23 @@ fi
 
 log "cleanup started at ${before_usage}% disk usage"
 current_release="$(readlink -f "${CURRENT}" 2>/dev/null || true)"
+case "${current_release}" in
+  "${RELEASES}"/git-*)
+    if [[ ! -d "${current_release}" ]]; then
+      log "current release directory is missing; cleanup skipped"
+      exit 0
+    fi
+    ;;
+  *)
+    log "current symlink is not a managed release; cleanup skipped"
+    exit 0
+    ;;
+esac
+if ! production_healthy; then
+  log "production is not healthy; cleanup skipped"
+  exit 0
+fi
+log "production preflight passed; only unused artifacts will be removed"
 
 mapfile -t release_paths < <(
   find "${RELEASES}" -mindepth 1 -maxdepth 1 -type d -name 'git-*' \
@@ -112,5 +160,8 @@ log "pruning unused build cache older than ${BUILD_CACHE_MAX_AGE}"
 docker builder prune --force --filter "until=${BUILD_CACHE_MAX_AGE}"
 
 after_usage="$(disk_usage_percent)"
+if ! production_healthy; then
+  log "post-cleanup production health check failed"
+  exit 1
+fi
 log "cleanup finished: disk usage ${before_usage}% -> ${after_usage}%"
-

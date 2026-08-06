@@ -31,6 +31,21 @@ def test_cleanup_preserves_current_and_recent_rollback_versions() -> None:
     assert 'docker image rm "${tag}"' in SCRIPT
 
 
+def test_cleanup_fails_closed_when_production_is_not_healthy() -> None:
+    for container in (
+        "wechat-publisher-postgres-1",
+        "wechat-publisher-api-1",
+        "wechat-publisher-web-1",
+        "wechat-publisher-admin-1",
+    ):
+        assert container in SCRIPT
+    assert "production_healthy()" in SCRIPT
+    assert "current symlink is not a managed release; cleanup skipped" in SCRIPT
+    assert "production is not healthy; cleanup skipped" in SCRIPT
+    assert "post-cleanup production health check failed" in SCRIPT
+    assert SCRIPT.count("if ! production_healthy; then") == 2
+
+
 def test_cleanup_never_prunes_containers_or_volumes() -> None:
     assert "docker system prune" not in SCRIPT
     assert "--volumes" not in SCRIPT
@@ -46,6 +61,10 @@ def test_systemd_timer_checks_hourly_and_runs_the_versioned_script() -> None:
     assert "DISK_THRESHOLD=80" in SERVICE
     assert "RELEASE_KEEP=5" in SERVICE
     assert "IMAGE_KEEP=5" in SERVICE
+    assert "Nice=10" in SERVICE
+    assert "IOSchedulingClass=idle" in SERVICE
+    assert "CPUWeight=10" in SERVICE
+    assert "IOWeight=10" in SERVICE
     assert (
         "ExecStart=/opt/wechat-publisher/shared/cleanup-deploy-artifacts.sh"
         in SERVICE

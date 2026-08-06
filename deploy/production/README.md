@@ -83,6 +83,11 @@ systemctl enable --now wechat-publisher-cleanup.timer
 - 清理 72 小时以前的悬空镜像与无用构建缓存；
 - 不清理容器、数据库卷或其他持久化数据。
 
+达到阈值后仍会先执行 fail-closed 安全检查：`current` 必须指向合法的
+`releases/git-*` 目录，PostgreSQL、API、Web 和管理端容器必须都在运行，
+三个 HTTP 健康检查也必须通过。任一条件不满足时整次清理直接跳过。清理任务
+使用低 CPU 和空闲 IO 调度优先级，完成后会再次执行同一组生产健康检查。
+
 清理任务与部署脚本共用 `deploy.lock`，部署期间会自动跳过。可用以下命令查看状态：
 
 ```bash
