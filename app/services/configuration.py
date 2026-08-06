@@ -118,6 +118,7 @@ class ConfigurationService:
         app_id: str,
         app_secret: str | None,
         model_id: str = "",
+        review_priority: int = 0,
         enabled: bool = True,
         account_id: str | None = None,
     ) -> dict[str, Any]:
@@ -133,6 +134,9 @@ class ConfigurationService:
             model_id=model_id,
             enabled=bool(enabled),
         )
+        record = self._account_record(saved_id)
+        record["review_priority"] = max(0, min(100, int(review_priority or 0)))
+        self.db.upsert_official_account(record)
         return self.get_account(saved_id)
 
     def set_account_enabled(

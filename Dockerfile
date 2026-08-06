@@ -1,4 +1,17 @@
+ARG NODE_IMAGE=node:22-alpine
 ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${NODE_IMAGE} AS frontend-build
+
+WORKDIR /frontend
+
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+RUN corepack enable \
+    && pnpm install --frozen-lockfile
+
+COPY frontend/index.html frontend/vite.config.js ./
+COPY frontend/src ./src
+RUN pnpm build
+
 FROM ${PYTHON_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -22,6 +35,7 @@ RUN sed -i \
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY config.example.yaml ./config.example.yaml
+COPY --from=frontend-build /frontend/dist ./app/frontend/dist
 
 RUN python -m pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" .
 
@@ -29,4 +43,4 @@ RUN mkdir -p /app/data
 
 EXPOSE 18765 18766 18767
 
-CMD ["python", "-m", "app.ui.server"]
+CMD ["python", "-m", "app.frontend.server"]

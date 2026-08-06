@@ -5,7 +5,10 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 project_root = Path.cwd()
-datas = [(str(project_root / "app" / "render" / "templates"), "app/render/templates")]
+datas = [
+    (str(project_root / "app" / "render" / "templates"), "app/render/templates"),
+    (str(project_root / "frontend" / "dist"), "app/frontend/dist"),
+]
 binaries = []
 hiddenimports = collect_submodules("app")
 hiddenimports += collect_submodules("google.genai")
@@ -13,8 +16,6 @@ hiddenimports += collect_submodules("lark_oapi")
 hiddenimports += collect_submodules("psycopg")
 
 for package in (
-    "nicegui",
-    "webview",
     "trafilatura",
     "readability",
     "justext",

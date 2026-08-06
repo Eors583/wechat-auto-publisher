@@ -57,11 +57,7 @@ def _runtime_storage_contract(config: dict[str, Any], remote_url: str) -> str:
     """Validate the selected runtime without opening or creating a database."""
 
     if remote_url:
-        import webview
-
-        if not callable(getattr(webview, "create_window", None)):
-            raise RuntimeError("远程桌面 WebView 组件不可用")
-        return f"remote-client={remote_url}"
+        return f"remote-browser={remote_url}"
 
     target = database_target(config)
     if not is_postgres_url(target):
@@ -198,7 +194,6 @@ def run_packaging_self_test() -> dict[str, Any]:
         from app.services.wechat_relay_settings import (
             validate_wechat_relay_settings,
         )
-        from app.ui.panels.wechat_relay import build_wechat_relay_panel
         from app.wechat.factory import build_wechat_auth, build_wechat_client
 
         disabled = validate_wechat_relay_settings({"enabled": False})
@@ -209,11 +204,10 @@ def run_packaging_self_test() -> dict[str, Any]:
             for item in (
                 build_wechat_auth,
                 build_wechat_client,
-                build_wechat_relay_panel,
             )
         ):
             raise RuntimeError("微信云中转运行组件不完整")
-        return "settings+factory+ui"
+        return "settings+factory+api"
 
     check("wechat_relay_runtime", wechat_relay_runtime)
 
@@ -246,7 +240,7 @@ def run_packaging_self_test() -> dict[str, Any]:
                         timeout=2.0,
                     ) as response:
                         html = response.read().decode("utf-8", errors="replace")
-                    if response.status == 200 and "公众号改写助手" in html:
+                    if response.status == 200 and "公众号内容工作台" in html:
                         return f"status=200 html_chars={len(html)}"
                     last_error = f"HTTP {response.status}"
                 except HTTPError as exc:

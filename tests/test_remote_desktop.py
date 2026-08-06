@@ -61,15 +61,16 @@ def test_installer_shortcuts_open_the_hosted_application() -> None:
     ) == 3
 
 
-def test_ui_smoke_server_enables_nicegui_user_storage(monkeypatch) -> None:
-    from nicegui import ui
-
+def test_ui_smoke_server_starts_vue_frontend_on_requested_port(monkeypatch) -> None:
     received: dict[str, object] = {}
-    monkeypatch.setattr(ui, "run", lambda **kwargs: received.update(kwargs))
+    monkeypatch.setattr(
+        launcher,
+        "_run_frontend_service",
+        lambda: received.update(started=True),
+    )
     monkeypatch.setattr(launcher, "_configure_file_logging", lambda _name: None)
 
     launcher._run_ui_smoke_server(18991)
 
-    assert received["port"] == 18991
-    assert received["show"] is False
-    assert str(received["storage_secret"]).startswith("package-smoke-")
+    assert received["started"] is True
+    assert launcher.os.environ["WECHAT_PUBLISHER_FRONTEND_PORT"] == "18991"
