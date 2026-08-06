@@ -1,33 +1,13 @@
 """Desktop UI visual theme."""
 
+from app.ui.style_tokens import style_css_variables
+
 HEAD_HTML = """
 <meta name="description" content="公众号智能运营助手：从选题、AI 创作和评审到微信公众号草稿，一站式完成内容生产。">
 <script>document.documentElement.lang = 'zh-CN';</script>
 """
 
-APP_CSS = """
-:root {
-  --bg0: #f0f3f2;
-  --bg1: #f8faf9;
-  --panel: rgba(255,255,255,0.96);
-  --panel-solid: #ffffff;
-  --ink: #16221e;
-  --muted: #65736d;
-  --line: #e3e9e6;
-  --line-strong: #d5dfda;
-  --accent: #087a63;
-  --accent-2: #10a37f;
-  --accent-dark: #075f4e;
-  --accent-soft: #e6f6f1;
-  --warn: #8a5a12;
-  --warn-soft: #fff3dd;
-  --danger: #9d2430;
-  --danger-soft: #fce8ea;
-  --shadow: 0 1px 2px rgba(16, 34, 27, 0.04), 0 10px 30px rgba(16, 34, 27, 0.055);
-  --shadow-hover: 0 14px 34px rgba(16, 34, 27, 0.09);
-  --radius: 16px;
-}
-
+APP_CSS = style_css_variables() + """
 @keyframes fade-up {
   from { opacity: 0; transform: translateY(7px); }
   to { opacity: 1; transform: translateY(0); }
@@ -50,7 +30,7 @@ body, .q-page, .nicegui-content {
     radial-gradient(760px 340px at 100% 0%, rgba(92,138,123,0.09) 0%, transparent 58%),
     linear-gradient(180deg, var(--bg1) 0%, var(--bg0) 100%) !important;
   color: var(--ink);
-  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-family: var(--ui-font-sans);
   min-height: 100vh;
 }
 
@@ -59,8 +39,27 @@ body, .q-page, .nicegui-content {
   padding: 0 !important;
 }
 
+.ui-media-thumb {
+  width: var(--ui-media-thumb-width) !important;
+  height: var(--ui-media-thumb-height) !important;
+  border-radius: var(--ui-radius-md) !important;
+}
+.ui-media-preview {
+  height: var(--ui-media-preview-height) !important;
+  background: var(--ui-color-surface-muted) !important;
+}
+.ui-media-option {
+  height: var(--ui-media-option-height) !important;
+  background: var(--ui-color-surface-muted) !important;
+}
+.ui-info-outline {
+  border: 1px solid var(--ui-color-info-border) !important;
+  box-shadow: none !important;
+}
+.ui-gap-zero { gap: 0 !important; }
+
 .shell {
-  width: min(100%, 1240px);
+  width: min(100%, var(--ui-layout-content-max));
   margin: 0 auto;
   padding: 24px 28px 52px;
 }

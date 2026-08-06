@@ -2542,9 +2542,7 @@ def open_review_workbench(
                                         wechat_image_proxy_url(image_url)
                                     ).classes("w-full rounded-borders").props(
                                         "fit=cover no-spinner"
-                                    ).style(
-                                        "height:130px;background:#f1f5f3"
-                                    )
+                                    ).classes("ui-media-preview")
                                 ui.label(
                                     f'论点 {asset.get("index")} · '
                                     f'{asset.get("caption") or "正文配图"}'
@@ -2792,9 +2790,9 @@ def open_review_workbench(
                             preview_source = local_path
                         if preview_source is not None:
                             ui.image(preview_source).classes(
-                                "w-full rounded-borders"
+                                "w-full rounded-borders ui-media-preview"
                             ).props("fit=cover no-spinner").style(
-                                "aspect-ratio:2.35/1;background:#f1f5f3"
+                                "aspect-ratio:2.35/1"
                             )
                         ui.label(
                             f'当前 AI 封面 · {cover_meta.get("model_name") or "生图智能体"}'
@@ -2927,10 +2925,8 @@ def open_review_workbench(
                     with cover_card:
                         if image_url:
                             ui.image(wechat_image_proxy_url(image_url)).classes(
-                                "w-full rounded-borders"
-                            ).props("fit=cover no-spinner").style(
-                                "height:120px;background:#f1f5f3"
-                            )
+                                "w-full rounded-borders ui-media-option"
+                            ).props("fit=cover no-spinner")
                         else:
                             with ui.element("div").classes(
                                 "w-full flex items-center justify-center bg-grey-2 rounded-borders"

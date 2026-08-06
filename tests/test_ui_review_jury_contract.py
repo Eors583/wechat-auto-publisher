@@ -12,6 +12,7 @@ from app.ui.panels.review_jury import (
 
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW_JURY_PANEL = ROOT / "app" / "ui" / "panels" / "review_jury.py"
+UI_STYLES = ROOT / "app" / "ui" / "styles.py"
 
 
 def test_comparison_hides_markdown_authoring_markers() -> None:
@@ -429,10 +430,10 @@ def test_article_comparison_is_a_responsive_two_column_inline_preview() -> None:
     assert (
         "w-full" in layout_literals
     ), "the comparison must remain usable at narrow workbench widths"
-    assert "gap:0" in layout_literals, (
-        "NiceGUI rows add their own flex gap; it must be removed so two "
-        "50% Quasar columns do not wrap on desktop"
-    )
+    assert "ui-gap-zero" in layout_literals
+    assert ".ui-gap-zero { gap: 0 !important; }" in UI_STYLES.read_text(
+        encoding="utf-8"
+    ), "the semantic layout class must prevent two 50% columns from wrapping"
 
 
 def test_smart_rewrite_renders_and_scrolls_to_before_after_comparison() -> None:

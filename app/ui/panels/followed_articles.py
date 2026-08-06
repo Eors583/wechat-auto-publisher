@@ -81,7 +81,7 @@ def open_followed_articles_dialog(
     account_name = str(account.get("name") or "关注公众号")
 
     with ui.dialog() as dialog, ui.card().classes("w-full").style(
-        "max-width:1120px;max-height:92vh;overflow-y:auto"
+        "max-width:var(--ui-layout-dialog-xl);max-height:92vh;overflow-y:auto"
     ):
         with ui.row().classes("w-full items-start justify-between gap-4"):
             with ui.column().classes("gap-0").style("min-width:0;flex:1"):
@@ -143,7 +143,7 @@ def open_followed_articles_dialog(
             message = followed_article_fetch_error_message(error)
             with ui.dialog().props("persistent") as error_dialog, ui.card().classes(
                 "w-full q-pa-lg"
-            ).style("max-width:620px"):
+            ).style("max-width:var(--ui-layout-dialog-sm)"):
                 with ui.row().classes("w-full items-start gap-3 no-wrap"):
                     ui.icon("error_outline", size="36px", color="red-7")
                     with ui.column().classes("gap-1").style("min-width:0;flex:1"):
@@ -207,8 +207,8 @@ def open_followed_articles_dialog(
                                         followed_article_cover_preview_url(
                                             str(article["cover_url"])
                                         )
-                                    ).props("fit=cover no-spinner").style(
-                                        "width:128px;height:80px;border-radius:9px"
+                                    ).classes("ui-media-thumb").props(
+                                        "fit=cover no-spinner"
                                     )
                                 with ui.column().classes("gap-1").style(
                                     "min-width:0;flex:1"
@@ -385,7 +385,7 @@ def open_followed_articles_dialog(
 
         def add_article_dialog() -> None:
             with ui.dialog() as add_dialog, ui.card().classes("w-full").style(
-                "max-width:680px"
+                "max-width:var(--ui-layout-dialog-md)"
             ):
                 ui.label(f"添加 {account_name} 的公开文章").classes(
                     "text-h6 text-weight-bold"

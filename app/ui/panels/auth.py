@@ -39,19 +39,19 @@ def build_auth_screen(
             min-height: 100vh;
             display: grid;
             place-items: center;
-            padding: 32px 18px;
+            padding: var(--ui-space-8) var(--ui-space-5);
             background:
-                radial-gradient(circle at 15% 15%, rgba(13,148,136,.16), transparent 34%),
-                radial-gradient(circle at 85% 85%, rgba(14,116,144,.12), transparent 38%),
-                #f7faf9;
+                radial-gradient(circle at 15% 15%, color-mix(in srgb, var(--ui-color-brand-hover) 16%, transparent), transparent 34%),
+                radial-gradient(circle at 85% 85%, color-mix(in srgb, var(--ui-color-brand) 12%, transparent), transparent 38%),
+                var(--ui-color-bg-subtle);
         }
         .auth-card {
-            width: min(460px, 100%);
-            padding: 30px;
-            border-radius: 22px;
-            background: rgba(255,255,255,.96);
-            border: 1px solid rgba(15,118,110,.14);
-            box-shadow: 0 24px 70px rgba(15,23,42,.12);
+            width: min(var(--ui-layout-auth-card), 100%);
+            padding: var(--ui-space-8);
+            border-radius: var(--ui-radius-2xl);
+            background: var(--ui-color-surface-glass);
+            border: 1px solid color-mix(in srgb, var(--ui-color-brand) 14%, transparent);
+            box-shadow: var(--ui-shadow-dialog);
         }
         """
     )

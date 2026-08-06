@@ -720,15 +720,15 @@ def build_review_jury_panel(
                             ).classes("text-body2 text-weight-medium")
                 change_summary = str(after.get("change_summary") or "").strip()
                 if change_summary:
-                    with ui.card().classes("w-full q-pa-sm bg-indigo-1").style(
-                        "border:1px solid #cfd7f6;box-shadow:none"
+                    with ui.card().classes(
+                        "w-full q-pa-sm bg-indigo-1 ui-info-outline"
                     ):
                         ui.label(f"AI 修改摘要：{change_summary}").classes(
                             "text-body2 text-indigo-10"
                         )
                 with ui.row().classes(
-                    "w-full q-col-gutter-md items-stretch"
-                ).style("gap:0"):
+                    "w-full q-col-gutter-md items-stretch ui-gap-zero"
+                ):
                     render_snapshot(
                         label=(
                             "改写前原文（当前版本）"

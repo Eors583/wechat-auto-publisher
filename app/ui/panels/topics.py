@@ -393,7 +393,7 @@ def _build_followed_accounts(
         saved = service.get_backend_search_settings()
         configured = bool(saved.get("has_token") and saved.get("has_cookie"))
         with ui.dialog() as dialog, ui.card().classes("w-full").style(
-            "max-width:900px;max-height:92vh;overflow-y:auto"
+            "max-width:var(--ui-layout-dialog-lg);max-height:92vh;overflow-y:auto"
         ):
             ui.label("配置公众号后台搜索").classes("text-h6 text-weight-bold")
             ui.label(
