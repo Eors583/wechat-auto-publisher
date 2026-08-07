@@ -51,6 +51,15 @@ def test_hot_topic_cards_reuse_one_account_options_query_per_render() -> None:
     assert "len(state.account_options())" not in source
 
 
+def test_topic_source_operations_are_serialized_and_report_one_clear_status() -> None:
+    source = inspect.getsource(_build_hot_topics)
+
+    assert 'source_operation = {"busy": False}' in source
+    assert 'ui.notify("选题来源正在处理中，请稍候"' in source
+    assert "以下来源暂时不可用：" in source
+    assert '"部分来源失败："' not in source
+
+
 def test_followed_article_cover_uses_local_wechat_image_proxy() -> None:
     source = "https://mmbiz.qpic.cn/a/0?wx_fmt=jpeg&from=appmsg"
     preview = followed_article_cover_preview_url(source)

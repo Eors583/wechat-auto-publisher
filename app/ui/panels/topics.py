@@ -154,6 +154,7 @@ def _build_hot_topics(
     ).classes("muted q-mb-sm")
     result_host = ui.column().classes("w-full gap-3")
     result_runtime = {"visible_limit": 30}
+    source_operation = {"busy": False}
 
     def render() -> None:
         mode = str(view_mode.value or "hot")
@@ -271,28 +272,42 @@ def _build_hot_topics(
                 ).props("outline color=teal-9 no-caps").classes("self-center q-my-md")
 
     async def refresh_selected() -> None:
+        if source_operation["busy"]:
+            ui.notify("选题来源正在处理中，请稍候", type="info")
+            return
         selected = list(source_filter.value or [])
         if not selected:
             ui.notify("请至少选择一个来源", type="warning")
             return
+        source_operation["busy"] = True
+        query_btn.disable()
         set_button_loading(refresh_btn, True, "正在刷新选题来源…")
         try:
             report = await run.io_bound(lambda: service.refresh(selected))
             failures = [row for row in report["sources"] if row.get("error")]
             if failures:
                 ui.notify(
-                    "；".join(f'{row["name"]}：{row["error"]}' for row in failures),
+                    f'刷新完成，获取 {report["total"]} 条内容；以下来源暂时不可用：'
+                    + "；".join(f'{row["name"]}：{row["error"]}' for row in failures),
                     type="warning",
                     timeout=12000,
                 )
-            ui.notify(f'刷新完成，获取 {report["total"]} 条内容', type="positive")
+            elif report["total"]:
+                ui.notify(f'刷新完成，获取 {report["total"]} 条内容', type="positive")
+            else:
+                ui.notify("刷新完成，暂时没有获取到新选题", type="info")
             render()
         except Exception as exc:  # noqa: BLE001
             ui.notify(f"刷新失败：{exc}", type="negative")
         finally:
             set_button_loading(refresh_btn, False)
+            query_btn.enable()
+            source_operation["busy"] = False
 
     async def search_selected() -> None:
+        if source_operation["busy"]:
+            ui.notify("选题来源正在处理中，请稍候", type="info")
+            return
         selected = list(source_filter.value or [])
         search_keyword = str(keyword.value or "").strip()
         if not search_keyword:
@@ -301,6 +316,8 @@ def _build_hot_topics(
         if not selected:
             ui.notify("请至少选择一个来源", type="warning")
             return
+        source_operation["busy"] = True
+        refresh_btn.disable()
         set_button_loading(query_btn, True, f"正在多来源搜索“{search_keyword}”…")
         try:
             report = await run.io_bound(
@@ -318,21 +335,30 @@ def _build_hot_topics(
             )
             if failures:
                 ui.notify(
-                    "部分来源失败："
+                    f'搜索完成，共找到 {report["total"]} 条；以下来源暂时不可用：'
                     + "；".join(f'{row["name"]}：{row["error"]}' for row in failures),
                     type="warning",
                     timeout=12000,
                 )
-            ui.notify(
-                f'搜索完成，共找到 {report["total"]} 条。{detail}',
-                type="positive",
-                timeout=8000,
-            )
+            elif report["total"]:
+                ui.notify(
+                    f'搜索完成，共找到 {report["total"]} 条。{detail}',
+                    type="positive",
+                    timeout=8000,
+                )
+            else:
+                ui.notify(
+                    "搜索完成，当前来源暂未找到匹配选题，可以更换关键词或扩大日期范围",
+                    type="info",
+                    timeout=8000,
+                )
             render()
         except Exception as exc:  # noqa: BLE001
             ui.notify(f"关键词搜索失败：{exc}", type="negative")
         finally:
             set_button_loading(query_btn, False)
+            refresh_btn.enable()
+            source_operation["busy"] = False
 
     def add_manual() -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width:680px"):

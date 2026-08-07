@@ -14,8 +14,11 @@ from app.db import Database, customer_data_scope
 from app.services.auth import AuthService
 from app.services.followed_content import FollowedContentService, group_articles
 from app.services.topic_sources import (
+    TopicSourcePayloadError,
     TopicSourceService,
     _fetch_bing_news,
+    _fetch_google_news,
+    _fetch_rss,
     _parse_baidu_hot_payload,
     _parse_weibo_hot_payload,
 )
@@ -841,3 +844,127 @@ def test_bing_news_empty_rss_falls_back_to_web_results() -> None:
     assert result[0]["title"] == "AI 管理新趋势"
     assert result[0]["url"] == target
     assert result[0]["raw"]["discovery"] == "bing_web_fallback"
+
+
+def test_rss_html_challenge_is_reported_as_upstream_payload_error() -> None:
+    response = httpx.Response(
+        200,
+        text="<!DOCTYPE html><html><body>security challenge</body></html>",
+        request=httpx.Request("GET", "https://36kr.com/feed"),
+    )
+
+    class FakeClient:
+        def get(self, _url, **_kwargs):
+            return response
+
+    with pytest.raises(TopicSourcePayloadError, match="网页而不是 RSS"):
+        _fetch_rss(FakeClient(), "https://36kr.com/feed")
+
+
+def test_bing_news_invalid_rss_falls_back_to_web_results() -> None:
+    html = """
+    <ol><li class="b_algo"><h2><a href="https://example.com/ai-news">
+    AI 管理新趋势</a></h2><div><p>2026年7月21日，企业管理正在变化。</p></div></li></ol>
+    """
+    responses = [
+        httpx.Response(
+            200,
+            text="<!DOCTYPE html><html>not rss</html>",
+            request=httpx.Request("GET", "https://www.bing.com/news/search"),
+        ),
+        httpx.Response(
+            200,
+            text=html,
+            request=httpx.Request("GET", "https://www.bing.com/search"),
+        ),
+    ]
+
+    class FakeClient:
+        def get(self, _url, **_kwargs):
+            return responses.pop(0)
+
+    result = _fetch_bing_news(FakeClient(), "AI 管理", limit=5)
+    assert result[0]["title"] == "AI 管理新趋势"
+
+
+def test_36kr_rss_search_falls_back_to_official_gateway(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    rss_response = httpx.Response(
+        200,
+        text="<!DOCTYPE html><html>security challenge</html>",
+        request=httpx.Request("GET", "https://36kr.com/feed"),
+    )
+    gateway_response = httpx.Response(
+        200,
+        json={
+            "code": 0,
+            "data": {
+                "itemList": [
+                    {
+                        "itemId": "12345",
+                        "templateMaterial": {
+                            "widgetTitle": "AI 管理热点",
+                            "widgetContent": "企业正在应用 AI 改造管理流程。",
+                            "publishTime": 1784599200000,
+                        },
+                    }
+                ]
+            },
+        },
+        request=httpx.Request(
+            "POST", "https://gateway.36kr.com/api/mis/nav/newsflash/flow"
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, _url, **_kwargs):
+            return rss_response
+
+        def post(self, _url, **_kwargs):
+            return gateway_response
+
+    monkeypatch.setattr("app.services.topic_sources.httpx.Client", FakeClient)
+    config = _config(tmp_path)
+    service = TopicSourceService(Database(config["_db_path"]), config)
+    source = {
+        "id": "rss-36kr",
+        "name": "36氪",
+        "source_type": "rss",
+        "config": {"url": "https://36kr.com/feed"},
+    }
+
+    result = service._search_source(source, keyword="AI 管理", days=7, timeout=5)
+
+    assert result[0]["title"] == "AI 管理热点"
+    assert result[0]["url"] == "https://36kr.com/newsflashes/12345"
+    assert result[0]["raw"]["discovery"] == "36kr_gateway"
+
+
+def test_google_news_rss_fallback_parses_results() -> None:
+    response = httpx.Response(
+        200,
+        text="""
+        <rss><channel><item><title>AI 管理行业观察</title>
+        <link>https://example.com/google-news</link>
+        <pubDate>Tue, 21 Jul 2026 02:00:00 GMT</pubDate></item></channel></rss>
+        """,
+        request=httpx.Request("GET", "https://news.google.com/rss/search"),
+    )
+
+    class FakeClient:
+        def get(self, _url, **_kwargs):
+            return response
+
+    result = _fetch_google_news(FakeClient(), "AI 管理", limit=5)
+    assert result[0]["title"] == "AI 管理行业观察"

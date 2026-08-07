@@ -1008,7 +1008,7 @@ def _build_wizard(
                         ]
                         if failures:
                             ui.notify(
-                                "部分来源失败："
+                                f"搜索完成，共找到 {report['total']} 条；以下来源暂时不可用："
                                 + "；".join(
                                     f"{item['name']}：{item['error']}"
                                     for item in failures
@@ -1016,10 +1016,16 @@ def _build_wizard(
                                 type="warning",
                                 timeout=12000,
                             )
-                        ui.notify(
-                            f"已从 {len(report['sources'])} 个来源找到 {report['total']} 条热点",
-                            type="positive",
-                        )
+                        elif report["total"]:
+                            ui.notify(
+                                f"已从 {len(report['sources'])} 个来源找到 {report['total']} 条热点",
+                                type="positive",
+                            )
+                        else:
+                            ui.notify(
+                                "当前来源暂未找到匹配热点，请更换关键词或日期范围",
+                                type="info",
+                            )
                     except Exception as exc:
                         ui.notify(f"关键词搜索失败：{exc}", type="negative")
                     finally:

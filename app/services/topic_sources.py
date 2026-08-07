@@ -47,6 +47,10 @@ _BUILTIN_HOT_SOURCES = {
 }
 
 
+class TopicSourcePayloadError(ValueError):
+    """The upstream source responded with an unexpected payload."""
+
+
 class TopicSourceService:
     """Persist, refresh and query independent topic sources."""
 
@@ -419,7 +423,17 @@ class TopicSourceService:
             transport=httpx.HTTPTransport(retries=2),
         ) as client:
             if source_type == "rss":
-                return _fetch_rss(client, str(config.get("url") or ""))
+                rss_url = str(config.get("url") or "")
+                try:
+                    return _fetch_rss(client, rss_url)
+                except (TopicSourcePayloadError, httpx.HTTPStatusError):
+                    domain = urlsplit(rss_url).hostname or ""
+                    if domain.endswith("36kr.com"):
+                        return _fetch_36kr_newsflashes(client)
+                    query = f"{source.get('name') or domain} 企业 管理"
+                    if domain:
+                        query += f" site:{domain}"
+                    return _fetch_google_news(client, query)
             if source_type == "news_search":
                 result: list[dict[str, Any]] = []
                 for query in config.get("queries") or []:
@@ -490,7 +504,15 @@ class TopicSourceService:
                 )
             if source_type == "rss":
                 url, params, direct = _keyword_request(config, keyword)
-                items = _fetch_rss(client, url, params=params)
+                try:
+                    items = _fetch_rss(client, url, params=params)
+                except (TopicSourcePayloadError, httpx.HTTPStatusError):
+                    domain = urlsplit(url).hostname or ""
+                    if domain.endswith("36kr.com"):
+                        items = _fetch_36kr_newsflashes(client)
+                    else:
+                        fallback_query = keyword + (f" site:{domain}" if domain else "")
+                        items = _fetch_google_news(client, fallback_query)
                 return items if direct else [item for item in items if _matches_keyword(item, keyword)]
             if source_type == "hot_api":
                 url, params, direct = _keyword_request(config, keyword)
@@ -533,10 +555,26 @@ def _fetch_rss(
     url: str,
     *,
     params: dict[str, str] | None = None,
+    request_timeout: float | None = None,
 ) -> list[dict[str, Any]]:
-    response = client.get(url, params=params or None)
+    request_options: dict[str, Any] = {"params": params or None}
+    if request_timeout is not None:
+        request_options["timeout"] = request_timeout
+    response = client.get(url, **request_options)
     response.raise_for_status()
-    root = ET.fromstring(response.content)
+    payload = response.text.lstrip("\ufeff \t\r\n")
+    payload_head = payload[:512].casefold()
+    if not payload:
+        raise TopicSourcePayloadError("来源返回了空内容")
+    if "<!doctype html" in payload_head or "<html" in payload_head:
+        raise TopicSourcePayloadError("来源当前返回网页而不是 RSS 订阅数据")
+    payload = re.sub("[^\\x09\\x0a\\x0d\\x20-\\ud7ff\\ue000-\\ufffd]", "", payload)
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise TopicSourcePayloadError("来源返回的 RSS 格式异常") from exc
+    if root.tag.rsplit("}", 1)[-1].casefold() not in {"rss", "rdf", "feed"}:
+        raise TopicSourcePayloadError("来源没有返回可识别的 RSS 或 Atom 订阅数据")
     result: list[dict[str, Any]] = []
     for node in root.findall(".//item"):
         title = str(node.findtext("title") or "").strip()
@@ -566,7 +604,10 @@ def _fetch_bing_news(
         "https://www.bing.com/news/search?q="
         f"{quote_plus(keyword)}&format=rss&setlang=zh-cn"
     )
-    rss_items = _fetch_rss(client, rss_url)
+    try:
+        rss_items = _fetch_rss(client, rss_url)
+    except (TopicSourcePayloadError, httpx.HTTPStatusError):
+        rss_items = []
     if rss_items:
         return rss_items[:limit]
 
@@ -623,6 +664,84 @@ def _fetch_bing_news(
             results.append(item)
         if len(results) >= limit:
             break
+    return results
+
+
+def _fetch_google_news(
+    client: httpx.Client,
+    keyword: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rss_url = (
+        "https://news.google.com/rss/search?q="
+        f"{quote_plus(keyword)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    )
+    try:
+        return _fetch_rss(client, rss_url, request_timeout=6.0)[:limit]
+    except (TopicSourcePayloadError, httpx.HTTPStatusError):
+        return []
+
+
+def _fetch_36kr_newsflashes(
+    client: httpx.Client,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Use 36Kr's official gateway when its public RSS is behind a challenge."""
+
+    response = client.post(
+        "https://gateway.36kr.com/api/mis/nav/newsflash/flow",
+        json={
+            "partner_id": "web",
+            "param": {
+                "siteId": 1,
+                "platformId": 2,
+                "pageSize": max(1, min(int(limit), 50)),
+                "pageEvent": 0,
+            },
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        },
+        headers={"Origin": "https://36kr.com", "Referer": "https://36kr.com/"},
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except json.JSONDecodeError as exc:
+        raise TopicSourcePayloadError("36氪接口没有返回有效 JSON") from exc
+    rows = (
+        ((payload.get("data") or {}).get("itemList") or [])
+        if isinstance(payload, dict)
+        else []
+    )
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        material = row.get("templateMaterial") or {}
+        if not isinstance(material, dict):
+            continue
+        title = str(material.get("widgetTitle") or "").strip()
+        item_id = str(row.get("itemId") or material.get("itemId") or "").strip()
+        if not title or not item_id:
+            continue
+        try:
+            published_at = datetime.fromtimestamp(
+                float(material.get("publishTime")) / 1000,
+                tz=timezone.utc,
+            ).isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            published_at = datetime.now(timezone.utc).isoformat()
+        results.append(
+            {
+                "title": title,
+                "url": f"https://36kr.com/newsflashes/{item_id}",
+                "published_at": published_at,
+                "summary": _strip_html(str(material.get("widgetContent") or ""))[:300],
+                "raw": {"discovery": "36kr_gateway"},
+            }
+        )
     return results
 
 
@@ -867,4 +986,6 @@ def _friendly_error(exc: Exception) -> str:
         return f"来源返回 HTTP {exc.response.status_code}"
     if isinstance(exc, json.JSONDecodeError):
         return "接口没有返回有效 JSON"
+    if isinstance(exc, (TopicSourcePayloadError, ET.ParseError)):
+        return "来源返回的数据格式异常，已跳过该来源"
     return str(exc)[:300]
