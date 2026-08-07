@@ -9,6 +9,7 @@ from nicegui import run, ui
 from app.ai.image_providers import is_image_provider
 from app.config import database_target, load_config
 from app.services.wechat_relay_settings import public_wechat_relay_settings
+from app.ui.auth_persistence import auth_session_middleware_kwargs
 from app.ui.panels.auth import AUTH_STORAGE_KEY, current_desktop_user
 from app.ui.panels.settings_hub import build_model_management_panel
 from app.ui.panels.wechat_relay import build_wechat_relay_panel
@@ -332,6 +333,7 @@ def main() -> None:
             os.getenv("AUTH_STORAGE_SECRET")
             or "wechat-auto-publisher-local-storage-v1"
         ),
+        session_middleware_kwargs=auth_session_middleware_kwargs(),
     )
 
 

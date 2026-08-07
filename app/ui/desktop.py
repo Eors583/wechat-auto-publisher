@@ -42,6 +42,7 @@ from app.services.followed_content import FollowedContentService
 from app.services.onboarding import OnboardingService
 from app.services.topic_sources import TopicSourceService
 from app.ui import image_proxy as _image_proxy  # noqa: F401
+from app.ui.auth_persistence import auth_session_middleware_kwargs
 from app.ui.lifecycle import client_timer
 from app.ui.panels.auth import (
     build_auth_screen,
@@ -3397,6 +3398,7 @@ def main() -> None:
             port=port,
             show=True,
             storage_secret=storage_secret,
+            session_middleware_kwargs=auth_session_middleware_kwargs(),
         )
     except Exception:
         logger.warning("Native window unavailable, falling back to browser UI")
@@ -3408,6 +3410,7 @@ def main() -> None:
             port=port,
             show=True,
             storage_secret=storage_secret,
+            session_middleware_kwargs=auth_session_middleware_kwargs(),
         )
 
 
