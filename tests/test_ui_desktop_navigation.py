@@ -141,7 +141,7 @@ def test_workbench_contains_compact_entry_points_without_legacy_topic_toggle(
     assert overview_calls
     assert "今日运营概览" in texts
     assert "从选题库选择" in texts
-    assert "文章主题" in field_labels
+    assert "文章主题（可选）" in field_labels
     assert len(legacy_topic_toggles) == 1
     assert legacy_topic_toggles[0].visible is False
     assert not any(

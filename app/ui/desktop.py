@@ -681,7 +681,10 @@ def _build_wizard(
             "q-mt-sm text-weight-medium"
         )
         manual_in = (
-            ui.input("文章主题", placeholder="例如：AI 如何改变客服效率")
+            ui.input(
+                "文章主题（可选）",
+                placeholder="链接、正文和参考文章模式可留空，由系统自动提取主题",
+            )
             .classes("w-full")
             .props("outlined stack-label")
         )
@@ -1118,10 +1121,10 @@ def _build_wizard(
             "muted q-mb-sm"
         )
         source_mode_hints = {
-            "link": "粘贴一篇可直接访问的原文链接。",
-            "text": "直接粘贴完整正文；输入框可向下拖动，也可打开大编辑器。",
-            "references": "每行一个参考链接，第一篇作为主要参考。",
-            "topic": "只填写话题和补充要求，由 AI 从头创作。",
+            "link": "粘贴一篇可直接访问的原文链接；文章主题可留空。",
+            "text": "直接粘贴完整正文，系统会自动提取主题；输入框也可打开大编辑器。",
+            "references": "每行一个参考链接，第一篇作为主要参考；文章主题可留空。",
+            "topic": "由 AI 从头创作，此模式需要填写文章主题。",
         }
         source_mode_in = ui.toggle(
             {
@@ -1329,18 +1332,16 @@ def _build_wizard(
 
         def source_is_ready() -> bool:
             mode = str(source_mode_in.value or "link")
-            if (
-                not state.selected_topic.strip()
-                and not str(manual_in.value or "").strip()
-            ):
-                return False
             if mode == "link":
                 return bool(str(url_in.value or "").strip())
             if mode == "text":
                 return bool(str(text_in.value or "").strip())
             if mode == "references":
                 return bool(str(references_in.value or "").strip())
-            return True
+            return bool(
+                state.selected_topic.strip()
+                or str(manual_in.value or "").strip()
+            )
 
         def sync_workflow_before_generation() -> None:
             if state.busy:
@@ -1616,8 +1617,8 @@ def _build_wizard(
                 for line in str(references_in.value or "").splitlines()
                 if line.strip()
             ]
-            if not topic:
-                ui.notify("请先选择或输入话题", type="warning")
+            if source_mode_value == "topic" and not topic:
+                ui.notify("话题原创模式请填写文章主题", type="warning")
                 return
             if source_mode_value == "link" and not url:
                 ui.notify("请填写公众号文章链接", type="warning")
@@ -1664,8 +1665,13 @@ def _build_wizard(
             progress_percent.text = "1%"
             progress_hint.text = "正在准备发布环境检查…"
             elapsed_label.text = "已用时 0 秒"
-            log_area.value = f"话题：{topic}"
-            append_log(f"来源：{state.topic_source}")
+            log_area.value = (
+                f"话题：{topic}"
+                if topic
+                else "文章主题：将根据来源内容自动提取"
+            )
+            if topic:
+                append_log(f"来源：{state.topic_source}")
             if url:
                 append_log(f"链接：{url}")
             append_log(f"目标公众号：{len(selected_accounts)} 个")
@@ -1702,8 +1708,13 @@ def _build_wizard(
             progress_percent.text = "3%"
             progress_hint.text = "正在准备处理队列…"
             elapsed_label.text = "已用时 0 秒"
-            log_area.value = f"话题：{topic}"
-            append_log(f"来源：{state.topic_source}")
+            log_area.value = (
+                f"话题：{topic}"
+                if topic
+                else "文章主题：将根据来源内容自动提取"
+            )
+            if topic:
+                append_log(f"来源：{state.topic_source}")
             if url:
                 append_log(f"链接：{url}")
             append_log(f"目标公众号：{len(selected_accounts)} 个")

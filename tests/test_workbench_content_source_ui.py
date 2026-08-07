@@ -32,3 +32,16 @@ def test_pasted_body_supports_resize_and_fullscreen_editing() -> None:
     assert '"应用正文"' in desktop_source
     assert "resize: vertical !important" in APP_CSS
     assert "fullscreen-editor-card" in APP_CSS
+
+
+def test_topic_is_optional_except_for_topic_original_mode() -> None:
+    desktop_source = (ROOT / "app" / "ui" / "desktop.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'ui.input(\n                "文章主题（可选）"' in desktop_source
+    assert 'if source_mode_value == "topic" and not topic:' in desktop_source
+    assert 'ui.notify("话题原创模式请填写文章主题"' in desktop_source
+    assert 'if not topic:\n                ui.notify("请先选择或输入话题"' not in desktop_source
+    assert 'if mode == "link":\n                return bool(str(url_in.value' in desktop_source
+    assert 'if mode == "text":\n                return bool(str(text_in.value' in desktop_source
