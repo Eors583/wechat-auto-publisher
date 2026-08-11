@@ -113,3 +113,46 @@ def test_overview_rejects_ambiguous_date_text(tmp_path) -> None:
         assert "YYYY-MM-DD" in str(exc)
     else:
         raise AssertionError("ambiguous dates must be rejected")
+
+
+def test_pending_review_count_matches_unconfirmed_active_inbox(tmp_path) -> None:
+    db = Database(tmp_path / "analytics-inbox.db")
+    db.create_batch("pending", topic="待审核")
+    db.create_batch("confirmed", topic="已确认")
+    db.create_batch("archived", topic="已归档")
+    _attach_job(db, "pending", "a", "ready_for_review", review_status="viewed")
+    _attach_job(
+        db,
+        "confirmed",
+        "b",
+        "ready_for_review",
+        review_status="confirmed",
+    )
+    _attach_job(db, "archived", "c", "ready_for_review")
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE batches SET archived_at = ? WHERE id = ?",
+            ("2026-07-22T02:00:00+00:00", "archived"),
+        )
+
+    overview = AnalyticsService(db).get_overview(today="2026-07-22")
+
+    assert overview["status_counts"]["ready_for_review"] == 3
+    assert overview["pending_review_articles"] == 1
+    assert overview["ready_for_draft_articles"] == 1
+
+
+def test_overview_respects_bound_user_scope(tmp_path) -> None:
+    database_path = tmp_path / "analytics-owner.db"
+    owner_a = Database(database_path, owner_user_id="owner-a")
+    owner_a.create_batch("batch-a", topic="账号 A")
+    _attach_job(owner_a, "batch-a", "a", "ready_for_review")
+    owner_b = Database(database_path, owner_user_id="owner-b")
+    owner_b.create_batch("batch-b", topic="账号 B")
+    _attach_job(owner_b, "batch-b", "b", "ready_for_review")
+
+    overview = AnalyticsService(owner_a).get_overview(today="2026-07-22")
+
+    assert overview["total_batches"] == 1
+    assert overview["total_articles"] == 1
+    assert overview["pending_review_articles"] == 1

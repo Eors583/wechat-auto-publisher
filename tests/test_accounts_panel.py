@@ -154,7 +154,12 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
             and getattr(element, "text", None)
             and bool(getattr(element, "visible", True))
         }
-        assert {"管理", "测试连接"}.issubset(visible_button_texts)
+        assert {
+            "添加公众号",
+            "检测连接",
+            "保存配置",
+            "恢复上个版本",
+        }.issubset(visible_button_texts)
         assert any(
             type(element).__name__ == "Button"
             and str(getattr(element, "_props", {}).get("icon") or "")
@@ -169,44 +174,42 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
             if type(element).__name__ == "Select"
             and str(getattr(element, "_props", {}).get("label") or "")
             in {
-                "公众号默认创作方案",
-                "文章提示词模板",
-                "图片提示词模板",
-                "默认 AI 评审方案",
+                "内容定位 / 创作方案",
+                "默认模型",
+                "默认改写强度",
             }
         }
         assert set(advanced_selects) == {
-            "公众号默认创作方案",
-            "文章提示词模板",
-            "图片提示词模板",
-            "默认 AI 评审方案",
-        }
-        assert _direct_parent_visible(
-            advanced_selects["文章提示词模板"]
-        ) is False
-        assert _direct_parent_visible(
-            advanced_selects["图片提示词模板"]
-        ) is False
-        assert advanced_selects["默认 AI 评审方案"].visible is False
-        assert advanced_selects["公众号默认创作方案"].visible is False
-
-        advanced_button_texts = {
-            str(element.text): element
-            for element in elements
-            if type(element).__name__ == "Button"
-            and str(getattr(element, "text", None) or "")
-            in {"基础信息", "正文排版", "草稿模板", "图片与封面"}
-        }
-        assert set(advanced_button_texts) == {
-            "基础信息",
-            "正文排版",
-            "草稿模板",
-            "图片与封面",
+            "内容定位 / 创作方案",
+            "默认模型",
+            "默认改写强度",
         }
         assert all(
-            not _direct_parent_visible(element)
-            for element in advanced_button_texts.values()
+            _direct_parent_visible(element) and element.visible
+            for element in advanced_selects.values()
         )
+
+        structured_rule_labels = {
+            str(getattr(element, "text", "") or "")
+            for element in elements
+            if str(getattr(element, "text", "") or "")
+            in {
+                "排版模板",
+                "正文配图",
+                "封面规则",
+                "提示词配置",
+                "AI 评审方案",
+                "草稿写入规则",
+            }
+        }
+        assert structured_rule_labels == {
+            "排版模板",
+            "正文配图",
+            "封面规则",
+            "提示词配置",
+            "AI 评审方案",
+            "草稿写入规则",
+        }
     finally:
         ui.context.client.remove_all_elements()
 

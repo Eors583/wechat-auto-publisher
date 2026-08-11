@@ -773,10 +773,7 @@ def build_review_jury_panel(
                         with ui.column().classes(
                             "review-comparison-body w-full"
                         ):
-                            ui.label(body).classes("text-body1").style(
-                                "white-space:pre-wrap;line-height:1.9;"
-                                "overflow-wrap:anywhere"
-                            )
+                            ui.label(body).classes("text-body1 ops-review-copy")
 
             with comparison_host:
                 ui.separator()
@@ -1815,8 +1812,8 @@ def build_editorial_review_profiles_panel(
             else None
         )
         config = dict((record or {}).get("config") or {})
-        with ui.dialog() as dialog, ui.card().classes("w-full").style(
-            "max-width:860px;max-height:92vh;overflow-y:auto"
+        with ui.dialog() as dialog, ui.card().classes(
+            "w-full ops-dialog-lg ops-dialog-scroll"
         ):
             ui.label(
                 "编辑自定义评审方案" if editing_id else "新建自定义评审方案"
@@ -2046,9 +2043,7 @@ def build_editorial_review_profiles_panel(
             for profile in profiles:
                 with ui.element("div").classes("card w-full"):
                     with ui.row().classes("w-full items-start justify-between"):
-                        with ui.column().classes("gap-0").style(
-                            "min-width:0;flex:1"
-                        ):
+                        with ui.column().classes("gap-0 ops-flex-copy"):
                             with ui.row().classes("items-center"):
                                 ui.label(str(profile["name"])).classes(
                                     "text-weight-bold"

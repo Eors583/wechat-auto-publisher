@@ -100,4 +100,4 @@ def test_all_wechat_api_callsites_use_the_shared_factory() -> None:
         assert "WeChatAuth(" not in source
 
     desktop_source = callsite_paths[-1].read_text(encoding="utf-8")
-    assert "build_wechat_auth(" in desktop_source
+    assert "preflight_accounts," in desktop_source

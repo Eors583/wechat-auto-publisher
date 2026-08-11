@@ -9,23 +9,22 @@ DEFAULT_REQUEST_MESSAGE = "正在处理请求，请稍候…"
 
 
 class RequestLoading:
-    """Reusable blocking loading overlay for user-triggered API requests."""
+    """Reusable non-blocking status surface for user-triggered API requests."""
 
     def __init__(self, message: str = DEFAULT_REQUEST_MESSAGE) -> None:
         self._background_handler: Callable[[], None] | None = None
         with ui.dialog().props(
-            "persistent no-esc-dismiss no-backdrop-dismiss "
-            "transition-show=fade transition-hide=fade"
+            "seamless position=top transition-show=fade transition-hide=fade"
         ).classes("request-loading-dialog") as self.dialog:
-            with ui.card().classes("request-loading-card items-center"):
-                ui.spinner("dots", size="54px", color="teal-9")
+            with ui.card().classes("request-loading-card"):
+                ui.spinner("dots", size="28px", color="primary")
                 self.message_label = ui.label(message).classes(
-                    "request-loading-message text-center"
+                    "request-loading-message"
                 )
                 self.helper_label = ui.label(
-                    "请求完成后会自动关闭，请勿重复操作"
+                    "请求已经提交，可继续查看页面；完成后会自动关闭"
                 ).classes(
-                    "muted text-center"
+                    "muted"
                 )
                 self.background_button = ui.button(
                     "转入后台处理",
@@ -49,7 +48,7 @@ class RequestLoading:
         self.helper_label.text = (
             "转入后台后任务会继续执行，可继续使用其他功能"
             if on_background is not None
-            else "请求完成后会自动关闭，请勿重复操作"
+            else "请求已经提交，可继续查看页面；完成后会自动关闭"
         )
         self.dialog.open()
 

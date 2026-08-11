@@ -291,39 +291,20 @@ def _is_review_open_flag(node: ast.AST, *, variable: str) -> bool:
     )
 
 
-def test_task_center_timer_does_not_render_while_review_is_open() -> None:
-    """Polling active batches must not rebuild the page behind an open review.
+def test_task_center_does_not_replace_interactive_rows_on_a_polling_timer() -> None:
+    """The global activity dock owns polling; queue rows remain stable."""
 
-    Rebuilding the task center host invalidates the currently open workbench
-    and looks like a continuous page refresh without actually completing the
-    review.  The timer may still poll while jobs are running, but its render
-    call must be guarded by the shared ``review_open`` state.
-    """
+    source = TASKS_PANEL.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
 
-    refresh = _function("refresh_running_batches")
-    guarded_render = False
-    for condition in ast.walk(refresh):
-        if not isinstance(condition, ast.If):
-            continue
-        has_closed_review_guard = any(
-            isinstance(node, ast.UnaryOp)
-            and isinstance(node.op, ast.Not)
-            and _is_review_open_flag(node.operand, variable="runtime")
-            for node in ast.walk(condition.test)
-        )
-        renders_inside_guard = any(
-            isinstance(node, ast.Call) and _call_name(node) == "render"
-            for statement in condition.body
-            for node in ast.walk(statement)
-        )
-        guarded_render = guarded_render or (
-            has_closed_review_guard and renders_inside_guard
-        )
-
-    assert guarded_render, (
-        "the task-center polling timer must call render() only when "
-        'runtime["review_open"] is false'
-    )
+    assert "refresh_running_batches" not in function_names
+    assert "client_timer(3.0" not in source
+    assert "Do not replace interactive queue rows on a fixed timer" in source
 
 
 def test_task_center_passes_shared_review_state_to_every_review_entry() -> None:
@@ -346,7 +327,7 @@ def test_task_center_passes_shared_review_state_to_every_review_entry() -> None:
         for call in batch_card_calls
     )
 
-    batch_card = _function("_render_batch_card")
+    batch_card = _function("_render_batch_detail_content")
     assert "review_runtime" in {
         argument.arg for argument in batch_card.args.args + batch_card.args.kwonlyargs
     }

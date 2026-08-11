@@ -19,61 +19,83 @@ def build_overview_cards(
     @ui.refreshable
     def content() -> None:
         overview = AnalyticsService(state.db).get_overview()
-        with ui.row().classes("w-full items-center justify-between"):
-            with ui.column().classes("gap-0"):
-                ui.label("今日运营概览").classes("text-subtitle1 text-weight-bold")
-                ui.label("点击任一卡片进入任务中心查看明细").classes("muted")
-            ui.button("刷新", on_click=content.refresh).props(
-                "flat dense color=teal-9 no-caps icon=refresh"
-            )
-        with ui.grid(columns=4).classes("w-full gap-3"):
-            for label, value, hint, color, status_filter, today_only in (
+        status_counts = dict(overview.get("status_counts") or {})
+        with ui.element("section").classes("ops-metric-grid"):
+            for (
+                label,
+                value,
+                unit,
+                hint,
+                icon,
+                tone,
+                status_filter,
+                today_only,
+            ) in (
                 (
-                    "今日生成",
-                    overview.get("today_articles", 0),
-                    "今天创建的公众号文章",
-                    "text-teal-10",
+                    "今日批次",
+                    overview.get("today_batches", 0),
+                    "个",
+                    f"今天生成 {overview.get('today_articles', 0)} 篇文章",
+                    "content_copy",
+                    "",
                     "",
                     True,
                 ),
                 (
+                    "后台任务",
+                    overview.get("processing_articles", 0),
+                    "个",
+                    "生成、评审和改写持续运行",
+                    "sync",
+                    "ops-metric-purple",
+                    "active",
+                    False,
+                ),
+                (
                     "待审核",
                     overview["pending_review_articles"],
-                    "等待运营确认",
-                    "text-orange-9",
+                    "篇",
+                    f"{overview.get('review_status_counts', {}).get('needs_changes', 0)} 篇需要修改",
+                    "assignment_turned_in",
+                    "ops-metric-orange",
                     "ready_for_review",
                     False,
                 ),
                 (
-                    "已入草稿",
-                    overview["drafted_or_published_articles"],
-                    "历史累计成功",
-                    "text-green-8",
-                    "drafted",
+                    "可写草稿",
+                    overview.get("ready_for_draft_articles", 0),
+                    "篇",
+                    "均需人工确认后写入",
+                    "send",
+                    "ops-metric-green",
+                    "ready_for_draft",
                     False,
                 ),
                 (
-                    "失败",
+                    "待修复",
                     overview["failed_articles"],
-                    "可在任务中心重试",
-                    "text-red-8",
+                    "项",
+                    "失败阶段可原地恢复",
+                    "error_outline",
+                    "ops-metric-red",
                     "failed",
                     False,
                 ),
             ):
-                with ui.element("div").classes(
-                    "card q-pa-md cursor-pointer"
-                ).style("min-height:112px").on(
+                with ui.element("button").classes(
+                    f"ops-metric-item {tone}".strip()
+                ).props("type=button").on(
                     "click",
                     lambda _=None, status=status_filter, today=today_only: on_go_tasks(
                         status, today
                     ),
                 ):
-                    ui.label(label).classes("muted")
-                    ui.label(str(value)).classes(
-                        f"text-h5 text-weight-bold {color}"
-                    )
-                    ui.label(hint).classes("muted text-caption")
+                    with ui.element("span").classes("ops-metric-icon"):
+                        ui.icon(icon, size="19px").classes("ops-semantic-icon")
+                    with ui.column().classes("ops-metric-copy"):
+                        ui.label(label)
+                        ui.label(f"{value} {unit}").classes("ops-metric-value")
+                    ui.label(hint).classes("ops-metric-hint")
 
     content()
 

@@ -582,7 +582,20 @@ class BatchService:
         batch = self.db.get_batch(batch_id)
         if not batch:
             raise KeyError(f"批次不存在：{batch_id}")
-        jobs = [self._public_job(job, include_content=include_content) for job in batch.pop("jobs", [])]
+        return self._public_batch(batch, include_content=include_content)
+
+    def _public_batch(
+        self,
+        batch: dict[str, Any],
+        *,
+        include_content: bool = False,
+    ) -> dict[str, Any]:
+        batch = dict(batch)
+        batch_id = str(batch.get("id") or "")
+        jobs = [
+            self._public_job(job, include_content=include_content)
+            for job in batch.pop("jobs", [])
+        ]
         batch["jobs"] = jobs
         batch["progress"] = self._progress(jobs)
         batch["status"] = effective_batch_status(jobs, str(batch.get("status") or ""))
@@ -601,13 +614,13 @@ class BatchService:
     def list_batches(
         self, *, limit: int = 100, include_archived: bool = False
     ) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        for batch in self.db.list_batches(
-            limit=limit, include_archived=include_archived
-        ):
-            batch_id = str(batch["id"])
-            results.append(self.get_batch(batch_id, include_content=False))
-        return results
+        return [
+            self._public_batch(batch, include_content=False)
+            for batch in self.db.list_batches(
+                limit=limit,
+                include_archived=include_archived,
+            )
+        ]
 
     def has_active_batches(self) -> bool:
         """Return whether any non-archived batch still has active article work."""

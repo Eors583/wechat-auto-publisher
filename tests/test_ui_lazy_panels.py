@@ -36,20 +36,39 @@ def test_inactive_workspaces_are_mounted_from_tab_changes() -> None:
     source = DESKTOP.read_text(encoding="utf-8")
 
     assert "tabs.on_value_change(lambda event: schedule_tab(event.value))" in source
-    assert "lambda: mount_tab(tab)" in source
-    assert "immediate=False" in source
-    assert 'ui.label("正在加载页面…")' in source
+    assert "scheduled_tabs.add(tab_name)" in source
+    schedule_source = source[
+        source.index("def schedule_tab(tab: Any) -> None:") :
+        source.index("# Only the requested panel contributes")
+    ]
+    assert "client_timer(" in schedule_source
+    assert "lambda selected_tab=tab: mount_tab(selected_tab)" in schedule_source
+    assert "mount_tab(tab)" not in schedule_source
     assert 'str(tab_wizard.props["name"]): mount_wizard' in source
     assert 'str(tab_topics.props["name"]): mount_topics' in source
     assert 'str(tab_jobs.props["name"]): mount_jobs' in source
-    assert 'str(tab_settings.props["name"]): mount_settings' in source
+    assert 'str(tab_accounts.props["name"]): mount_accounts' in source
+    assert 'str(tab_review.props["name"]): mount_review' in source
 
 
-def test_settings_children_are_mounted_only_after_their_tab_is_selected() -> None:
+def test_account_configuration_uses_one_unified_scrollable_panel() -> None:
     source = DESKTOP.read_text(encoding="utf-8")
 
-    assert "def schedule_settings_tab(tab: Any) -> None:" in source
-    assert "settings_tabs.on_value_change(" in source
-    assert "lambda event: schedule_settings_tab(event.value)" in source
-    assert "schedule_settings_tab(initial_settings_tab)" in source
-    assert "settings_mounts[tab_name]()" in source
+    assert "config_tabs = ui.toggle(" not in source
+    assert "account_config_section =" not in source
+    assert '"ops-config-body ops-config-body-unified"' in source
+    assert "content_config_section =" in source
+    assert "assets_config_section =" in source
+    assert "review_config_section =" in source
+    assert "sync_config_section" not in source
+
+
+def test_account_workspace_replaces_the_legacy_settings_tab_stack() -> None:
+    source = DESKTOP.read_text(encoding="utf-8")
+
+    assert "def mount_accounts() -> None:" in source
+    assert "_build_accounts_panel(" in source
+    assert '· 配置中心' in source
+    assert 'ui.button("检测连接")' in source
+    assert '"保存配置",' in source
+    assert "def schedule_settings_tab(tab: Any) -> None:" not in source

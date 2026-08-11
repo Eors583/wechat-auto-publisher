@@ -13,6 +13,10 @@ import httpx
 
 from app.ai.model_registry import decrypt_api_key
 from app.db import Database
+from app.providers.jizhile_api import (
+    fetch_jizhile_account_articles,
+    test_jizhile_api,
+)
 from app.providers.public_wechat import (
     fetch_public_article_metadata,
     normalize_article_url,
@@ -22,6 +26,12 @@ from app.providers.wechat_backend_search import (
     normalize_backend_token,
     search_backend_account_articles,
     test_backend_session,
+)
+from app.services.jizhile_settings import (
+    clear_jizhile_settings,
+    effective_jizhile_settings,
+    public_jizhile_settings,
+    save_jizhile_settings,
 )
 from app.services.wechat_backend_settings import (
     clear_backend_session,
@@ -33,6 +43,7 @@ from app.wechat.factory import build_wechat_client
 
 FETCH_METHODS = {
     "backend_search": "公众号后台搜索（需登录态）",
+    "jizhile_api": "极致了 API（实时文章）",
     "manual": "仅人工投递",
     "rss": "官网 / RSS",
     "third_party": "第三方正式数据 API（预留）",
@@ -44,10 +55,11 @@ FETCH_METHODS = {
 # The historical ``public_search`` value is migrated to ``backend_search``.
 FOLLOWED_PUBLICATION_METHODS = {
     key: FETCH_METHODS[key]
-    for key in ("backend_search", "manual", "official")
+    for key in ("jizhile_api", "backend_search", "manual", "official")
 }
 
 ARTICLE_SOURCE_LABELS = {
+    "jizhile_api": "极致了 API",
     "wechat_backend_search": "公众号后台搜索",
     "wechat_official": "微信官方发布记录",
     "public_search": "历史公开搜索（已停用）",
@@ -207,6 +219,46 @@ class FollowedContentService:
         clear_backend_session(self.db)
         return public_backend_settings(self.db)
 
+    def get_jizhile_settings(self) -> dict[str, Any]:
+        return public_jizhile_settings(self.db)
+
+    def save_jizhile_api_settings(
+        self,
+        *,
+        enabled: bool,
+        key: str = "",
+        verifycode: str = "",
+        session_label: str = "",
+        remain_money: Any = None,
+        checked_at: str = "",
+    ) -> dict[str, Any]:
+        save_jizhile_settings(
+            self.db,
+            enabled=enabled,
+            key=key,
+            verifycode=verifycode,
+            session_label=session_label,
+            remain_money=remain_money,
+            checked_at=checked_at,
+        )
+        return public_jizhile_settings(self.db)
+
+    def clear_jizhile_api_settings(self) -> dict[str, Any]:
+        clear_jizhile_settings(self.db)
+        return public_jizhile_settings(self.db)
+
+    def test_jizhile_api_settings(
+        self,
+        *,
+        key: str = "",
+        verifycode: str = "",
+    ) -> dict[str, Any]:
+        current = effective_jizhile_settings(self.db)
+        return test_jizhile_api(
+            key=str(key or current.get("key") or ""),
+            verifycode=str(verifycode or current.get("verifycode") or ""),
+        )
+
     def _migrate_legacy_public_search_accounts(self) -> int:
         """Permanently retire the old Sogou/Baidu followed-account source."""
 
@@ -251,39 +303,64 @@ class FollowedContentService:
         account = self.db.get_followed_account(account_id)
         if not account:
             raise KeyError("关注公众号不存在")
-        method = str(account.get("fetch_method") or "backend_search")
-        if method == "public_search":
+        preferred_method = str(account.get("fetch_method") or "backend_search")
+        if preferred_method == "public_search":
             # Defensive compatibility for a row created by an older process.
-            method = "backend_search"
-        errors: list[str] = []
+            preferred_method = "backend_search"
+        source_errors: list[tuple[str, str]] = []
+        attempts: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
-        try:
-            if method == "backend_search":
-                backend = effective_backend_settings(self.db)
-                if not backend.get("enabled"):
-                    raise ValueError("公众号后台搜索尚未启用，请先配置并测试后台登录态")
-                candidates = search_backend_account_articles(
-                    str(account["name"]),
-                    wechat_id=str(account.get("wechat_id") or ""),
-                    token=str(backend.get("token") or ""),
-                    cookie=str(backend.get("cookie") or ""),
+        actual_method = ""
+        for method in self._publication_method_order(preferred_method):
+            label = FETCH_METHODS.get(method, method)
+            try:
+                rows = self._fetch_publication_candidates(
+                    account,
+                    method=method,
                     limit=limit,
                 )
-            elif method == "rss":
-                candidates = _read_rss(str(account.get("source_url") or ""), limit=limit)
-            elif method == "manual":
-                candidates = []
-            elif method == "official":
-                candidates = self._read_official_articles(account, limit=limit)
-            elif method == "third_party":
-                raise ValueError("第三方正式数据 API 适配器已预留，请配置服务商后启用")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(str(exc))
+                attempts.append(
+                    {
+                        "method": method,
+                        "label": label,
+                        "status": "success" if rows else "empty",
+                        "found": len(rows),
+                    }
+                )
+                # A source that responds successfully is usable even when the
+                # selected account has no recent posts. Continue to a fallback
+                # only to maximize the chance of finding useful articles.
+                if not actual_method:
+                    actual_method = method
+                if rows:
+                    candidates = rows
+                    actual_method = method
+                    break
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc).strip() or "未知错误"
+                source_errors.append((label, message))
+                attempts.append(
+                    {
+                        "method": method,
+                        "label": label,
+                        "status": "failed",
+                        "error": message[:200],
+                    }
+                )
 
         sample_url = str(account.get("sample_url") or "").strip()
-        if sample_url:
-            candidates.insert(0, {"title": "", "url": sample_url, "snippet": ""})
+        if sample_url and actual_method and actual_method != "jizhile_api":
+            candidates.insert(
+                0,
+                {
+                    "title": "",
+                    "url": sample_url,
+                    "snippet": "",
+                    "account_name": str(account.get("name") or ""),
+                },
+            )
         unique_urls: set[str] = set()
+        ingestion_errors: list[str] = []
         added = 0
         for candidate in candidates:
             url = normalize_article_url(str(candidate.get("url") or ""))
@@ -295,11 +372,12 @@ class FollowedContentService:
                     url,
                     followed_account_id=account_id,
                     source_channel={
+                        "jizhile_api": "jizhile_api",
                         "backend_search": "wechat_backend_search",
                         "rss": "rss",
                         "official": "wechat_official",
                         "third_party": "third_party",
-                    }.get(method, "manual"),
+                    }.get(actual_method, "manual"),
                     fallback_title=str(candidate.get("title") or ""),
                     fallback_summary=str(candidate.get("snippet") or ""),
                     fallback_published_at=str(candidate.get("published_at") or ""),
@@ -310,8 +388,33 @@ class FollowedContentService:
                 )
                 added += 1
             except Exception as exc:  # noqa: BLE001
-                errors.append(str(exc))
-        error = "；".join(dict.fromkeys(item[:120] for item in errors if item))
+                ingestion_errors.append(str(exc))
+
+        all_sources_failed = not actual_method and bool(attempts)
+        error_parts: list[str] = []
+        warning_parts: list[str] = []
+        if all_sources_failed:
+            error_parts.extend(
+                f"{label}：{message[:160]}" for label, message in source_errors
+            )
+        elif actual_method != preferred_method:
+            warning_parts.append(
+                "首选数据源未返回文章或不可用，已自动切换到"
+                f"{FETCH_METHODS.get(actual_method, actual_method)}"
+            )
+        if ingestion_errors:
+            unique_ingestion_errors = list(
+                dict.fromkeys(item[:160] for item in ingestion_errors if item)
+            )
+            if added:
+                warning_parts.append(
+                    f"另有 {len(unique_ingestion_errors)} 条文章因归属或格式校验未收录"
+                )
+            elif unique_urls:
+                error_parts.extend(unique_ingestion_errors)
+
+        error = "；".join(dict.fromkeys(item for item in error_parts if item))
+        warning = "；".join(dict.fromkeys(item for item in warning_parts if item))
         self.db.update_followed_account_sync(account_id, error=error)
         return {
             "account_id": account_id,
@@ -319,7 +422,68 @@ class FollowedContentService:
             "found": len(unique_urls),
             "added": added,
             "error": error,
+            "warning": warning,
+            "preferred_method": preferred_method,
+            "source_method": actual_method,
+            "source_label": FETCH_METHODS.get(actual_method, actual_method),
+            "attempts": attempts,
         }
+
+    def _publication_method_order(self, preferred_method: str) -> list[str]:
+        """Return a safe preferred-first source order for one followed account."""
+
+        preferred = str(preferred_method or "backend_search")
+        order = [preferred]
+        if preferred not in {"backend_search", "jizhile_api", "official"}:
+            return order
+
+        jizhile = effective_jizhile_settings(self.db)
+        backend = effective_backend_settings(self.db)
+        if bool(jizhile.get("enabled")) and "jizhile_api" not in order:
+            order.append("jizhile_api")
+        if bool(backend.get("enabled")) and "backend_search" not in order:
+            order.append("backend_search")
+        return order
+
+    def _fetch_publication_candidates(
+        self,
+        account: dict[str, Any],
+        *,
+        method: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if method == "backend_search":
+            backend = effective_backend_settings(self.db)
+            if not backend.get("enabled"):
+                raise ValueError("公众号后台搜索尚未启用，请先配置并测试后台登录态")
+            return search_backend_account_articles(
+                str(account["name"]),
+                wechat_id=str(account.get("wechat_id") or ""),
+                token=str(backend.get("token") or ""),
+                cookie=str(backend.get("cookie") or ""),
+                limit=limit,
+            )
+        if method == "jizhile_api":
+            jizhile = effective_jizhile_settings(self.db)
+            if not jizhile.get("enabled"):
+                raise ValueError("极致了 API 尚未启用，请先配置并测试 API Key")
+            return fetch_jizhile_account_articles(
+                str(account["name"]),
+                wechat_id=str(account.get("wechat_id") or ""),
+                sample_url=str(account.get("sample_url") or ""),
+                key=str(jizhile.get("key") or ""),
+                verifycode=str(jizhile.get("verifycode") or ""),
+                limit=limit,
+            )
+        if method == "rss":
+            return _read_rss(str(account.get("source_url") or ""), limit=limit)
+        if method == "manual":
+            return []
+        if method == "official":
+            return self._read_official_articles(account, limit=limit)
+        if method == "third_party":
+            raise ValueError("第三方正式数据 API 适配器已预留，请配置服务商后启用")
+        raise ValueError(f"不支持的公众号文章获取方式：{method}")
 
     def add_article_url(
         self,
@@ -343,7 +507,12 @@ class FollowedContentService:
         # matched account. Reopening every public article here is both redundant
         # and slow, especially while expanding the cumulative "load more"
         # window. Manual links still require page-level metadata verification.
-        if source_channel not in {"wechat_official", "wechat_backend_search"}:
+        trusted_metadata_sources = {
+            "jizhile_api",
+            "wechat_official",
+            "wechat_backend_search",
+        }
+        if source_channel not in trusted_metadata_sources:
             try:
                 metadata = fetch_public_article_metadata(normalized)
             except Exception:
@@ -354,7 +523,7 @@ class FollowedContentService:
         detected_name = str(
             (
                 fallback_account_name or metadata.get("account_name")
-                if source_channel == "wechat_backend_search"
+                if source_channel in {"jizhile_api", "wechat_backend_search"}
                 else metadata.get("account_name")
             )
             or ""

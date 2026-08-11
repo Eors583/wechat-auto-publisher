@@ -325,10 +325,10 @@ def test_legacy_service_fallback_projects_all_inbox_buckets() -> None:
 def test_task_center_defaults_to_inbox_and_exposes_draft_ready_count() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
 
-    assert '"inbox": "待处理收件箱"' in source
-    assert 'value="inbox"' in source
+    assert '"inbox": "待处理"' in source
+    assert 'value="batches" if initial_view == "batches" else "inbox"' in source
     assert 'runtime["inbox_bucket"]' in source
-    assert "INBOX_BUCKETS.items()" in source
+    assert 'INBOX_BUCKETS[str(runtime["inbox_bucket"])]' in source
     assert '"ready_for_draft"' in source
     assert "_render_inbox_article_card(" in source
     assert "_render_batch_card(" in source
@@ -558,7 +558,7 @@ def test_failure_action_retry_step_maps_stages_without_whitelisting_unknowns() -
 
 
 def test_batch_failed_retry_uses_in_place_job_recovery() -> None:
-    source = inspect.getsource(tasks._render_batch_card)  # noqa: SLF001
+    source = inspect.getsource(tasks._render_batch_detail_content)  # noqa: SLF001
     helper = inspect.getsource(tasks._submit_failed_job_retries)  # noqa: SLF001
 
     assert "_submit_failed_job_retries(" in source
@@ -612,8 +612,7 @@ def test_deep_footer_keeps_edit_actions_and_hides_the_duplicate_quick_action() -
     assert 'needs_changes_btn = ui.button(' in source
     assert '"需要修改"' in source
     assert '"确认此文章"' in source
-    assert "deep_review_actions.extend((more_btn, save_btn))" in source
-    assert "quick_review_actions.append(needs_changes_btn)" in source
+    assert "deep_review_actions.extend((save_btn, needs_changes_btn))" in source
     assert "control.set_visibility(True)" in source
     assert "control.set_visibility(False)" in source
 

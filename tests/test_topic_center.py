@@ -485,6 +485,256 @@ def test_backend_search_articles_enter_the_followed_pool_with_trusted_account(
     assert article["external_key"] == "aid-1"
 
 
+def test_jizhile_articles_enter_the_followed_pool_with_trusted_account(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    db = Database(config["_db_path"])
+    service = FollowedContentService(db, config)
+    account = service.save_account(
+        {
+            "name": "极致了测试公众号",
+            "wechat_id": "jizhile-test",
+            "fetch_method": "jizhile_api",
+            "enabled": True,
+        }
+    )
+    service.save_jizhile_api_settings(
+        enabled=True,
+        key="private-key",
+        verifycode="private-code",
+        session_label="测试账户",
+    )
+    calls: list[dict[str, object]] = []
+
+    def fetch(name: str, **kwargs) -> list[dict[str, str]]:
+        calls.append({"name": name, **kwargs})
+        return [
+            {
+                "title": "极致了接口返回文章",
+                "url": "https://mp.weixin.qq.com/s/jizhile-article",
+                "snippet": "接口摘要",
+                "account_name": "极致了测试公众号",
+                "published_at": "2026-08-11T06:27:58+00:00",
+                "external_key": "jizhile-sn-1",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.services.followed_content.fetch_jizhile_account_articles",
+        fetch,
+    )
+    monkeypatch.setattr(
+        "app.services.followed_content.fetch_public_article_metadata",
+        lambda _url: (_ for _ in ()).throw(httpx.ReadError("blocked")),
+    )
+
+    report = service.discover_account(account["id"])
+
+    assert report["added"] == 1
+    article = service.list_articles(account_ids=[account["id"]], days=3650)[0]
+    assert article["title"] == "极致了接口返回文章"
+    assert article["account_name"] == "极致了测试公众号"
+    assert article["source_channel"] == "jizhile_api"
+    assert article["external_key"] == "jizhile-sn-1"
+    assert calls == [
+        {
+            "name": "极致了测试公众号",
+            "wechat_id": "jizhile-test",
+            "sample_url": "",
+            "key": "private-key",
+            "verifycode": "private-code",
+            "limit": 8,
+        }
+    ]
+
+
+def test_backend_search_falls_back_to_jizhile_when_login_state_expires(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    service = FollowedContentService(Database(config["_db_path"]), config)
+    account = service.save_account(
+        {
+            "name": "自动回退公众号",
+            "wechat_id": "fallback-account",
+            "fetch_method": "backend_search",
+            "enabled": True,
+        }
+    )
+    service.save_backend_search_settings(
+        enabled=True,
+        token="expired-token",
+        cookie="session=expired",
+    )
+    service.save_jizhile_api_settings(
+        enabled=True,
+        key="working-key",
+        verifycode="working-code",
+    )
+    calls: list[str] = []
+
+    def failed_backend(*_args, **_kwargs):
+        calls.append("backend_search")
+        raise ValueError("公众号后台登录态已失效")
+
+    def working_jizhile(*_args, **_kwargs):
+        calls.append("jizhile_api")
+        return [
+            {
+                "title": "自动回退成功文章",
+                "url": "https://mp.weixin.qq.com/s/automatic-fallback",
+                "account_name": "自动回退公众号",
+                "published_at": "2026-08-11T08:00:00+00:00",
+                "external_key": "fallback-1",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.services.followed_content.search_backend_account_articles",
+        failed_backend,
+    )
+    monkeypatch.setattr(
+        "app.services.followed_content.fetch_jizhile_account_articles",
+        working_jizhile,
+    )
+
+    report = service.discover_account(account["id"])
+
+    assert report["error"] == ""
+    assert report["source_method"] == "jizhile_api"
+    assert report["source_label"] == "极致了 API（实时文章）"
+    assert "已自动切换到极致了 API" in report["warning"]
+    assert [item["status"] for item in report["attempts"]] == ["failed", "success"]
+    assert calls == ["backend_search", "jizhile_api"]
+    articles = service.list_articles(account_ids=[account["id"]], days=3650)
+    assert articles[0]["source_channel"] == "jizhile_api"
+
+
+def test_jizhile_falls_back_to_backend_search_when_api_is_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    service = FollowedContentService(Database(config["_db_path"]), config)
+    account = service.save_account(
+        {
+            "name": "反向回退公众号",
+            "fetch_method": "jizhile_api",
+            "enabled": True,
+        }
+    )
+    service.save_jizhile_api_settings(enabled=True, key="unavailable-key")
+    service.save_backend_search_settings(
+        enabled=True,
+        token="working-token",
+        cookie="session=working",
+    )
+    calls: list[str] = []
+
+    def failed_jizhile(*_args, **_kwargs):
+        calls.append("jizhile_api")
+        raise ValueError("极致了 API 暂时不可用")
+
+    def working_backend(*_args, **_kwargs):
+        calls.append("backend_search")
+        return [
+            {
+                "title": "后台回退成功文章",
+                "url": "https://mp.weixin.qq.com/s/backend-fallback",
+                "account_name": "反向回退公众号",
+                "published_at": "2026-08-11T08:00:00+00:00",
+                "external_key": "backend-fallback-1",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.services.followed_content.fetch_jizhile_account_articles",
+        failed_jizhile,
+    )
+    monkeypatch.setattr(
+        "app.services.followed_content.search_backend_account_articles",
+        working_backend,
+    )
+
+    report = service.discover_account(account["id"])
+
+    assert report["error"] == ""
+    assert report["source_method"] == "backend_search"
+    assert "已自动切换到公众号后台搜索" in report["warning"]
+    assert calls == ["jizhile_api", "backend_search"]
+    articles = service.list_articles(account_ids=[account["id"]], days=3650)
+    assert articles[0]["source_channel"] == "wechat_backend_search"
+
+
+def test_followed_account_reports_all_enabled_source_failures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    service = FollowedContentService(Database(config["_db_path"]), config)
+    account = service.save_account(
+        {"name": "全部失败公众号", "fetch_method": "backend_search", "enabled": True}
+    )
+    service.save_backend_search_settings(
+        enabled=True,
+        token="expired-token",
+        cookie="session=expired",
+    )
+    service.save_jizhile_api_settings(enabled=True, key="invalid-key")
+    monkeypatch.setattr(
+        "app.services.followed_content.search_backend_account_articles",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("登录态失效")),
+    )
+    monkeypatch.setattr(
+        "app.services.followed_content.fetch_jizhile_account_articles",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("余额或凭证不可用")),
+    )
+
+    report = service.discover_account(account["id"])
+
+    assert report["source_method"] == ""
+    assert "公众号后台搜索" in report["error"]
+    assert "极致了 API" in report["error"]
+    assert [item["status"] for item in report["attempts"]] == ["failed", "failed"]
+
+
+def test_working_preferred_source_does_not_charge_fallback_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    service = FollowedContentService(Database(config["_db_path"]), config)
+    account = service.save_account(
+        {"name": "首选可用公众号", "fetch_method": "backend_search", "enabled": True}
+    )
+    service.save_backend_search_settings(
+        enabled=True,
+        token="working-token",
+        cookie="session=working",
+    )
+    service.save_jizhile_api_settings(enabled=True, key="paid-api-key")
+    monkeypatch.setattr(
+        "app.services.followed_content.search_backend_account_articles",
+        lambda *_args, **_kwargs: [
+            {
+                "title": "首选源文章",
+                "url": "https://mp.weixin.qq.com/s/preferred-source",
+                "account_name": "首选可用公众号",
+                "published_at": "2026-08-11T08:00:00+00:00",
+            }
+        ],
+    )
+    fallback_calls: list[bool] = []
+    monkeypatch.setattr(
+        "app.services.followed_content.fetch_jizhile_account_articles",
+        lambda *_args, **_kwargs: fallback_calls.append(True) or [],
+    )
+
+    report = service.discover_account(account["id"])
+
+    assert report["source_method"] == "backend_search"
+    assert report["warning"] == ""
+    assert fallback_calls == []
+
+
 def test_backend_search_cumulative_window_loads_older_articles_without_duplicates(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -748,6 +998,46 @@ def test_manual_topic_is_queryable_without_network(tmp_path: Path) -> None:
     )
     assert len(items) == 1
     assert items[0]["summary"] == "运营手工补充"
+
+
+def test_topic_pagination_returns_total_and_non_overlapping_pages(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    service = TopicSourceService(Database(config["_db_path"]), config)
+    for index in range(9):
+        service.add_manual_topic(f"分页选题 {index + 1}")
+
+    first = service.paginate_topics(
+        source_ids=["internal-manual-topics"],
+        days=7,
+        page=1,
+        page_size=4,
+    )
+    second = service.paginate_topics(
+        source_ids=["internal-manual-topics"],
+        days=7,
+        page=2,
+        page_size=4,
+    )
+    last = service.paginate_topics(
+        source_ids=["internal-manual-topics"],
+        days=7,
+        page=99,
+        page_size=4,
+    )
+
+    assert first["total"] == second["total"] == last["total"] == 9
+    assert first["page_count"] == second["page_count"] == last["page_count"] == 3
+    assert first["page"] == 1
+    assert second["page"] == 2
+    assert last["page"] == 3
+    assert len(first["items"]) == len(second["items"]) == 4
+    assert len(last["items"]) == 1
+    assert not (
+        {row["id"] for row in first["items"]}
+        & {row["id"] for row in second["items"]}
+    )
 
 
 def test_topic_state_update_returns_persisted_item(tmp_path: Path) -> None:

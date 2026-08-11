@@ -1,0 +1,26 @@
+{
+  "1440x900": {
+    "root": {"scrollWidth": 1440, "clientWidth": 1440, "scrollHeight": 900, "clientHeight": 900},
+    "create": {"x": 220, "y": 64, "scrollWidth": 1220, "clientWidth": 1220, "scrollHeight": 836, "clientHeight": 836},
+    "topics": {"x": 220, "y": 64, "scrollWidth": 1220, "clientWidth": 1220, "scrollHeight": 836, "clientHeight": 836},
+    "tasks": {"x": 220, "y": 64, "scrollWidth": 1220, "clientWidth": 1220, "scrollHeight": 836, "clientHeight": 836, "visibleRowHeights": [68, 68, 68, 68]},
+    "accounts": {"x": 220, "y": 64, "scrollWidth": 1220, "clientWidth": 1220, "scrollHeight": 836, "clientHeight": 836},
+    "review": {"x": 220, "y": 64, "scrollWidth": 1220, "clientWidth": 1220, "scrollHeight": 836, "clientHeight": 836, "dialogCount": 0}
+  },
+  "1280x720": {
+    "root": {"scrollWidth": 1280, "clientWidth": 1280, "scrollHeight": 720, "clientHeight": 720},
+    "create": {"x": 220, "y": 58, "scrollWidth": 1060, "clientWidth": 1060, "scrollHeight": 662, "clientHeight": 662},
+    "topics": {"x": 220, "y": 58, "scrollWidth": 1060, "clientWidth": 1060, "scrollHeight": 662, "clientHeight": 662},
+    "tasks": {"x": 220, "y": 58, "scrollWidth": 1060, "clientWidth": 1060, "scrollHeight": 662, "clientHeight": 662, "visibleRowHeights": [68, 68, 68, 68]},
+    "accounts": {"x": 220, "y": 58, "scrollWidth": 1060, "clientWidth": 1060, "scrollHeight": 662, "clientHeight": 662},
+    "review": {"x": 220, "y": 58, "scrollWidth": 1060, "clientWidth": 1060, "scrollHeight": 662, "clientHeight": 662, "dialogCount": 0}
+  },
+  "1024x768": {
+    "root": {"scrollWidth": 1024, "clientWidth": 1024, "scrollHeight": 768, "clientHeight": 768},
+    "create": {"x": 76, "y": 58, "scrollWidth": 948, "clientWidth": 948, "scrollHeight": 710, "clientHeight": 710},
+    "topics": {"x": 76, "y": 58, "scrollWidth": 948, "clientWidth": 948, "scrollHeight": 710, "clientHeight": 710},
+    "tasks": {"x": 76, "y": 58, "scrollWidth": 948, "clientWidth": 948, "scrollHeight": 710, "clientHeight": 710, "visibleRowHeights": [68, 68, 68, 68]},
+    "accounts": {"x": 76, "y": 58, "scrollWidth": 948, "clientWidth": 948, "scrollHeight": 710, "clientHeight": 710},
+    "review": {"x": 76, "y": 58, "scrollWidth": 948, "clientWidth": 948, "scrollHeight": 710, "clientHeight": 710, "dialogCount": 0}
+  }
+}

@@ -370,9 +370,7 @@ def _build_creation_plan_manager(
             for item in service.reviews.list_profiles(include_builtin=True)
             if bool(item.get("enabled", True))
         }
-        with ui.dialog() as dialog, ui.card().classes("w-full").style(
-            "max-width:720px"
-        ):
+        with ui.dialog() as dialog, ui.card().classes("w-full ops-dialog-md"):
             ui.label("编辑创作方案" if record else "新建创作方案").classes(
                 "text-h6 text-weight-bold"
             )
@@ -530,9 +528,7 @@ def _build_creation_plan_manager(
                 )
                 with ui.element("div").classes("card w-full"):
                     with ui.row().classes("w-full items-start justify-between"):
-                        with ui.column().classes("gap-1").style(
-                            "min-width:0;flex:1"
-                        ):
+                        with ui.column().classes("gap-1 ops-flex-copy"):
                             with ui.row().classes("items-center gap-2"):
                                 ui.label(str(plan["name"])).classes(
                                     "text-subtitle1 text-weight-bold"

@@ -342,6 +342,7 @@ class TopicSourceService:
         keyword: str = "",
         favorite_only: bool = False,
         unused_only: bool = False,
+        used_only: bool = False,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         self.ensure_defaults()
@@ -352,8 +353,57 @@ class TopicSourceService:
             keyword=keyword,
             favorite_only=favorite_only,
             unused_only=unused_only,
+            used_only=used_only,
             limit=limit,
         )
+
+    def paginate_topics(
+        self,
+        *,
+        source_ids: list[str] | None = None,
+        days: int = 7,
+        keyword: str = "",
+        favorite_only: bool = False,
+        unused_only: bool = False,
+        used_only: bool = False,
+        page: int = 1,
+        page_size: int = 4,
+    ) -> dict[str, Any]:
+        """Return one bounded topic page and the matching total count."""
+
+        self.ensure_defaults()
+        since = (
+            datetime.now(timezone.utc)
+            - timedelta(days=max(1, min(days, 365)))
+        ).isoformat()
+        clean_page_size = max(1, min(int(page_size), 50))
+        total = self.db.count_topic_items(
+            source_ids=source_ids,
+            since=since,
+            keyword=keyword,
+            favorite_only=favorite_only,
+            unused_only=unused_only,
+            used_only=used_only,
+        )
+        page_count = max(1, (total + clean_page_size - 1) // clean_page_size)
+        clean_page = max(1, min(int(page), page_count))
+        items = self.db.list_topic_items(
+            source_ids=source_ids,
+            since=since,
+            keyword=keyword,
+            favorite_only=favorite_only,
+            unused_only=unused_only,
+            used_only=used_only,
+            limit=clean_page_size,
+            offset=(clean_page - 1) * clean_page_size,
+        )
+        return {
+            "items": items,
+            "total": total,
+            "page": clean_page,
+            "page_size": clean_page_size,
+            "page_count": page_count,
+        }
 
     def update_topic_state(
         self,

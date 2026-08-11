@@ -60,7 +60,7 @@ def build_prompt_templates_panel(
         if record and str(record.get("purpose") or "") != purpose:
             ui.notify("提示词模板类型不匹配", type="negative")
             return
-        with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width:760px"):
+        with ui.dialog() as dialog, ui.card().classes("w-full ops-dialog-md"):
             action = "编辑" if record else "添加"
             ui.label(f'{action}{meta["title"]}').classes("text-h6 text-weight-bold")
             ui.label(str(meta["description"])).classes("muted")
@@ -169,7 +169,7 @@ def build_prompt_templates_panel(
             usages = prompt_template_usages(state.db, template_id)
             with ui.element("div").classes("card w-full"):
                 with ui.row().classes("w-full items-start justify-between"):
-                    with ui.column().classes("gap-0").style("min-width:0;flex:1"):
+                    with ui.column().classes("gap-0 ops-flex-copy"):
                         ui.label(name).classes("text-weight-bold")
                         ui.label("启用" if item.get("enabled") else "已停用").classes(
                             "text-positive" if item.get("enabled") else "muted"

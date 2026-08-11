@@ -50,7 +50,7 @@ def set_button_loading(
     on_background: Callable[[], None] | None = None,
     background_label: str = "转入后台处理",
 ) -> None:
-    """Show button feedback and a blocking overlay for an API request."""
+    """Show button feedback and a non-blocking request status surface."""
     if button is None or bool(getattr(button, "is_deleted", False)):
         return
     client = getattr(button, "client", None)

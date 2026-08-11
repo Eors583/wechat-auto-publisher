@@ -22,7 +22,7 @@ def test_lazy_task_center_consumes_pending_completion_entry() -> None:
     desktop_source = inspect.getsource(desktop.create_desktop_app)
     task_source = inspect.getsource(tasks.build_tasks_panel)
 
-    assert "elif page_state.pending_task_center_entry:" in desktop_source
+    assert "if page_state.pending_task_center_entry:" in desktop_source
     assert 'pending_entry.get("entry_mode") or "activity"' in desktop_source
     assert "page_state.pending_task_center_entry = None" in desktop_source
     assert 'initial_entry_mode == "completion"' in task_source
@@ -70,6 +70,22 @@ def test_task_center_registers_focusable_external_refresh() -> None:
     assert 'runtime["focus_batch_id"] = str(batch_id)' in source
 
 
+def test_task_center_does_not_reference_removed_refresh_button() -> None:
+    source = inspect.getsource(tasks.build_tasks_panel)
+
+    assert "refresh_btn" not in source
+    assert 'requested_status in {"ready_for_review", "ready_for_draft"}' in source
+    assert 'runtime["inbox_bucket"] = inbox_bucket' in source
+
+
+def test_task_review_action_keeps_a_text_only_single_line_button() -> None:
+    source = inspect.getsource(tasks._render_inbox_article_card)
+
+    assert 'primary_label = "打开审核"' in source
+    assert "primary_icon = None" in source
+    assert 'classes("ops-task-row-primary-action")' in source
+
+
 def test_task_center_workflow_guide_follows_effective_batch_state() -> None:
     cases = [
         ({"status": "ready_for_review", "progress": {"unconfirmed": 1}}, "review"),
@@ -103,13 +119,14 @@ def test_task_center_workflow_guide_follows_effective_batch_state() -> None:
 
 def test_shared_review_link_routes_directly_to_the_one_workbench() -> None:
     desktop_source = inspect.getsource(desktop.create_desktop_app)
-    task_source = inspect.getsource(tasks.build_tasks_panel)
 
     assert 'query_params.get("view")' in desktop_source
-    assert "tab_jobs\n            if open_requested_review" in desktop_source
-    assert "else tab_settings\n            if open_requested_config" in desktop_source
+    assert "tab_review\n            if open_requested_review" in desktop_source
+    assert "else tab_accounts\n            if open_requested_config" in desktop_source
     assert "else tab_wizard" in desktop_source
-    assert "initial_batch_id=requested_batch_id" in desktop_source
-    assert "initial_job_id=requested_job_id" in desktop_source
-    assert "if initial_batch_id and initial_job_id:" in task_source
-    assert "open_review_workbench(" in task_source
+    assert "def open_review_page(" in desktop_source
+    assert "build_review_page(" in desktop_source
+    assert "tabs.set_value(tab_review)" in desktop_source
+    assert "on_open_review=open_review_page" in desktop_source
+    assert 'ui.tab("文章审核", icon="rate_review").classes(' in desktop_source
+    assert '"ops-review-route-tab"' in desktop_source

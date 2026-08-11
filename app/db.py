@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -41,12 +42,15 @@ STEPS = (
 )
 
 _PROCESS_OWNER_SESSION_ID = f"process-{uuid.uuid4().hex}"
+_POSTGRES_SCHEMA_INIT_LOCK = threading.RLock()
+_POSTGRES_SCHEMA_INITIALIZED: set[str] = set()
 _INTEGRITY_ERRORS = (sqlite3.IntegrityError, *postgres_integrity_errors())
 _ACTIVE_OWNER_USER_ID: ContextVar[str] = ContextVar(
     "wechat_publisher_owner_user_id",
     default="",
 )
 _CUSTOMER_SETTING_KEYS = {
+    "jizhile_api",
     "onboarding.guide",
     "ui.last_target_account_ids",
     "wechat_backend_search",
@@ -108,7 +112,18 @@ class Database:
         self._owner_user_id = str(owner_user_id or "").strip()
         if self.backend == "sqlite":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        # PostgreSQL schema setup executes the full migration script under an
+        # advisory lock. A page creates several user-scoped handles, so doing
+        # this for every handle adds seconds to normal navigation. A process
+        # restart still performs the check once. SQLite keeps its per-handle
+        # initialization because isolated tests replace temporary databases.
+        if self.backend == "postgresql":
+            with _POSTGRES_SCHEMA_INIT_LOCK:
+                if self.database_url not in _POSTGRES_SCHEMA_INITIALIZED:
+                    self._init_schema()
+                    _POSTGRES_SCHEMA_INITIALIZED.add(self.database_url)
+        else:
+            self._init_schema()
 
     def for_user(self, user_id: str | None) -> Database:
         """Return an independent database handle scoped to one login account."""
@@ -1661,10 +1676,36 @@ class Database:
             where = "WHERE " + " AND ".join(clauses) if clauses else ""
             params.append(max(1, int(limit)))
             rows = conn.execute(
-                f"SELECT id FROM batches {where} ORDER BY created_at DESC LIMIT ?",
+                f"SELECT * FROM batches {where} ORDER BY created_at DESC LIMIT ?",
                 params,
             ).fetchall()
-        return [batch for row in rows if (batch := self.get_batch(str(row["id"])))]
+            batches = [dict(row) for row in rows]
+            batch_ids = [str(batch["id"]) for batch in batches]
+            jobs_by_batch: dict[str, list[dict[str, Any]]] = {
+                batch_id: [] for batch_id in batch_ids
+            }
+            if batch_ids:
+                placeholders = ", ".join("?" for _ in batch_ids)
+                job_rows = conn.execute(
+                    f"""
+                    SELECT bj.batch_id AS linked_batch_id,
+                           bj.account_id, bj.account_name,
+                           bj.review_status, bj.viewed_at, bj.confirmed_at, j.*
+                    FROM batch_jobs bj
+                    JOIN jobs j ON j.id = bj.job_id
+                    WHERE bj.batch_id IN ({placeholders})
+                    ORDER BY bj.batch_id, j.id
+                    """,
+                    batch_ids,
+                ).fetchall()
+                for item in job_rows:
+                    linked_batch_id = str(item["linked_batch_id"])
+                    jobs_by_batch.setdefault(linked_batch_id, []).append(
+                        self._row_to_job(item)
+                    )
+            for batch in batches:
+                batch["jobs"] = jobs_by_batch.get(str(batch["id"]), [])
+            return batches
 
     def update_batch_job_review(
         self,
@@ -3896,7 +3937,9 @@ class Database:
         keyword: str = "",
         favorite_only: bool = False,
         unused_only: bool = False,
+        used_only: bool = False,
         limit: int = 200,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -3922,6 +3965,8 @@ class Database:
             clauses.append("ti.favorite = 1")
         if unused_only:
             clauses.append("ti.used = 0")
+        if used_only:
+            clauses.append("ti.used = 1")
         sql = """
             SELECT ti.*, ts.name AS source_name, ts.source_type
             FROM topic_items ti
@@ -3929,11 +3974,61 @@ class Database:
         """
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY COALESCE(ti.published_at, ti.created_at) DESC LIMIT ?"
-        params.append(max(1, int(limit)))
+        sql += (
+            " ORDER BY COALESCE(ti.published_at, ti.created_at) DESC, ti.id DESC "
+            "LIMIT ? OFFSET ?"
+        )
+        params.extend((max(1, int(limit)), max(0, int(offset))))
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._topic_item_row(row) for row in rows]
+
+    def count_topic_items(
+        self,
+        *,
+        source_ids: list[str] | None = None,
+        since: str | None = None,
+        keyword: str = "",
+        favorite_only: bool = False,
+        unused_only: bool = False,
+        used_only: bool = False,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if self.owner_user_id:
+            clauses.append("ts.owner_user_id = ?")
+            params.append(self.owner_user_id)
+        if source_ids:
+            placeholders = ",".join("?" for _ in source_ids)
+            clauses.append(
+                f"(ti.source_id IN ({placeholders}) "
+                f"OR ts.source_key IN ({placeholders}))"
+            )
+            params.extend(source_ids)
+            params.extend(source_ids)
+        if since:
+            clauses.append("COALESCE(ti.published_at, ti.created_at) >= ?")
+            params.append(since)
+        if keyword.strip():
+            clauses.append("(ti.title LIKE ? OR ti.summary LIKE ?)")
+            token = f"%{keyword.strip()}%"
+            params.extend((token, token))
+        if favorite_only:
+            clauses.append("ti.favorite = 1")
+        if unused_only:
+            clauses.append("ti.used = 0")
+        if used_only:
+            clauses.append("ti.used = 1")
+        sql = """
+            SELECT COUNT(*) AS total
+            FROM topic_items ti
+            JOIN topic_sources ts ON ts.id = ti.source_id
+        """
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        with self.connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return int(row["total"] if row else 0)
 
     def get_topic_item(self, item_id: str) -> dict[str, Any] | None:
         """Return one topic item together with its source metadata."""

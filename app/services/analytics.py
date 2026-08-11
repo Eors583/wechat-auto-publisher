@@ -38,31 +38,39 @@ class AnalyticsService:
         )
         day_start_text = day_start.isoformat(timespec="microseconds")
         day_end_text = day_end.isoformat(timespec="microseconds")
+        owner_id = str(self.db.owner_user_id or "").strip()
+        batch_owner_clause = "WHERE b.owner_user_id = ?" if owner_id else ""
+        joined_owner_clause = "WHERE b.owner_user_id = ?" if owner_id else ""
+        owner_params: tuple[str, ...] = (owner_id,) if owner_id else ()
         with self.db.connect() as conn:
             batch_row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS total_batches,
                        SUM(CASE
-                           WHEN created_at >= ? AND created_at < ? THEN 1
+                           WHEN b.created_at >= ? AND b.created_at < ? THEN 1
                            ELSE 0
                        END)
                            AS today_batches,
-                       SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END)
+                       SUM(CASE WHEN b.archived_at IS NOT NULL THEN 1 ELSE 0 END)
                            AS archived_batches
-                FROM batches
+                FROM batches AS b
+                {batch_owner_clause}
                 """,
-                (day_start_text, day_end_text),
+                (day_start_text, day_end_text, *owner_params),
             ).fetchone()
             status_rows = conn.execute(
-                """
+                f"""
                 SELECT j.status, COUNT(*) AS article_count
                 FROM batch_jobs AS bj
                 JOIN jobs AS j ON j.id = bj.job_id
+                JOIN batches AS b ON b.id = bj.batch_id
+                {joined_owner_clause}
                 GROUP BY j.status
-                """
+                """,
+                owner_params,
             ).fetchall()
             article_row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS total_articles,
                        SUM(CASE
                            WHEN j.created_at >= ? AND j.created_at < ? THEN 1
@@ -71,17 +79,28 @@ class AnalyticsService:
                            AS today_articles
                 FROM batch_jobs AS bj
                 JOIN jobs AS j ON j.id = bj.job_id
+                JOIN batches AS b ON b.id = bj.batch_id
+                {joined_owner_clause}
                 """,
-                (day_start_text, day_end_text),
+                (day_start_text, day_end_text, *owner_params),
             ).fetchone()
             review_rows = conn.execute(
-                """
+                f"""
                 SELECT bj.review_status, COUNT(*) AS article_count
                 FROM batch_jobs AS bj
                 JOIN jobs AS j ON j.id = bj.job_id
+                JOIN batches AS b ON b.id = bj.batch_id
+                {joined_owner_clause}
                 GROUP BY bj.review_status
-                """
+                """,
+                owner_params,
             ).fetchall()
+
+        # Operational cards must use the same owner-aware, non-archived article
+        # inbox as the task queue. A raw ``ready_for_review`` status count also
+        # includes articles that an operator has already confirmed, which made
+        # the top bar claim there was work that the queue could not display.
+        inbox_counts = self.db.review_inbox_counts()
 
         status_counts = {status: 0 for status in JOB_STATUSES}
         for row in status_rows:
@@ -119,7 +138,10 @@ class AnalyticsService:
             "today_articles": (
                 int(article_row["today_articles"] or 0) if article_row else 0
             ),
-            "pending_review_articles": status_counts.get("ready_for_review", 0),
+            "pending_review_articles": inbox_counts.get("review", 0),
+            "ready_for_draft_articles": inbox_counts.get("ready_for_draft", 0),
+            "write_failed_articles": inbox_counts.get("write_failed", 0),
+            "generation_failed_articles": inbox_counts.get("generation_failed", 0),
             "drafted_articles": drafted_articles,
             "published_articles": published_articles,
             "drafted_or_published_articles": drafted_articles + published_articles,

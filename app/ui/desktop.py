@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -40,9 +41,18 @@ from app.services.creation_plans import CreationPlanService
 from app.services.failures import sanitize_failure_text
 from app.services.followed_content import FollowedContentService
 from app.services.onboarding import OnboardingService
+from app.services.preflight import preflight_accounts
 from app.services.topic_sources import TopicSourceService
+from app.services.wechat_layout_import import fetch_wechat_article_layout
+from app.services.wechat_backend_settings import effective_backend_settings
 from app.ui import image_proxy as _image_proxy  # noqa: F401
 from app.ui.auth_persistence import auth_session_middleware_kwargs
+from app.ui.background_activity import build_global_activity_dock
+from app.ui.interaction_feedback import (
+    attach_interaction_feedback,
+    hide_interaction_feedback,
+    install_interaction_feedback,
+)
 from app.ui.lifecycle import client_timer
 from app.ui.panels.auth import (
     build_auth_screen,
@@ -58,12 +68,13 @@ from app.ui.panels.onboarding_wizard import (
     should_show_onboarding,
 )
 from app.ui.panels.overview import build_overview_cards
+from app.ui.panels.prompts import build_prompt_templates_panel
 from app.ui.panels.review_jury import enabled_profile_options
 from app.ui.panels.settings_hub import (
     build_creation_plans_panel,
     build_model_management_panel,
 )
-from app.ui.panels.tasks import build_tasks_panel
+from app.ui.panels.tasks import build_review_page, build_tasks_panel
 from app.ui.panels.topics import build_topic_center
 from app.ui.state import (
     STATUS_LABEL,
@@ -78,7 +89,7 @@ from app.ui.workflow import (
     render_workflow_guide,
 )
 from app.wechat.client import WeChatClient
-from app.wechat.factory import build_wechat_auth, build_wechat_client
+from app.wechat.factory import build_wechat_client
 from app.wechat.template_snapshot import load_template_snapshot
 
 logging.basicConfig(
@@ -143,6 +154,9 @@ def create_desktop_app() -> None:
         and bool(requested_batch_id)
         and requested_job_id > 0
     )
+    open_requested_tasks = (
+        str(query_params.get("view") or "").strip().lower() == "tasks"
+    )
     open_requested_config = (
         str(query_params.get("view") or "").strip().lower() == "config"
     )
@@ -160,6 +174,7 @@ def create_desktop_app() -> None:
     )
     ui.add_head_html(HEAD_HTML)
     ui.add_css(APP_CSS)
+    install_interaction_feedback()
     if request is not None and hasattr(page_state, "auth"):
         authenticated_user = current_desktop_user(page_state.auth)
         if hasattr(page_state, "bind_user"):
@@ -220,43 +235,71 @@ def create_desktop_app() -> None:
         )
         return
 
-    with ui.element("div").classes("shell"):
-        with ui.element("div").classes("hero"):
+    with ui.element("div").classes("shell ops-workbench-shell"):
+        with ui.element("div").classes("ops-sidebar-brand"):
+            with ui.element("span").classes("ops-sidebar-brand-mark"):
+                ui.icon("play_arrow", size="18px").classes("ops-semantic-icon")
+            with ui.column().classes("ops-sidebar-brand-copy"):
+                ui.label("蓝血内容台")
+                ui.label("Content OS")
+
+        with ui.element("header").classes("hero ops-topbar"):
             with ui.column().classes("gap-0"):
-                ui.label("CONTENT STUDIO").classes("eyebrow")
-                ui.label("公众号改写助手").classes("brand")
-                ui.label("从选题到草稿，一站完成公众号内容生产").classes("brand-sub")
-                ui.html(
-                    '<div class="q-mt-sm">'
-                    '<span class="flow-chip"><span class="dot"></span>本地运行</span>'
-                    '<span class="flow-chip"><span class="dot"></span>仅存草稿不群发</span>'
-                    '<span class="flow-chip"><span class="dot"></span>人工审核文章</span>'
-                    "</div>",
-                    sanitize=False,
-                )
-            with ui.column().classes("items-end gap-2"):
-                ui.html(
-                    '<div class="hero-badge"><span class="hero-badge-dot"></span>'
-                    "<span><b>草稿安全模式</b><small>仅写草稿，不会自动群发</small></span></div>",
-                    sanitize=False,
-                )
-                with ui.row().classes("items-center gap-2"):
-                    role_label = (
-                        "管理员" if page_is_admin else "普通用户"
-                    )
-                    ui.label(
-                        f'{page_state.current_user["username"]} · {role_label}'
-                    ).classes("text-caption text-grey-7")
+                ui.label("公众号运营空间").classes("ops-topbar-title")
+                now = datetime.now()
+                weekday = "一二三四五六日"[now.weekday()]
+                ui.label(
+                    f"{now.year} 年 {now.month} 月 {now.day} 日 · 星期{weekday}"
+                ).classes("ops-topbar-subtitle")
+            with ui.row().classes("ops-topbar-actions"):
+                pending_review_count = 0
+                if hasattr(page_state, "db"):
+                    try:
+                        pending_review_count = int(
+                            page_state.db.review_inbox_counts().get("review", 0)
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Unable to load the pending-review count"
+                        )
+                def open_pending_review_queue() -> None:
+                    if callable(page_state.task_center_refresh):
+                        page_state.task_center_refresh(
+                            status_filter="ready_for_review",
+                            today=False,
+                        )
+                    else:
+                        page_state.pending_task_center_entry = {
+                            "initial_view": "inbox",
+                            "initial_bucket": "review",
+                        }
+                    tabs.set_value(tab_jobs)
 
-                    def logout_current_user() -> None:
-                        logout_desktop_user(page_state.auth)
-                        ui.navigate.reload()
+                ui.button(
+                    f"{pending_review_count} 篇待审核",
+                    icon="assignment_turned_in",
+                    on_click=open_pending_review_queue,
+                ).classes("ops-topbar-review-button").props(
+                    "flat dense no-caps aria-label=查看待审核文章"
+                )
 
-                    ui.button(
-                        "退出",
-                        icon="logout",
-                        on_click=logout_current_user,
-                    ).props("flat dense no-caps color=grey-7")
+                def toggle_activity_dock() -> None:
+                    toggle = getattr(page_state, "activity_dock_toggle", None)
+                    if callable(toggle):
+                        toggle()
+
+                ui.button(
+                    icon="monitor_heart",
+                    on_click=toggle_activity_dock,
+                ).classes("ops-topbar-icon-button").props(
+                    "flat round dense aria-label=查看后台活动"
+                )
+                ui.button(
+                    icon="settings",
+                    on_click=lambda: tabs.set_value(tab_accounts),
+                ).classes("ops-topbar-icon-button").props(
+                    "flat round dense aria-label=打开公众号设置"
+                )
 
         health_state = {"status": onboarding_status}
 
@@ -264,7 +307,8 @@ def create_desktop_app() -> None:
         def configuration_health() -> None:
             build_configuration_health_banner(health_state["status"])
 
-        configuration_health()
+        with ui.element("div").classes("ops-config-health ops-visually-hidden"):
+            configuration_health()
         # Model credentials are managed by the standalone merchant backend.
         # Keep already-open desktop selectors in sync with that shared
         # PostgreSQL pool without requiring an application restart.
@@ -340,261 +384,279 @@ def create_desktop_app() -> None:
 
         tabs = (
             ui.tabs()
-            .classes("workspace-tabs w-full")
-            .props("dense align=left indicator-color=teal-9 active-color=teal-10")
+            .classes("workspace-tabs ops-main-nav")
+            .props("vertical dense align=left indicator-color=primary active-color=primary")
         )
         with tabs:
-            tab_wizard = ui.tab("工作台")
-            tab_topics = ui.tab("选题库")
-            tab_jobs = ui.tab("任务中心")
-            tab_settings = ui.tab("设置")
+            tab_wizard = ui.tab("创作台", icon="auto_awesome").props(
+                'aria-label="创作台" title="创作台"'
+            )
+            tab_topics = ui.tab("选题雷达", icon="radar").props(
+                'aria-label="选题雷达" title="选题雷达"'
+            )
+            tab_jobs = ui.tab("任务队列", icon="format_list_bulleted").props(
+                'aria-label="任务队列" title="任务队列"'
+            )
+            tab_accounts = ui.tab("公众号", icon="campaign").props(
+                'aria-label="公众号" title="公众号"'
+            )
+            tab_review = ui.tab("文章审核", icon="rate_review").classes(
+                "ops-review-route-tab"
+            )
+
+        with ui.element("div").classes("ops-sidebar-footer"):
+            with ui.row().classes("ops-sidebar-health"):
+                with ui.column().classes("ops-sidebar-health-copy"):
+                    ui.label("系统就绪")
+                    ui.label("公众号配置与后台任务可用")
+            with ui.row().classes("ops-sidebar-profile"):
+                ui.avatar(
+                    str(page_state.current_user["username"] or "用")[:1],
+                    size="30px",
+                ).classes("ops-sidebar-avatar")
+                with ui.column().classes("ops-sidebar-profile-copy"):
+                    ui.label(str(page_state.current_user["username"]))
+                    ui.label("内容运营" if page_is_admin else "运营用户")
+                with ui.button(icon="more_horiz").props(
+                    "flat round dense aria-label=用户菜单"
+                ):
+                    with ui.menu():
+                        ui.menu_item(
+                            "退出登录",
+                            on_click=lambda: (
+                                logout_desktop_user(page_state.auth),
+                                ui.navigate.reload(),
+                            ),
+                        )
 
         initial_tab = (
-            tab_jobs
+            tab_review
             if open_requested_review
-            else tab_settings
+            else tab_jobs
+            if open_requested_tasks
+            else tab_accounts
             if open_requested_config or open_requested_admin
             else tab_wizard
         )
         panels = ui.tab_panels(
             tabs,
             value=initial_tab,
-        ).classes("w-full bg-transparent")
+        ).classes("ops-main-panels w-full bg-transparent")
         with panels:
-            with ui.tab_panel(tab_wizard).classes("wizard-panel"):
+            with ui.tab_panel(tab_wizard).classes("ops-page ops-create-page"):
                 wizard_host = (
                     ui.column()
                     .classes("w-full wizard-layout")
-                    .style("display:block")
                 )
-            with ui.tab_panel(tab_topics):
-                topics_host = ui.column().classes("w-full")
-            with ui.tab_panel(tab_jobs):
-                jobs_host = ui.column().classes("w-full")
-            with ui.tab_panel(tab_settings):
-                settings_host = ui.column().classes("w-full")
+            with ui.tab_panel(tab_topics).classes("ops-page ops-topics-page"):
+                topics_host = ui.column().classes("w-full ops-page-host")
+            with ui.tab_panel(tab_jobs).classes("ops-page ops-tasks-page"):
+                jobs_host = ui.column().classes("w-full ops-page-host")
+            with ui.tab_panel(tab_accounts).classes("ops-page ops-accounts-page"):
+                accounts_host = ui.column().classes("w-full ops-page-host")
+            with ui.tab_panel(tab_review).classes("ops-page ops-review-page"):
+                review_host = ui.column().classes("w-full ops-page-host")
 
-        for host in (topics_host, jobs_host, settings_host):
+        for host in (topics_host, jobs_host, accounts_host, review_host):
             with host, ui.row().classes(
                 "w-full items-center justify-center q-py-xl gap-2"
             ):
-                ui.spinner("dots", size="md", color="teal-9")
+                ui.spinner("dots", size="md", color="primary")
                 ui.label("正在加载页面…").classes("muted")
+
+        build_global_activity_dock(page_state)
 
         mounted_tabs: set[str] = set()
         scheduled_tabs: set[str] = set()
 
+        def render_page_heading(
+            eyebrow: str,
+            title: str,
+            description: str,
+            *,
+            action: Callable[[], None] | None = None,
+        ) -> None:
+            with ui.element("div").classes("ops-page-heading"):
+                with ui.column().classes("ops-page-heading-copy"):
+                    ui.label(eyebrow).classes("ops-page-eyebrow")
+                    ui.label(title).classes("ops-page-title")
+                    ui.label(description).classes("ops-page-description")
+                if action is not None:
+                    action()
+
+        def _render_safe_mode_status() -> None:
+            with ui.row().classes("ops-inline-status"):
+                ui.icon("verified_user", size="17px").classes(
+                    "ops-semantic-icon"
+                )
+                ui.label("安全模式：只写草稿，不自动群发")
+
         def mount_wizard() -> None:
             wizard_host.clear()
             with wizard_host:
+                render_page_heading(
+                    "TODAY'S PRODUCTION",
+                    "今天准备做什么内容？",
+                    "从素材到草稿，每一步都能看见、暂停和恢复。",
+                    action=lambda: _render_safe_mode_status(),
+                )
                 _build_wizard(tabs, tab_topics, tab_jobs, state=page_state)
 
         def mount_topics() -> None:
             topics_host.clear()
             with topics_host:
+                render_page_heading(
+                    "TOPIC RADAR",
+                    "选题雷达",
+                    "热点、收藏、手动选题和关注文章放在同一个可搜索内容池。",
+                )
                 build_topic_center(page_state, tabs, tab_wizard)
 
         def mount_jobs() -> None:
-            task_panel_kwargs: dict[str, Any] = {}
-            if open_requested_review:
+            task_panel_kwargs: dict[str, Any] = {
+                "initial_view": "inbox",
+                "show_background_activity": False,
+            }
+            if open_requested_tasks and requested_batch_id:
                 task_panel_kwargs.update(
                     initial_batch_id=requested_batch_id,
-                    initial_job_id=requested_job_id,
                 )
-            elif page_state.pending_task_center_entry:
+            if page_state.pending_task_center_entry:
                 pending_entry = dict(page_state.pending_task_center_entry)
                 task_panel_kwargs.update(
-                    initial_batch_id=str(pending_entry.get("batch_id") or ""),
+                    initial_view=str(
+                        pending_entry.get("initial_view") or "inbox"
+                    ),
+                    initial_bucket=str(
+                        pending_entry.get("initial_bucket") or "review"
+                    ),
+                    initial_status_filter=str(
+                        pending_entry.get("status_filter") or ""
+                    ),
                     initial_entry_mode=str(
                         pending_entry.get("entry_mode") or "activity"
                     ),
                 )
+                if pending_entry.get("batch_id"):
+                    task_panel_kwargs["initial_batch_id"] = str(
+                        pending_entry["batch_id"]
+                    )
                 page_state.pending_task_center_entry = None
             jobs_host.clear()
             with jobs_host:
-                build_tasks_panel(page_state, **task_panel_kwargs)
-
-        def mount_settings() -> None:
-            settings_host.clear()
-            with settings_host:
-                settings_tabs = (
-                    ui.tabs()
-                    .classes("workspace-tabs w-full")
-                    .props(
-                        "dense align=left indicator-color=teal-9 active-color=teal-10"
-                    )
+                render_page_heading(
+                    "PRODUCTION QUEUE",
+                    "任务队列",
+                    "先看下一步，不让批次状态淹没运营动作。",
                 )
-                with settings_tabs:
-                    settings_accounts = ui.tab("公众号")
-                    settings_models = (
-                        ui.tab("模型管理")
-                        if page_is_admin
-                        else None
-                    )
-                    settings_plans = ui.tab("创作方案")
-                    settings_feishu = ui.tab("飞书")
-                    settings_help = ui.tab("系统设置")
-                initial_settings_tab = (
-                    settings_models
-                    if open_requested_admin and settings_models is not None
-                    else settings_help
-                    if open_requested_config and not requested_config_repair
-                    else settings_accounts
+                build_tasks_panel(
+                    page_state,
+                    on_open_review=open_review_page,
+                    **task_panel_kwargs,
                 )
-                settings_panels = ui.tab_panels(
-                    settings_tabs,
-                    value=initial_settings_tab,
-                ).classes("w-full bg-transparent")
-                with settings_panels:
-                    with ui.tab_panel(settings_accounts):
-                        settings_accounts_host = ui.column().classes("w-full")
-                    if settings_models is not None:
-                        with ui.tab_panel(settings_models):
-                            settings_models_host = ui.column().classes("w-full")
-                    with ui.tab_panel(settings_plans):
-                        settings_plans_host = ui.column().classes("w-full")
-                    with ui.tab_panel(settings_feishu):
-                        settings_feishu_host = ui.column().classes("w-full")
-                    with ui.tab_panel(settings_help):
-                        settings_help_host = ui.column().classes("w-full")
 
-                settings_hosts = {
-                    str(settings_accounts.props["name"]): settings_accounts_host,
-                    str(settings_plans.props["name"]): settings_plans_host,
-                    str(settings_feishu.props["name"]): settings_feishu_host,
-                    str(settings_help.props["name"]): settings_help_host,
-                }
-                if settings_models is not None:
-                    settings_hosts[str(settings_models.props["name"])] = (
-                        settings_models_host
+        review_route = {
+            "batch_id": requested_batch_id,
+            "job_id": requested_job_id,
+        }
+
+        def return_to_tasks() -> None:
+            tabs.set_value(tab_jobs)
+
+        def open_review_page(batch_id: str, job_id: int) -> None:
+            review_route.update(batch_id=str(batch_id), job_id=int(job_id))
+            review_host.clear()
+            with review_host:
+                build_review_page(
+                    page_state,
+                    batch_id=str(batch_id),
+                    job_id=int(job_id),
+                    on_back=return_to_tasks,
+                    on_open_review=open_review_page,
+                )
+            mounted_tabs.add(str(tab_review.props["name"]))
+            tabs.set_value(tab_review)
+
+        def mount_review() -> None:
+            review_host.clear()
+            with review_host:
+                if review_route["batch_id"] and int(review_route["job_id"] or 0):
+                    build_review_page(
+                        page_state,
+                        batch_id=str(review_route["batch_id"]),
+                        job_id=int(review_route["job_id"]),
+                        on_back=return_to_tasks,
+                        on_open_review=open_review_page,
                     )
-                for host in settings_hosts.values():
-                    with host, ui.row().classes(
-                        "w-full items-center justify-center q-py-lg gap-2"
-                    ):
-                        ui.spinner("dots", size="sm", color="teal-9")
-                        ui.label("正在加载设置…").classes("muted")
-
-                settings_callbacks: dict[str, Callable[[], None]] = {
-                    "refresh_accounts": lambda: None,
-                }
-
-                def mount_settings_accounts() -> None:
-                    settings_accounts_host.clear()
-                    with settings_accounts_host:
-                        settings_callbacks["refresh_accounts"] = (
-                            _build_accounts_panel(
-                                page_state,
-                                initial_account_id=requested_config_account_id,
-                                initial_action=requested_config_repair,
-                            )
-                        )
-
-                def mount_settings_models() -> None:
-                    settings_models_host.clear()
-                    with settings_models_host:
-                        build_model_management_panel(page_state)
-
-                def mount_settings_plans() -> None:
-                    settings_plans_host.clear()
-                    with settings_plans_host:
-                        build_creation_plans_panel(
-                            page_state,
-                            on_plans_change=lambda: settings_callbacks[
-                                "refresh_accounts"
-                            ](),
-                        )
-
-                def mount_settings_feishu() -> None:
-                    settings_feishu_host.clear()
-                    with settings_feishu_host:
-                        build_feishu_panel(page_state)
-
-                def mount_settings_help() -> None:
-                    settings_help_host.clear()
-                    with settings_help_host:
-                        if onboarding_service is not None and page_is_admin:
-                            build_onboarding_settings(
-                                page_state,
-                                service=onboarding_service,
-                            )
-                        _build_help_panel()
-
-                settings_mounts: dict[str, Callable[[], None]] = {
-                    str(settings_accounts.props["name"]): mount_settings_accounts,
-                    str(settings_plans.props["name"]): mount_settings_plans,
-                    str(settings_feishu.props["name"]): mount_settings_feishu,
-                    str(settings_help.props["name"]): mount_settings_help,
-                }
-                if settings_models is not None:
-                    settings_mounts[str(settings_models.props["name"])] = (
-                        mount_settings_models
+                else:
+                    render_page_heading(
+                        "ARTICLE REVIEW",
+                        "文章审核",
+                        "请从任务队列选择一篇待审核文章。",
                     )
-                mounted_settings: set[str] = set()
-                scheduled_settings: set[str] = set()
+                    ui.button(
+                        "返回任务队列",
+                        icon="arrow_back",
+                        on_click=return_to_tasks,
+                    ).props("outline color=primary no-caps")
 
-                def mount_settings_tab(tab: Any) -> None:
-                    tab_name = str(
-                        tab.props["name"] if hasattr(tab, "props") else tab
-                    )
-                    if tab_name in mounted_settings:
-                        return
-                    settings_mounts[tab_name]()
-                    mounted_settings.add(tab_name)
-                    scheduled_settings.discard(tab_name)
-
-                def schedule_settings_tab(tab: Any) -> None:
-                    tab_name = str(
-                        tab.props["name"] if hasattr(tab, "props") else tab
-                    )
-                    if (
-                        tab_name in mounted_settings
-                        or tab_name in scheduled_settings
-                    ):
-                        return
-                    scheduled_settings.add(tab_name)
-                    client_timer(
-                        0.01,
-                        lambda: mount_settings_tab(tab),
-                        once=True,
-                        immediate=False,
-                    )
-
-                schedule_settings_tab(initial_settings_tab)
-                settings_tabs.on_value_change(
-                    lambda event: schedule_settings_tab(event.value)
+        def mount_accounts() -> None:
+            accounts_host.clear()
+            with accounts_host:
+                render_page_heading(
+                    "ACCOUNT READINESS",
+                    "公众号与创作规则",
+                    "先确认账号能力，再配置创作、审核、排版和草稿写入规则。",
+                )
+                _build_accounts_panel(
+                    page_state,
+                    initial_account_id=requested_config_account_id,
+                    initial_action=requested_config_repair,
                 )
 
         tab_mounts = {
             str(tab_wizard.props["name"]): mount_wizard,
             str(tab_topics.props["name"]): mount_topics,
             str(tab_jobs.props["name"]): mount_jobs,
-            str(tab_settings.props["name"]): mount_settings,
+            str(tab_accounts.props["name"]): mount_accounts,
+            str(tab_review.props["name"]): mount_review,
         }
 
         def mount_tab(tab: Any) -> None:
             tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
             if tab_name in mounted_tabs:
+                hide_interaction_feedback()
                 return
             tab_mounts[tab_name]()
             mounted_tabs.add(tab_name)
             scheduled_tabs.discard(tab_name)
+            hide_interaction_feedback()
 
         def schedule_tab(tab: Any) -> None:
             tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
             if tab_name in mounted_tabs or tab_name in scheduled_tabs:
                 return
             scheduled_tabs.add(tab_name)
+
+            # Let Quasar paint the newly selected sidebar item and the loading
+            # skeleton before constructing a data-heavy page.  Calling
+            # ``mount_tab`` directly from the value-change handler kept the
+            # browser waiting for every database query and NiceGUI element to
+            # be created, which made a normal navigation click look ignored.
             client_timer(
                 0.01,
-                lambda: mount_tab(tab),
+                lambda selected_tab=tab: mount_tab(selected_tab),
                 once=True,
-                immediate=False,
             )
 
         # Only the requested panel contributes elements to the initial
         # NiceGUI payload. Hidden workspaces are built on their first visit.
         mount_tab(initial_tab)
+        attach_interaction_feedback(
+            tabs,
+            "正在切换页面",
+            event="update:model-value",
+        )
         tabs.on_value_change(lambda event: schedule_tab(event.value))
 
 
@@ -636,8 +698,6 @@ def _build_wizard(
         if ui_alive():
             workflow_guide.refresh()
 
-    workflow_guide()
-
     def open_task_center(status_filter: str = "", today: bool = False) -> None:
         if not ui_alive():
             return
@@ -646,15 +706,30 @@ def _build_wizard(
                 status_filter=status_filter,
                 today=today,
             )
+        else:
+            requested_status = str(status_filter or "")
+            if requested_status in {"ready_for_review", "ready_for_draft"}:
+                state.pending_task_center_entry = {
+                    "initial_view": "inbox",
+                    "initial_bucket": (
+                        "review"
+                        if requested_status == "ready_for_review"
+                        else "ready_for_draft"
+                    ),
+                }
+            else:
+                state.pending_task_center_entry = {
+                    "initial_view": "batches",
+                    "status_filter": requested_status,
+                }
         tabs.set_value(tab_jobs)
 
-    with ui.element("div").classes("card w-full"):
-        build_overview_cards(
-            state,
-            on_go_tasks=open_task_center,
-        )
+    build_overview_cards(
+        state,
+        on_go_tasks=open_task_center,
+    )
 
-    with ui.element("div").classes("card topic-card"):
+    with ui.element("div").classes("topic-card ops-hidden-create-topic-card"):
         ui.html(step_title_html(1, "选择本次内容"), sanitize=False)
         ui.label(
             "已有链接、正文或明确话题可直接填写；需要找热点、关注公众号文章或收藏内容时，统一去选题库。"
@@ -875,9 +950,7 @@ def _build_wizard(
 
                     with ui.element("div").classes("topic-item"):
                         with ui.row().classes("w-full items-center justify-between"):
-                            with (
-                                ui.column().classes("gap-0").style("flex:1;min-width:0")
-                            ):
+                            with ui.column().classes("gap-0 ops-flex-copy"):
                                 ui.label(title).classes("text-weight-medium")
                                 if meta_text:
                                     ui.label(meta_text).classes("muted")
@@ -1122,206 +1195,223 @@ def _build_wizard(
         )
         client_timer(0.01, on_source_change, once=True)
 
-    with ui.element("div").classes("card source-card"):
-        ui.label("内容来源").classes("section-title")
-        ui.label("请选择一种输入方式；从选题库带回文章时会自动填入链接。").classes(
-            "muted q-mb-sm"
-        )
-        source_mode_hints = {
-            "link": "粘贴一篇可直接访问的原文链接；文章主题可留空。",
-            "text": "直接粘贴完整正文，系统会自动提取主题；输入框也可打开大编辑器。",
-            "references": "每行一个参考链接，第一篇作为主要参考；文章主题可留空。",
-            "topic": "由 AI 从头创作，此模式需要填写文章主题。",
-        }
-        source_mode_in = ui.toggle(
-            {
-                "link": "文章链接",
-                "text": "粘贴正文",
-                "references": "多篇参考",
-                "topic": "话题原创",
-            },
-            value="link",
-        ).classes("source-mode-toggle").props(
-            "no-caps unelevated toggle-color=teal-8"
-        )
-        source_mode_hint = ui.label(source_mode_hints["link"]).classes(
-            "source-mode-hint"
-        )
-        url_holder["mode"] = source_mode_in
-        url_in = (
-            ui.input(
-                "文章链接（可编辑）",
-                placeholder="https://mp.weixin.qq.com/s/...",
+    with ui.element("section").classes(
+        "ops-panel source-card ops-create-source-section"
+    ):
+        with ui.element("div").classes("ops-panel-heading"):
+            with ui.column().classes("gap-0"):
+                ui.label("新建内容任务").classes("ops-panel-title")
+                ui.label("先确定内容，再选择发布账号").classes(
+                    "ops-panel-subtitle"
+                )
+            with ui.row().classes("ops-step-line"):
+                ui.label("1").classes("ops-step-number")
+                ui.label("内容")
+        with ui.element("div").classes("ops-panel-body ops-create-form-body"):
+            source_mode_hints = {
+                "link": "粘贴一篇可直接访问的原文链接；文章主题可留空。",
+                "text": "直接粘贴完整正文，系统会自动提取主题。",
+                "references": "每行一个参考链接，第一篇作为主要参考。",
+                "topic": "由 AI 从头创作；主题可留空，由系统自动策划。",
+            }
+            source_mode_in = ui.toggle(
+                {
+                    "link": "文章链接",
+                    "text": "粘贴正文",
+                    "references": "多篇参考",
+                    "topic": "话题原创",
+                },
+                value="link",
+            ).classes("source-mode-toggle ops-segment").props(
+                "no-caps unelevated toggle-color=white toggle-text-color=dark"
             )
-            .classes("w-full")
-            .props("clearable outlined stack-label")
-        )
-        url_holder["el"] = url_in
-        text_in = (
-            ui.textarea("粘贴文章正文")
-            .classes("w-full article-body-input")
-            .props("rows=12 outlined")
-        )
-        with ui.row().classes("body-input-tools") as text_input_tools:
-            ui.label("可拖动输入框右下角调高；双击正文也可打开大编辑器。").classes(
-                "muted"
+            source_mode_hint = ui.label(source_mode_hints["link"]).classes(
+                "source-mode-hint ops-compact-hint"
             )
-            expand_body_btn = ui.button(
-                "放大编辑",
-                icon="open_in_full",
-            ).props("flat dense no-caps color=teal-8")
+            url_holder["mode"] = source_mode_in
+            with ui.element("div").classes("ops-field ops-source-link-field") as url_field:
+                ui.label("内容来源").classes("ops-field-label")
+                url_in = ui.input(
+                    placeholder="https://mp.weixin.qq.com/s/...",
+                ).classes("w-full").props(
+                    "clearable outlined hide-bottom-space"
+                )
+            url_holder["el"] = url_in
+            with ui.element("div").classes("ops-field ops-source-text-field") as text_field:
+                ui.label("粘贴文章正文").classes("ops-field-label")
+                text_in = ui.textarea(
+                    placeholder="粘贴完整正文内容",
+                ).classes("w-full article-body-input").props("rows=8 outlined").props(
+                    "hide-bottom-space"
+                )
+            with ui.row().classes("body-input-tools") as text_input_tools:
+                ui.label("正文支持大编辑器，应用后回填当前任务。").classes(
+                    "muted"
+                )
+                expand_body_btn = ui.button(
+                    "放大编辑",
+                    icon="open_in_full",
+                ).props("flat dense no-caps color=primary")
 
-        with ui.dialog().props("maximized").classes(
-            "fullscreen-editor-dialog"
-        ) as body_editor_dialog:
-            with ui.card().classes("fullscreen-editor-card"):
-                with ui.row().classes("fullscreen-editor-header"):
-                    with ui.column().classes("gap-0"):
-                        ui.label("编辑粘贴正文").classes("text-h6 text-weight-bold")
-                        ui.label("大编辑器中的内容会在点击“应用正文”后带回工作台。").classes(
-                            "muted"
+            with ui.dialog().props("maximized").classes(
+                "fullscreen-editor-dialog"
+            ) as body_editor_dialog:
+                with ui.card().classes("fullscreen-editor-card"):
+                    with ui.row().classes("fullscreen-editor-header"):
+                        with ui.column().classes("gap-0"):
+                            ui.label("编辑粘贴正文").classes(
+                                "text-h6 text-weight-bold"
+                            )
+                            ui.label(
+                                "点击“应用正文”后带回创作台。"
+                            ).classes("muted")
+                        ui.space()
+                        ui.button(
+                            icon="close",
+                            on_click=body_editor_dialog.close,
+                        ).props("flat round color=grey-8 aria-label=关闭")
+                    fullscreen_text_in = ui.textarea("文章正文").classes(
+                        "fullscreen-body-textarea"
+                    ).props("outlined autofocus")
+                    with ui.row().classes("fullscreen-editor-actions"):
+                        ui.button(
+                            "取消",
+                            on_click=body_editor_dialog.close,
+                        ).props("flat no-caps color=grey-8")
+
+                        def apply_fullscreen_body() -> None:
+                            text_in.value = str(fullscreen_text_in.value or "")
+                            text_in.update()
+                            body_editor_dialog.close()
+
+                        ui.button(
+                            "应用正文",
+                            icon="check",
+                            on_click=apply_fullscreen_body,
+                        ).props("unelevated no-caps color=primary")
+
+            def open_body_editor() -> None:
+                fullscreen_text_in.value = str(text_in.value or "")
+                fullscreen_text_in.update()
+                body_editor_dialog.open()
+
+            expand_body_btn.on_click(open_body_editor)
+            text_in.on("dblclick", open_body_editor)
+            with ui.element("div").classes(
+                "ops-field ops-source-references-field"
+            ) as references_field:
+                ui.label("参考文章链接").classes("ops-field-label")
+                references_in = ui.textarea(
+                    placeholder="每行一个链接，第一篇为主要参考",
+                ).classes("w-full").props(
+                    "rows=5 outlined hide-bottom-space"
+                )
+            with ui.element("div").classes("ops-create-field-grid"):
+                with ui.element("div").classes("ops-field") as facts_field:
+                    ui.label("必须保留").classes("ops-field-label")
+                    facts_in = ui.input(
+                        placeholder="客户案例数据、品牌名、结论",
+                    ).classes("w-full").props(
+                        "outlined hide-bottom-space"
+                    )
+                with ui.element("div").classes("ops-field"):
+                    ui.label("改写强度").classes("ops-field-label")
+                    intensity_in = ui.select(
+                        options={
+                            "light": "轻度润色",
+                            "standard": "标准改写",
+                            "strong": "深度重构",
+                        },
+                        value="standard",
+                    ).classes("w-full").props(
+                        "outlined options-dense hide-bottom-space"
+                    )
+
+            def sync_source_mode() -> None:
+                mode = str(source_mode_in.value or "link")
+                source_mode_hint.set_text(
+                    source_mode_hints.get(mode, source_mode_hints["link"])
+                )
+                url_field.set_visibility(mode == "link")
+                text_field.set_visibility(mode == "text")
+                text_input_tools.set_visibility(mode == "text")
+                references_field.set_visibility(mode == "references")
+                facts_field.set_visibility(mode in {"link", "text", "references"})
+
+            source_mode_in.on_value_change(lambda _: sync_source_mode())
+            sync_source_mode()
+
+            async def consume_pending_rewrite() -> None:
+                pending = state.pending_rewrite
+                if not pending:
+                    return
+                if state.busy:
+                    if not pending.get("_waiting_notified"):
+                        pending["_waiting_notified"] = True
+                        ui.notify(
+                            "当前批次仍在生成，本次内容已保留，完成后会自动载入",
+                            type="warning",
                         )
-                    ui.space()
-                    ui.button(
-                        icon="close",
-                        on_click=body_editor_dialog.close,
-                    ).props("flat round color=grey-8").tooltip("关闭")
-                fullscreen_text_in = (
-                    ui.textarea("文章正文")
-                    .classes("fullscreen-body-textarea")
-                    .props("outlined autofocus")
+                    return
+                state.pending_rewrite = None
+                title = str(pending.get("title") or "").strip()
+                url = str(pending.get("url") or "").strip()
+                auto_start = bool(pending.get("auto_start"))
+                requested_accounts = [
+                    str(item)
+                    for item in pending.get("account_ids") or []
+                    if str(item)
+                ]
+                pending_rewrite_origin.clear()
+                pending_rewrite_origin.update(
+                    {
+                        "followed_article_id": str(
+                            pending.get("followed_article_id") or ""
+                        ),
+                        "topic_item_id": str(
+                            pending.get("topic_item_id") or ""
+                        ),
+                    }
                 )
-                with ui.row().classes("fullscreen-editor-actions"):
-                    ui.button(
-                        "取消",
-                        on_click=body_editor_dialog.close,
-                    ).props("flat no-caps color=grey-8")
-
-                    def apply_fullscreen_body() -> None:
-                        text_in.value = str(fullscreen_text_in.value or "")
-                        text_in.update()
-                        body_editor_dialog.close()
-
-                    ui.button(
-                        "应用正文",
-                        icon="check",
-                        on_click=apply_fullscreen_body,
-                    ).props("unelevated no-caps color=teal-8")
-
-        def open_body_editor() -> None:
-            fullscreen_text_in.value = str(text_in.value or "")
-            fullscreen_text_in.update()
-            body_editor_dialog.open()
-
-        expand_body_btn.on_click(open_body_editor)
-        text_in.on("dblclick", open_body_editor)
-        references_in = (
-            ui.textarea("参考文章链接（每行一个，第一篇为主要参考）")
-            .classes("w-full")
-            .props("rows=6 outlined")
-        )
-        with ui.expansion(
-            "高级设置：事实保留与改写强度",
-            icon="tune",
-            value=False,
-        ).classes("w-full"):
-            facts_in = (
-                ui.textarea("必须保留的事实或补充资料（可选）")
-                .classes("w-full")
-                .props("rows=4 outlined")
-            )
-            intensity_in = (
-                ui.select(
-                    options={
-                        "light": "轻度改写：尽量保留原结构",
-                        "standard": "标准改写：优化结构与表达",
-                        "strong": "深度改写：重构结构但不改变事实",
-                    },
-                    value="standard",
-                    label="改写强度",
-                )
-                .classes("w-full")
-                .props("outlined stack-label")
-            )
-
-        def sync_source_mode() -> None:
-            mode = str(source_mode_in.value or "link")
-            source_mode_hint.set_text(
-                source_mode_hints.get(mode, source_mode_hints["link"])
-            )
-            url_in.set_visibility(mode == "link")
-            text_in.set_visibility(mode == "text")
-            text_input_tools.set_visibility(mode == "text")
-            references_in.set_visibility(mode == "references")
-            facts_in.set_visibility(mode in {"link", "text", "references"})
-
-        source_mode_in.on_value_change(lambda _: sync_source_mode())
-        sync_source_mode()
-
-        async def consume_pending_rewrite() -> None:
-            pending = state.pending_rewrite
-            if not pending:
-                return
-            if state.busy:
-                if not pending.get("_waiting_notified"):
-                    pending["_waiting_notified"] = True
+                manual_in.value = title
+                source.value = "manual"
+                set_topic(title, str(pending.get("source") or "topic-center"))
+                if url:
+                    source_mode_in.value = "link"
+                    sync_source_mode()
+                    await fill_article_url(url, title)
+                else:
+                    source_mode_in.value = "topic"
+                    sync_source_mode()
+                if not auto_start:
+                    ui.notify("已载入选题库内容", type="positive")
+                    return
+                available_accounts = set(account_options)
+                selected_accounts = [
+                    item for item in requested_accounts if item in available_accounts
+                ]
+                if not selected_accounts:
                     ui.notify(
-                        "当前批次仍在生成，本次内容已保留，完成后会自动载入",
+                        "未找到可用的目标公众号，请手动选择后再生成",
                         type="warning",
                     )
-                return
-            state.pending_rewrite = None
-            title = str(pending.get("title") or "").strip()
-            url = str(pending.get("url") or "").strip()
-            auto_start = bool(pending.get("auto_start"))
-            requested_accounts = [
-                str(item) for item in pending.get("account_ids") or [] if str(item)
-            ]
-            pending_rewrite_origin.clear()
-            pending_rewrite_origin.update(
-                {
-                    "followed_article_id": str(
-                        pending.get("followed_article_id") or ""
-                    ),
-                    "topic_item_id": str(pending.get("topic_item_id") or ""),
-                }
-            )
-            manual_in.value = title
-            source.value = "manual"
-            set_topic(title, str(pending.get("source") or "topic-center"))
-            if url:
-                source_mode_in.value = "link"
-                sync_source_mode()
-                await fill_article_url(url, title)
-            else:
-                source.value = "manual"
-                manual_in.value = title
-                source_mode_in.value = "topic"
-                sync_source_mode()
-            if not auto_start:
-                ui.notify("已载入选题库内容", type="positive")
-                return
-            available_accounts = set(account_options)
-            selected_accounts = [
-                item for item in requested_accounts if item in available_accounts
-            ]
-            if not selected_accounts:
-                ui.notify(
-                    "未找到可用的目标公众号，请在工作台手动选择后再生成",
-                    type="warning",
-                )
-                return
-            target_accounts.set_value(selected_accounts)
-            ui.notify("链接已填入，正在开始生成文章", type="positive")
-            await asyncio.sleep(0)
-            await start_rewrite()
+                    return
+                target_accounts.set_value(selected_accounts)
+                ui.notify("链接已填入，正在开始生成文章", type="positive")
+                await asyncio.sleep(0)
+                await start_rewrite()
 
-        client_timer(0.5, consume_pending_rewrite)
+            client_timer(0.5, consume_pending_rewrite)
 
-    with ui.element("div").classes("card action-card"):
-        ui.html(step_title_html(2, "选择目标公众号"), sanitize=False)
+    with ui.element("section").classes(
+        "ops-panel action-card ops-create-account-section"
+    ):
         account_options = state.account_options()
         remembered_accounts = state.remembered_account_ids()
+        account_items = list(account_options.items())
+        with ui.row().classes("ops-step-line ops-account-step-line"):
+            ui.label("2").classes("ops-step-number")
+            ui.label("选择目标公众号")
         target_accounts = (
             ui.select(
                 options=account_options,
@@ -1329,13 +1419,86 @@ def _build_wizard(
                 label="选择目标公众号（可多选）",
                 multiple=True,
             )
-            .classes("w-full q-mb-sm")
+            .classes("w-full ops-create-account-select")
             .props("outlined stack-label use-chips clearable")
         )
         state.account_selects.append((target_accounts, True))
         ui.label(
             "系统会自动套用每个公众号已保存的模型、提示词、评审、排版和图片方案。"
         ).classes("muted q-mb-sm")
+        try:
+            account_records = {
+                str(item["id"]): dict(item)
+                for item in public_accounts(state.db)
+            }
+        except AttributeError:
+            # Lightweight isolated UI tests only expose account_options().
+            account_records = {}
+        selected_capability_host = ui.column().classes(
+            "ops-create-account-list w-full"
+        )
+
+        def toggle_target_account(account_id: str) -> None:
+            selected = [
+                str(item) for item in list(target_accounts.value or [])
+            ]
+            if account_id in selected:
+                selected.remove(account_id)
+            else:
+                selected.append(account_id)
+            target_accounts.set_value(selected)
+
+        def render_selected_capabilities() -> None:
+            selected_capability_host.clear()
+            with selected_capability_host:
+                selected_ids = {
+                    str(item) for item in list(target_accounts.value or [])
+                }
+                for account_id, account_label in account_items:
+                    account_id = str(account_id)
+                    record = account_records.get(str(account_id), {})
+                    is_selected = account_id in selected_ids
+                    with (
+                        ui.element("button")
+                        .classes("ops-create-account-choice")
+                        .props(
+                            "type=button "
+                            f'aria-pressed={str(is_selected).lower()}'
+                        )
+                        .on(
+                            "click",
+                            lambda _event=None, value=account_id: (
+                                toggle_target_account(value)
+                            ),
+                        )
+                    ):
+                        with ui.element("span").classes(
+                            "ops-create-account-icon"
+                        ):
+                            ui.icon("campaign", size="17px").classes(
+                                "ops-semantic-icon"
+                            )
+                        with ui.column().classes("ops-flex-copy gap-0"):
+                            ui.label(
+                                str(
+                                    record.get("name")
+                                    or account_label
+                                    or "公众号"
+                                )
+                            ).classes("ops-create-account-name")
+                            ui.label(
+                                str(record.get("model_name") or "暂未绑定模型")
+                            ).classes("ops-create-account-model")
+                        if bool(record.get("enabled")) and bool(
+                            record.get("has_model")
+                        ):
+                            ui.label("可生成并写草稿").classes(
+                                "ops-create-account-readiness"
+                            )
+                        else:
+                            ui.label("仅生成").classes(
+                                "ops-create-account-readiness ops-create-account-readiness-warning"
+                            )
 
         def source_is_ready() -> bool:
             mode = str(source_mode_in.value or "link")
@@ -1368,6 +1531,9 @@ def _build_wizard(
             state.remember_account_ids(
                 [str(item) for item in list(target_accounts.value or [])]
             )
+            render_selected_capabilities()
+            selected_count = len(list(target_accounts.value or []))
+            status_label.set_text(f"将生成 {selected_count} 篇文章")
             sync_workflow_before_generation()
 
         target_accounts.on_value_change(on_target_accounts_change)
@@ -1380,10 +1546,15 @@ def _build_wizard(
             references_in,
         ):
             element.on_value_change(lambda _event: sync_workflow_before_generation())
+        render_selected_capabilities()
         sync_workflow_before_generation()
-        with ui.row().classes("items-center justify-between w-full q-mb-sm"):
-            status_label = ui.label("就绪").classes("status-pill")
-            elapsed_label = ui.label("").classes("progress-elapsed")
+        with ui.row().classes("ops-create-status-row"):
+            status_label = ui.label(
+                f"将生成 {len(list(target_accounts.value or []))} 篇文章"
+            ).classes("ops-create-submit-title")
+            elapsed_label = ui.label(
+                "提交后可继续处理选题和审核"
+            ).classes("progress-elapsed")
         with ui.element("div").classes("rewrite-progress w-full") as progress_panel:
             with ui.row().classes(
                 "items-center justify-between w-full progress-heading"
@@ -1409,16 +1580,20 @@ def _build_wizard(
                 'input-style="font-family:Consolas,monospace;font-size:12px"'
             )
         )
-        with ui.row().classes("items-center"):
-            start_btn = ui.button("开始生成文章").props(
-                "unelevated color=teal-9 no-caps"
+        log_area.set_visibility(False)
+        with ui.row().classes("ops-create-action-row"):
+            start_btn = ui.button(
+                "后台开始生成",
+                icon="play_arrow",
+            ).props(
+                "unelevated color=primary no-caps"
             )
             stop_btn = ui.button("停止生成").props(
                 "unelevated color=red-7 no-caps icon=stop_circle"
             )
             stop_btn.set_visibility(False)
-            background_btn = ui.button("进入后台处理").props(
-                "outline color=teal-9 no-caps icon=move_to_inbox"
+            background_btn = ui.button("查看后台任务").props(
+                "outline color=primary no-caps icon=monitor_heart"
             )
             background_btn.set_visibility(False)
 
@@ -1430,6 +1605,7 @@ def _build_wizard(
             stop_btn.set_visibility(running)
             background_btn.set_visibility(running)
             if running:
+                log_area.set_visibility(True)
                 stop_btn.enable()
                 if active_batch_id:
                     background_btn.enable()
@@ -1526,7 +1702,7 @@ def _build_wizard(
 
             with (
                 ui.dialog() as dialog,
-                ui.card().classes("w-full").style("max-width:760px"),
+                ui.card().classes("w-full ops-dialog-md"),
             ):
                 def request_repair(account_id: str, check_key: str) -> None:
                     repair_target.update(
@@ -1562,7 +1738,7 @@ def _build_wizard(
                                     "text-positive"
                                     if check_ok
                                     else "text-negative"
-                                ).style("min-width:0;flex:1")
+                                ).classes("ops-flex-copy")
                                 if not check_ok:
                                     _, repair_label = _preflight_repair_action(
                                         check_key
@@ -1625,8 +1801,8 @@ def _build_wizard(
                 if line.strip()
             ]
             if source_mode_value == "topic" and not topic:
-                ui.notify("话题原创模式请填写文章主题", type="warning")
-                return
+                topic = "由 AI 自动策划选题"
+                set_topic(topic, "manual")
             if source_mode_value == "link" and not url:
                 ui.notify("请填写公众号文章链接", type="warning")
                 return
@@ -2036,6 +2212,144 @@ def _build_wizard(
         start_btn.on_click(start_rewrite)
         background_btn.on_click(open_background_generation)
 
+    _render_creation_priority_and_recent(
+        state,
+        tabs=tabs,
+        tab_jobs=tab_jobs,
+        on_open_tasks=open_task_center,
+    )
+
+
+def _render_creation_priority_and_recent(
+    state: AppState,
+    *,
+    tabs: Any,
+    tab_jobs: Any,
+    on_open_tasks: Callable[[str, bool], Any],
+) -> None:
+    """Render the approved right-side priorities and three recent tasks."""
+
+    service = BatchService(
+        load_config(),
+        owner_user_id=str(getattr(state, "current_user_id", "") or ""),
+        recover_stale_work=False,
+    )
+    try:
+        batches = list(service.list_batches(limit=20))
+        inbox_counts = dict(
+            service.list_review_inbox(bucket="review", limit=1).get("counts")
+            or {}
+        )
+    except Exception:  # noqa: BLE001
+        batches = []
+        inbox_counts = {}
+
+    def go_tasks(status: str = "") -> None:
+        on_open_tasks(status, False)
+        tabs.set_value(tab_jobs)
+
+    pending_review = int(inbox_counts.get("review") or 0)
+    ready_for_draft = int(inbox_counts.get("ready_for_draft") or 0)
+    failed = int(inbox_counts.get("write_failed") or 0) + int(
+        inbox_counts.get("generation_failed") or 0
+    )
+
+    with ui.element("aside").classes("ops-panel ops-create-priority-panel"):
+        with ui.element("div").classes("ops-panel-heading"):
+            with ui.column().classes("gap-0"):
+                ui.label("今天先处理这些").classes("ops-panel-title")
+                ui.label("按运营优先级排序").classes("ops-panel-subtitle")
+            ui.badge(f"{pending_review + ready_for_draft + failed} 项").classes(
+                "ops-badge ops-badge-warm"
+            )
+        with ui.element("div").classes("ops-panel-body ops-priority-body"):
+            for number, title, detail, action, status in (
+                (
+                    "01",
+                    "审核待确认文章",
+                    f"当前有 {pending_review} 篇等待人工审核",
+                    "继续",
+                    "ready_for_review",
+                ),
+                (
+                    "02",
+                    "确认草稿写入",
+                    f"{ready_for_draft} 篇文章已可进入草稿",
+                    "查看",
+                    "ready_for_draft",
+                ),
+                (
+                    "03",
+                    "恢复失败任务",
+                    f"{failed} 项可从失败阶段恢复",
+                    "修复",
+                    "failed",
+                ),
+            ):
+                with ui.element("div").classes("ops-priority-row"):
+                    ui.label(number).classes("ops-priority-number")
+                    with ui.column().classes("ops-flex-copy gap-0"):
+                        ui.label(title).classes("ops-priority-title")
+                        ui.label(detail).classes("ops-priority-detail")
+                    ui.button(
+                        action,
+                        on_click=lambda _=None, value=status: go_tasks(value),
+                    ).props("flat dense no-caps color=primary")
+            with ui.element("div").classes("ops-tip"):
+                ui.icon("lightbulb", size="17px").classes("ops-semantic-icon")
+                ui.label(
+                    "先完成有阻断项的审核，再统一写入草稿，能减少来回切换。"
+                )
+
+    with ui.element("section").classes("ops-panel ops-recent-panel"):
+        with ui.element("div").classes("ops-panel-heading"):
+            with ui.column().classes("gap-0"):
+                ui.label("最近任务").classes("ops-panel-title")
+                ui.label("继续处理今天正在流转的内容").classes(
+                    "ops-panel-subtitle"
+                )
+            ui.button("查看全部", on_click=go_tasks).props(
+                "flat dense no-caps color=primary"
+            )
+        with ui.element("div").classes("ops-panel-body ops-recent-grid"):
+            recent_items: list[tuple[str, str, str, str]] = []
+            for batch in batches:
+                jobs = list(batch.get("jobs") or [])
+                title = str(
+                    next(
+                        (
+                            job.get("selected_title")
+                            for job in jobs
+                            if job.get("selected_title")
+                        ),
+                        batch.get("topic") or "未命名内容任务",
+                    )
+                )
+                progress = dict(batch.get("progress") or {})
+                status = str(batch.get("status") or "")
+                if int(progress.get("failed") or 0):
+                    icon, tone, detail = "broken_image", "orange", "任务失败 · 可原地恢复"
+                elif int(progress.get("ready_for_draft") or 0):
+                    icon, tone, detail = "task_alt", "green", "已确认 · 等待写入草稿"
+                elif status in {"pending", "processing", "injecting"}:
+                    icon, tone, detail = "sync", "blue", "后台运行中 · 可查看进度"
+                else:
+                    icon, tone, detail = "description", "purple", "等待下一步处理"
+                recent_items.append((title, detail, icon, tone))
+                if len(recent_items) == 3:
+                    break
+            if not recent_items:
+                recent_items.append(("暂无最近任务", "创建任务后会显示在这里", "description", "blue"))
+            for title, detail, icon, tone in recent_items:
+                with ui.element("article").classes(
+                    f"ops-recent-item ops-recent-{tone}"
+                ):
+                    with ui.element("span").classes("ops-recent-icon"):
+                        ui.icon(icon, size="18px").classes("ops-semantic-icon")
+                    with ui.column().classes("ops-flex-copy gap-0"):
+                        ui.label(title).classes("ops-recent-title")
+                        ui.label(detail).classes("ops-recent-detail")
+
 
 def _build_accounts_panel(
     state: AppState | None = None,
@@ -2044,21 +2358,158 @@ def _build_accounts_panel(
     initial_action: str = "",
 ) -> Callable[[], None]:
     state = state or globals().get("state") or AppState()
-    current_config = state.reload_config()
-    host = ui.column().classes("w-full")
+    # The page state is already bound to the authenticated user. Recreating a
+    # Database here reruns schema/bootstrap work in the navigation callback and
+    # was the largest avoidable part of the account-page delay.
+    current_config = getattr(state, "config", None)
+    if current_config is None:
+        current_config = state.reload_config()
+    host = ui.column().classes("w-full ops-account-center")
     review_service = BatchService(
         load_config(),
         owner_user_id=str(getattr(state, "current_user_id", "") or ""),
         recover_stale_work=False,
     )
     creation_plan_service = CreationPlanService(state.db, current_config)
+    remembered_config_account_id = ""
+    get_user_setting = getattr(state.db, "get_user_setting", None)
+    if callable(get_user_setting):
+        remembered_config_account_id = str(
+            get_user_setting("ui.last_config_account_id") or ""
+        ).strip()
+    if not remembered_config_account_id:
+        remembered_account_ids = getattr(state, "remembered_account_ids", None)
+        if callable(remembered_account_ids):
+            remembered_config_account_id = next(
+                iter(remembered_account_ids()),
+                "",
+            )
+    selected_account_state = {
+        "id": str(initial_account_id or remembered_config_account_id or "")
+    }
+
+    def _account_version_key(account_id: str) -> str:
+        return f"ui.account_config_versions.{account_id}"
+
+    def _load_account_versions(account_id: str) -> list[dict[str, Any]]:
+        try:
+            raw = state.db.get_setting(_account_version_key(account_id)) or "[]"
+            rows = json.loads(raw)
+        except (AttributeError, json.JSONDecodeError, TypeError):
+            return []
+        return [dict(item) for item in rows if isinstance(item, dict)]
+
+    def save_account_version(account_id: str, label: str = "手动保存") -> None:
+        record = state.db.get_official_account(account_id)
+        if not record:
+            raise ValueError("公众号不存在")
+        snapshot = {
+            key: record.get(key)
+            for key in (
+                "id",
+                "owner_user_id",
+                "name",
+                "app_id",
+                "app_secret_encrypted",
+                "model_id",
+                "layout_json",
+                "review_priority",
+                "enabled",
+                "created_at",
+            )
+        }
+        history = _load_account_versions(account_id)
+        history.insert(
+            0,
+            {
+                "version_id": str(time.time_ns()),
+                "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "label": str(label or "配置版本"),
+                "snapshot": snapshot,
+            },
+        )
+        state.db.set_setting(
+            _account_version_key(account_id),
+            json.dumps(history[:20], ensure_ascii=False),
+        )
+
+    def open_account_versions(account_id: str) -> None:
+        account = state.db.get_official_account(account_id)
+        if not account:
+            ui.notify("公众号不存在", type="negative")
+            return
+        with ui.dialog() as dialog, ui.card().classes(
+            "w-full ops-dialog-md ops-dialog-scroll"
+        ):
+            with ui.row().classes("w-full items-center justify-between"):
+                with ui.column().classes("gap-0 ops-flex-copy"):
+                    ui.label(f"配置版本 · {account['name']}").classes(
+                        "text-h6 text-weight-bold"
+                    )
+                    ui.label(
+                        "保存当前结构化配置；恢复版本不会要求编辑 JSON。"
+                    ).classes("muted")
+                ui.button(icon="close", on_click=dialog.close).props(
+                    "flat round dense aria-label=关闭"
+                )
+
+            versions_host = ui.column().classes("w-full gap-2")
+
+            def render_versions() -> None:
+                versions_host.clear()
+                versions = _load_account_versions(account_id)
+                with versions_host:
+                    if not versions:
+                        ui.label("还没有保存过配置版本").classes("muted")
+                        return
+                    for version in versions:
+                        snapshot = dict(version.get("snapshot") or {})
+                        with ui.element("div").classes(
+                            "ops-config-version-row"
+                        ):
+                            with ui.column().classes("gap-0 ops-flex-copy"):
+                                ui.label(str(version.get("label") or "配置版本")).classes(
+                                    "text-weight-medium"
+                                )
+                                ui.label(
+                                    f"{version.get('saved_at') or ''} · "
+                                    f"模型 {snapshot.get('model_id') or '未绑定'}"
+                                ).classes("muted text-caption")
+
+                            def restore(
+                                _=None,
+                                *,
+                                payload: dict[str, Any] = snapshot,
+                            ) -> None:
+                                save_account_version(account_id, "恢复前自动备份")
+                                state.db.upsert_official_account(dict(payload))
+                                dialog.close()
+                                render_accounts()
+                                state.refresh_account_selects()
+                                ui.notify("公众号配置版本已恢复", type="positive")
+
+                            ui.button("恢复此版本", on_click=restore).props(
+                                "outline dense color=primary no-caps icon=history"
+                            )
+
+            def save_current() -> None:
+                save_account_version(account_id)
+                render_versions()
+                ui.notify("当前公众号配置版本已保存", type="positive")
+
+            render_versions()
+            with ui.row().classes("w-full justify-end"):
+                ui.button("保存当前版本", on_click=save_current).props(
+                    "unelevated color=primary no-caps icon=save"
+                )
+        dialog.open()
 
     def open_editor(account_id: str | None = None) -> None:
         record = state.db.get_official_account(account_id) if account_id else None
         model_options = state.model_options(include_default=False)
         with (
             ui.dialog() as dialog,
-            ui.card().classes("w-full").style("max-width:680px"),
+            ui.card().classes("w-full ops-dialog-md"),
         ):
             ui.label("编辑公众号" if record else "添加公众号").classes(
                 "text-h6 text-weight-bold"
@@ -2124,6 +2575,8 @@ def _build_accounts_panel(
 
             async def submit() -> None:
                 try:
+                    if account_id:
+                        save_account_version(account_id, "编辑前自动备份")
                     saved_account_id = save_account(
                         state.db,
                         account_id=account_id,
@@ -2175,11 +2628,16 @@ def _build_accounts_panel(
 
         with (
             ui.dialog() as dialog,
-            ui.card()
-            .classes("w-full")
-            .style("max-width:960px;max-height:92vh;overflow-y:auto"),
+            ui.card().classes("w-full ops-dialog-xl ops-dialog-scroll"),
         ):
-            ui.label(f"排版管理 · {record['name']}").classes("text-h6 text-weight-bold")
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label(f"排版管理 · {record['name']}").classes(
+                    "text-h6 text-weight-bold"
+                )
+                import_layout_button = ui.button(
+                    "从微信文章获取排版",
+                    icon="travel_explore",
+                ).props("outline color=primary no-caps")
             ui.label(
                 "按正文元素逐项定义样式。保存后只影响这个公众号，新生成的文章会自动套用。"
             ).classes("muted")
@@ -2243,10 +2701,8 @@ def _build_accounts_panel(
                                 "无色", value=is_transparent
                             ).props("dense")
                     with ui.row().classes("items-center gap-2 q-pl-xs"):
-                        current_swatch = ui.element("span").style(
-                            "display:inline-block;width:24px;height:24px;"
-                            "border-radius:6px;border:1px solid #cbd5d1;"
-                            f"background-color:{picker_value}"
+                        current_swatch = ui.element("span").classes(
+                            "ops-color-swatch"
                         )
                         current_label = ui.label().classes(
                             "text-caption text-weight-medium"
@@ -2256,16 +2712,14 @@ def _build_accounts_panel(
                     transparent = transparent_switch is not None and bool(
                         transparent_switch.value
                     )
+                    current_swatch.classes(
+                        remove="ops-color-swatch-transparent"
+                    )
                     if transparent:
-                        current_swatch.style(
-                            "background-color:#ffffff;border-style:dashed"
-                        )
+                        current_swatch.classes(add="ops-color-swatch-transparent")
                         current_label.text = "当前：无色（透明）"
                     else:
                         selected = str(picker.value or "#000000")
-                        current_swatch.style(
-                            f"background-color:{selected};border-style:solid"
-                        )
                         current_label.text = f"当前：{selected.upper()}"
 
                 picker.on_value_change(update_current_color)
@@ -2388,6 +2842,298 @@ def _build_accounts_panel(
                         value[section][key] = element.value
                 return validate_layout(value)
 
+            def open_wechat_layout_import() -> None:
+                result_state: dict[str, Any] = {"value": None, "before": None}
+                with (
+                    ui.dialog() as import_dialog,
+                    ui.card().classes(
+                        "w-full ops-dialog-xl ops-dialog-scroll "
+                        "wechat-layout-import-dialog"
+                    ),
+                ):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        with ui.column().classes("gap-0 ops-flex-copy"):
+                            ui.label("从微信公众号文章获取排版").classes(
+                                "text-h6 text-weight-bold"
+                            )
+                            ui.label(
+                                "完整预览原文 inline style，并提取系统可复用的正文、标题、引用和列表规则。"
+                            ).classes("muted")
+                        ui.button(
+                            icon="close",
+                            on_click=import_dialog.close,
+                        ).props("flat round dense aria-label=关闭")
+
+                    source_url = ui.input(
+                        "微信公众号文章链接",
+                        placeholder="https://mp.weixin.qq.com/s/...",
+                    ).classes("w-full").props(
+                        "outlined clearable autocomplete=off"
+                    )
+                    with ui.element("div").classes("ops-inline-status"):
+                        ui.icon("verified_user", size="17px").classes(
+                            "ops-semantic-icon"
+                        )
+                        ui.label(
+                            "只读取公开文章的排版，不复制原文内容；应用前会自动备份当前排版。"
+                        )
+
+                    result_host = ui.column().classes(
+                        "w-full wechat-layout-import-result"
+                    )
+                    with ui.row().classes("w-full justify-between items-center"):
+                        analyze_button = ui.button(
+                            "解析文章排版",
+                            icon="pageview",
+                        ).props("outline color=primary no-caps")
+                        with ui.row().classes("items-center gap-2"):
+                            ui.button(
+                                "取消",
+                                on_click=import_dialog.close,
+                            ).props("flat no-caps")
+                            apply_button = ui.button(
+                                "应用到当前公众号",
+                                icon="check",
+                            ).props("unelevated color=primary no-caps")
+                            apply_button.disable()
+
+                    def layout_change_rows(
+                        before: dict[str, Any], after: dict[str, Any]
+                    ) -> list[tuple[str, str, str]]:
+                        labels = {
+                            "body.font_size": "正文字号",
+                            "body.color": "正文颜色",
+                            "body.line_height": "正文行高",
+                            "body.spacing_after": "段后间距",
+                            "body.first_line_indent": "首行缩进",
+                            "body.alignment": "正文对齐",
+                            "body.horizontal_padding": "正文左右留白",
+                            "title.font_size": "一级标题字号",
+                            "title.color": "一级标题颜色",
+                            "title.line_height": "一级标题行高",
+                            "title.spacing_before": "一级标题前间距",
+                            "title.spacing_after": "一级标题后间距",
+                            "title.alignment": "一级标题对齐",
+                            "title.bold": "一级标题加粗",
+                            "argument.font_size": "论点字号",
+                            "argument.color": "论点颜色",
+                            "argument.line_height": "论点行高",
+                            "argument.spacing_before": "论点前间距",
+                            "argument.spacing_after": "论点后间距",
+                            "argument.alignment": "论点对齐",
+                            "argument.bold": "论点加粗",
+                            "argument.background": "论点背景",
+                            "argument.border_color": "论点强调线",
+                            "quote.font_size": "引用字号",
+                            "quote.color": "引用颜色",
+                            "quote.line_height": "引用行高",
+                            "quote.spacing_before": "引用前间距",
+                            "quote.spacing_after": "引用后间距",
+                            "quote.background": "引用背景",
+                            "quote.border_color": "引用强调线",
+                            "list.font_size": "列表字号",
+                            "list.color": "列表颜色",
+                            "list.marker_color": "列表标记颜色",
+                            "list.line_height": "列表行高",
+                            "list.spacing_after": "列表项间距",
+                        }
+
+                        def display_value(value: Any) -> str:
+                            if isinstance(value, bool):
+                                return "是" if value else "否"
+                            return str(value or "")
+
+                        rows: list[tuple[str, str, str]] = []
+                        for path, label in labels.items():
+                            section, key = path.split(".", 1)
+                            old_value = display_value(before[section].get(key))
+                            new_value = display_value(after[section].get(key))
+                            if old_value != new_value:
+                                rows.append((label, old_value, new_value))
+                        return rows
+
+                    def render_import_result(result: Any, before: dict[str, Any]) -> None:
+                        result_host.clear()
+                        changes = layout_change_rows(before, result.layout)
+                        diagnostics = dict(result.diagnostics)
+                        preview_config = dict(effective_config)
+                        preview_template = dict(preview_config.get("template") or {})
+                        preview_template.update(layout_to_template_config(result.layout))
+                        preview_config["template"] = preview_template
+                        sample = (
+                            "# 这是正文一级标题\n\n"
+                            "这是一段应用提取规则后的正文，用于对照字号、颜色、行高和段落间距。\n\n"
+                            "## 这是一个核心论点\n\n"
+                            "论点下方继续使用正文说明具体内容。\n\n"
+                            "> 这是一段引用或重点提示。\n\n"
+                            "- 第一条列表内容\n- 第二条列表内容"
+                        )
+                        suggested_html = TemplateRenderer(preview_config).render(
+                            body=sample,
+                            show_byline=False,
+                        )
+                        with result_host:
+                            with ui.element("section").classes(
+                                "ops-panel wechat-layout-import-summary"
+                            ):
+                                with ui.row().classes(
+                                    "w-full items-center justify-between"
+                                ):
+                                    with ui.column().classes("gap-0 ops-flex-copy"):
+                                        ui.label(result.title).classes(
+                                            "ops-panel-title"
+                                        )
+                                        ui.label(
+                                            f"来源：{result.account_name} · {result.source_url}"
+                                        ).classes("ops-panel-subtitle")
+                                    ui.badge(
+                                        f"提取 {len(changes)} 项变化"
+                                    ).classes("ops-badge ops-badge-green")
+                                ui.label(
+                                    " · ".join(
+                                        (
+                                            f"内联样式 {diagnostics.get('inline_style_count', 0)}",
+                                            f"section 深度 {diagnostics.get('section_depth', 0)}",
+                                            f"图片 {diagnostics.get('image_count', 0)}",
+                                            f"正文样本 {diagnostics.get('body_sample_count', 0)}",
+                                        )
+                                    )
+                                ).classes("ops-panel-subtitle")
+                            if changes:
+                                with ui.element("div").classes(
+                                    "wechat-layout-change-table"
+                                ):
+                                    for label, old_value, new_value in changes:
+                                        with ui.element("div").classes(
+                                            "wechat-layout-change-row"
+                                        ):
+                                            ui.label(label)
+                                            ui.label(old_value or "未设置").classes(
+                                                "muted"
+                                            )
+                                            ui.icon("arrow_forward", size="15px")
+                                            ui.label(new_value).classes(
+                                                "text-primary text-weight-medium"
+                                            )
+                            else:
+                                ui.label(
+                                    "提取结果与当前排版一致；仍可查看原文结构预览。"
+                                ).classes("muted")
+                            with ui.element("div").classes(
+                                "wechat-layout-import-previews"
+                            ):
+                                with ui.element("section").classes(
+                                    "ops-panel wechat-layout-preview-panel"
+                                ):
+                                    ui.label("原文排版还原").classes(
+                                        "ops-panel-title"
+                                    )
+                                    ui.label(
+                                        "保留 inline style、section 嵌套和懒加载图片。"
+                                    ).classes("ops-panel-subtitle")
+                                    ui.html(result.preview_html, sanitize=False)
+                                with ui.element("section").classes(
+                                    "ops-panel wechat-layout-preview-panel"
+                                ):
+                                    ui.label("应用后的生成效果").classes(
+                                        "ops-panel-title"
+                                    )
+                                    ui.label(
+                                        "只应用可复用样式，不复制原文章节和文字。"
+                                    ).classes("ops-panel-subtitle")
+                                    ui.html(
+                                        prepare_preview_html(suggested_html),
+                                        sanitize=False,
+                                    )
+
+                    async def analyze_layout() -> None:
+                        try:
+                            before = collect_layout()
+                        except ValueError as exc:
+                            ui.notify(
+                                sanitize_failure_text(exc),
+                                type="negative",
+                                timeout=8000,
+                            )
+                            return
+                        url = str(source_url.value or "").strip()
+                        if not url:
+                            ui.notify("请先粘贴微信公众号文章链接", type="warning")
+                            return
+                        analyze_button.props(add="loading")
+                        analyze_button.disable()
+                        apply_button.disable()
+                        result_host.clear()
+                        with result_host:
+                            with ui.row().classes(
+                                "w-full items-center justify-center q-py-lg gap-2"
+                            ):
+                                ui.spinner("dots", size="md", color="primary")
+                                ui.label("正在读取文章并分析排版…").classes("muted")
+                        try:
+                            backend_settings = effective_backend_settings(state.db)
+                            result = await run.io_bound(
+                                lambda: fetch_wechat_article_layout(
+                                    url,
+                                    current_layout=before,
+                                    cookie=str(
+                                        backend_settings.get("cookie") or ""
+                                    ),
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            result_host.clear()
+                            with result_host:
+                                with ui.element("section").classes(
+                                    "ops-panel wechat-layout-import-error"
+                                ):
+                                    ui.label("没有获取到可用排版").classes(
+                                        "ops-panel-title"
+                                    )
+                                    ui.label(sanitize_failure_text(exc)).classes(
+                                        "text-negative"
+                                    )
+                                    ui.label(
+                                        "请确认链接是公开的 mp.weixin.qq.com/s/... 文章；受限文章需要先恢复微信登录态。"
+                                    ).classes("muted")
+                            return
+                        finally:
+                            analyze_button.props(remove="loading")
+                            analyze_button.enable()
+                        result_state["value"] = result
+                        result_state["before"] = before
+                        render_import_result(result, before)
+                        apply_button.enable()
+
+                    def apply_imported_layout() -> None:
+                        result = result_state.get("value")
+                        if result is None:
+                            ui.notify("请先解析一篇微信文章", type="warning")
+                            return
+                        try:
+                            save_account_version(account_id, "导入微信排版前备份")
+                            save_account_layout(state.db, account_id, result.layout)
+                            import_dialog.close()
+                            dialog.close()
+                            render_accounts()
+                            ui.notify(
+                                f"已从《{result.title}》提取并应用排版，可通过版本恢复撤销",
+                                type="positive",
+                                timeout=8000,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            ui.notify(
+                                f"应用排版失败：{sanitize_failure_text(exc)}",
+                                type="negative",
+                                timeout=10000,
+                            )
+
+                    analyze_button.on_click(analyze_layout)
+                    apply_button.on_click(apply_imported_layout)
+                import_dialog.open()
+
+            import_layout_button.on_click(open_wechat_layout_import)
+
             def refresh_preview() -> None:
                 try:
                     current_layout = collect_layout()
@@ -2500,9 +3246,7 @@ def _build_accounts_panel(
 
         with (
             ui.dialog() as dialog,
-            ui.card()
-            .classes("w-full")
-            .style("max-width:760px;max-height:88vh;overflow-y:auto"),
+            ui.card().classes("w-full ops-dialog-md ops-dialog-scroll"),
         ):
             ui.label(f"模板管理 · {record['name']}").classes("text-h6 text-weight-bold")
             ui.label(
@@ -2670,7 +3414,7 @@ def _build_accounts_panel(
 
         with (
             ui.dialog() as dialog,
-            ui.card().classes("w-full").style("max-width:720px"),
+            ui.card().classes("w-full ops-dialog-md"),
         ):
             ui.label(f"正文与封面生图配置 · {record['name']}").classes(
                 "text-h6 text-weight-bold"
@@ -2970,26 +3714,45 @@ def _build_accounts_panel(
             render_accounts()
 
     async def test_account_connection(account_id: str, button: Any) -> None:
-        _set_button_loading(button, True, "正在验证公众号凭证和接口权限…")
+        _set_button_loading(button, True, "正在验证公众号凭证、草稿箱和素材接口…")
         try:
-
-            def verify() -> None:
-                cfg, _ = apply_account_selection(
-                    load_config(),
-                    state.db,
-                    account_id,
-                    allow_disabled=True,
+            results = await run.io_bound(
+                preflight_accounts,
+                state.db,
+                [account_id],
+                force_wechat_check=True,
+            )
+            result = dict(results[0] if results else {})
+            can_generate = bool(result.get("can_generate"))
+            can_write = bool(result.get("can_write"))
+            checks = [
+                dict(item)
+                for item in list(result.get("checks") or [])
+                if not bool(item.get("ok"))
+            ]
+            if can_generate and can_write:
+                ui.notify(
+                    "连接检测通过：可生成文章，也可写入公众号草稿箱",
+                    type="positive",
                 )
-                wechat_cfg = cfg.get("wechat") or {}
-                build_wechat_auth(
-                    cfg,
-                    state.db,
-                    app_id=str(wechat_cfg.get("app_id") or ""),
-                    app_secret=str(wechat_cfg.get("app_secret") or ""),
-                ).get_access_token(force_refresh=True)
-
-            await run.io_bound(verify)
-            ui.notify("公众号连接正常，凭证可以调用微信接口", type="positive")
+            elif can_generate:
+                detail = "；".join(
+                    str(item.get("detail") or item.get("label") or "")
+                    for item in checks
+                    if str(item.get("key") or "") in {"wechat", "draft", "material"}
+                )
+                ui.notify(
+                    "当前仅可生成，暂不可写草稿" + (f"：{detail}" if detail else ""),
+                    type="warning",
+                    timeout=12000,
+                )
+            else:
+                detail = "；".join(
+                    str(item.get("detail") or item.get("label") or "")
+                    for item in checks
+                )
+                raise RuntimeError(detail or "公众号或模型配置尚未就绪")
+            render_accounts()
         except Exception as exc:
             ui.notify(f"公众号连接失败：{exc}", type="negative", timeout=12000)
         finally:
@@ -2997,7 +3760,40 @@ def _build_accounts_panel(
 
     def render_accounts() -> None:
         host.clear()
-        accounts = public_accounts(state.db)
+        with host:
+            _render_account_config_workspace(
+                state,
+                host=host,
+                selected_account_state=selected_account_state,
+                creation_plan_service=creation_plan_service,
+                review_service=review_service,
+                on_refresh=render_accounts,
+                on_add=lambda: open_editor(),
+                on_edit=open_editor,
+                on_test=test_account_connection,
+                on_versions=open_account_versions,
+                on_save_version=save_account_version,
+                on_layout=open_layout_editor,
+                on_template=open_template_manager,
+                on_images=open_inline_image_manager,
+                on_prompt=set_account_prompt_template,
+                on_review=set_account_review_profile,
+                on_plan=set_account_creation_plan,
+                on_enabled=set_enabled,
+                on_delete=confirm_delete,
+            )
+        return
+        all_accounts = public_accounts(state.db)
+        account_ids = {str(item["id"]) for item in all_accounts}
+        if selected_account_state["id"] not in account_ids:
+            selected_account_state["id"] = (
+                str(all_accounts[0]["id"]) if all_accounts else ""
+            )
+        accounts = [
+            item
+            for item in all_accounts
+            if str(item["id"]) == selected_account_state["id"]
+        ]
         enabled_article_prompt_templates = public_prompt_templates(
             state.db,
             purpose=ARTICLE_PROMPT_PURPOSE,
@@ -3042,7 +3838,9 @@ def _build_accounts_panel(
             ):
                 latest_account_errors[account_id] = str(job["error"])
         with host:
-            with ui.element("div").classes("card w-full"):
+            with ui.element("div").classes(
+                "card w-full ops-account-center-header"
+            ):
                 with ui.row().classes("w-full items-center justify-between"):
                     with ui.column().classes("gap-0"):
                         ui.label("多公众号管理").classes("text-h6 text-weight-bold")
@@ -3057,12 +3855,80 @@ def _build_accounts_panel(
                 ).classes("text-positive q-mt-sm")
 
             if not accounts:
-                with ui.element("div").classes("card w-full"):
+                with ui.element("div").classes(
+                    "card w-full ops-account-config-card"
+                ):
                     ui.label("尚未添加公众号").classes("text-weight-medium")
                     ui.label("可以直接添加公众号，文章模型也可以稍后再绑定。").classes(
                         "muted"
                     )
                 return
+
+            with ui.element("aside").classes("ops-account-directory-panel"):
+                with ui.row().classes("ops-account-directory-heading"):
+                    ui.icon("campaign", size="18px").classes(
+                        "ops-semantic-icon"
+                    )
+                    ui.label(f"账号列表 · {len(all_accounts)}")
+                for account in all_accounts:
+                    account_id = str(account["id"])
+                    is_selected = account_id == selected_account_state["id"]
+                    get_connection_health = getattr(
+                        state.db, "get_wechat_connection_health", None
+                    )
+                    connection_health = (
+                        get_connection_health(account_id)
+                        if callable(get_connection_health)
+                        else None
+                    )
+                    connection_details = dict(
+                        (connection_health or {}).get("details") or {}
+                    )
+                    draft_health = dict(connection_details.get("draft") or {})
+                    can_write_draft = bool(
+                        str((connection_health or {}).get("status") or "")
+                        == "healthy"
+                        and draft_health.get("reachable")
+                    )
+
+                    def select_account(
+                        _=None,
+                        *,
+                        value: str = account_id,
+                    ) -> None:
+                        selected_account_state["id"] = value
+                        render_accounts()
+
+                    with ui.element("button").classes(
+                        "ops-account-directory-item"
+                        + (" is-selected" if is_selected else "")
+                    ).props(
+                        f'type=button aria-pressed={str(is_selected).lower()}'
+                    ).on("click", select_account):
+                        with ui.element("span").classes(
+                            "ops-account-directory-icon"
+                        ):
+                            ui.icon("campaign", size="19px").classes(
+                                "ops-semantic-icon"
+                            )
+                        with ui.column().classes("ops-account-directory-copy"):
+                            ui.label(str(account["name"]))
+                            ui.label(str(account.get("model_name") or "暂未绑定模型"))
+                        with ui.row().classes("ops-account-capabilities"):
+                            if not bool(account.get("enabled")):
+                                ui.badge("已停用").props("color=grey-6")
+                            elif bool(account.get("has_model")):
+                                ui.badge("可生成").props("color=positive")
+                                if can_write_draft:
+                                    ui.badge("可写草稿").props("color=primary")
+                                elif connection_health:
+                                    ui.badge("仅生成").props("color=warning")
+                                else:
+                                    ui.badge("草稿能力待检测").props(
+                                        "outline color=primary"
+                                    )
+                            else:
+                                ui.badge("需绑定模型").props("color=warning")
 
             for item in accounts:
                 account_id = str(item["id"])
@@ -3139,9 +4005,11 @@ def _build_accounts_panel(
                     "bound"
                 ) and not account_creation_default.get("in_sync", True):
                     creation_plan_summary += "（有单项调整）"
-                with ui.element("div").classes("card w-full"):
+                with ui.element("div").classes(
+                    "card w-full ops-account-config-card"
+                ):
                     with ui.row().classes("w-full items-center justify-between"):
-                        with ui.column().classes("gap-0").style("min-width:0;flex:1"):
+                        with ui.column().classes("gap-0 ops-flex-copy"):
                             with ui.row().classes("items-center gap-2"):
                                 ui.label(str(item["name"])).classes("text-weight-bold")
                                 if int(item.get("review_priority") or 0) > 0:
@@ -3169,8 +4037,15 @@ def _build_accounts_panel(
                                     "账号不可用：AppSecret 无效（微信错误 40125），请进入管理更新。"
                                 ).classes("text-negative text-caption")
                         with ui.row().classes("items-center gap-1"):
+                            ui.button(
+                                "配置版本",
+                                icon="history",
+                                on_click=lambda _=None, aid=account_id: (
+                                    open_account_versions(aid)
+                                ),
+                            ).props("flat dense color=primary no-caps")
                             manage_btn = ui.button(
-                                "管理",
+                                "收起配置",
                                 icon="settings",
                             ).props("outline dense color=teal-9 no-caps")
                             test_btn = ui.button(
@@ -3298,17 +4173,7 @@ def _build_accounts_panel(
                         ).props(
                             "outline dense color=indigo-7 no-caps icon=auto_awesome"
                         )
-                    management_visible = {"value": False}
-                    for element in (
-                        management_intro,
-                        creation_plan_select,
-                        individual_rules_label,
-                        prompt_grid,
-                        review_profile_select,
-                        presentation_label,
-                        management_actions,
-                    ):
-                        element.set_visibility(False)
+                    management_visible = {"value": True}
 
                     def toggle_management(
                         _=None,
@@ -3328,7 +4193,9 @@ def _build_accounts_panel(
                         runtime["value"] = not runtime["value"]
                         for control in controls:
                             control.set_visibility(runtime["value"])
-                        button.set_text("收起管理" if runtime["value"] else "管理")
+                        button.set_text(
+                            "收起配置" if runtime["value"] else "展开配置"
+                        )
 
                     manage_btn.on_click(toggle_management)
 
@@ -3348,6 +4215,620 @@ def _build_accounts_panel(
 
         client_timer(0.15, open_initial_configuration, once=True)
     return render_accounts
+
+
+def _render_account_config_workspace(
+    state: AppState,
+    *,
+    host: Any,
+    selected_account_state: dict[str, str],
+    creation_plan_service: CreationPlanService,
+    review_service: BatchService,
+    on_refresh: Callable[[], None],
+    on_add: Callable[[], None],
+    on_edit: Callable[[str], None],
+    on_test: Callable[[str, Any], Any],
+    on_versions: Callable[[str], None],
+    on_save_version: Callable[[str, str], None],
+    on_layout: Callable[[str], None],
+    on_template: Callable[[str], Any],
+    on_images: Callable[[str], None],
+    on_prompt: Callable[[str, str, str], None],
+    on_review: Callable[[str, str], None],
+    on_plan: Callable[[str, str], None],
+    on_enabled: Callable[[str, bool], None],
+    on_delete: Callable[[str, str], None],
+) -> None:
+    """Render the approved 260px directory and fixed account config center."""
+
+    all_accounts = [dict(item) for item in public_accounts(state.db)]
+    account_ids = {str(item["id"]) for item in all_accounts}
+    if selected_account_state["id"] not in account_ids:
+        selected_account_state["id"] = (
+            str(all_accounts[0]["id"]) if all_accounts else ""
+        )
+
+    ui.button(
+        "添加公众号",
+        icon="add",
+        on_click=on_add,
+    ).classes("ops-account-add-top").props(
+        "unelevated color=primary no-caps"
+    )
+
+    if not all_accounts:
+        with host, ui.element("section").classes("ops-panel ops-empty-account"):
+            ui.label("尚未添加公众号").classes("ops-panel-title")
+            ui.label("添加后即可配置模型、排版、评审和草稿写入规则。").classes(
+                "ops-panel-subtitle"
+            )
+            ui.button("添加公众号", icon="add", on_click=on_add).props(
+                "unelevated color=primary no-caps"
+            )
+        return
+
+    visible_accounts = all_accounts
+    selected = next(
+        item
+        for item in all_accounts
+        if str(item["id"]) == selected_account_state["id"]
+    )
+    account_id = str(selected["id"])
+
+    connection_health_getter = getattr(
+        state.db, "get_wechat_connection_health", None
+    )
+    connection_health = (
+        connection_health_getter(account_id)
+        if callable(connection_health_getter)
+        else None
+    )
+    connection_details = dict((connection_health or {}).get("details") or {})
+    draft_health = dict(connection_details.get("draft") or {})
+    connection_ok = str((connection_health or {}).get("status") or "") == "healthy"
+    can_write_draft = bool(connection_ok and draft_health.get("reachable"))
+    can_generate = bool(selected.get("enabled") and selected.get("has_model"))
+
+    try:
+        creation_default = creation_plan_service.get_account_default(account_id)
+    except Exception:  # noqa: BLE001
+        creation_default = {"bound": False, "plan_id": "", "plan": None}
+    creation_plans = creation_plan_service.list(
+        enabled_only=True,
+        include_builtin=True,
+    )
+    creation_plan_options = {
+        str(item["id"]): str(item["name"]) for item in creation_plans
+    }
+    selected_plan_id = str(creation_default.get("plan_id") or "")
+    if selected_plan_id and selected_plan_id not in creation_plan_options:
+        creation_plan_options[selected_plan_id] = str(
+            dict(creation_default.get("plan") or {}).get("name")
+            or "当前创作方案"
+        )
+
+    try:
+        defaults = json.loads(
+            state.db.get_user_setting(f"ui.account_defaults.{account_id}")
+            or "{}"
+        )
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        defaults = {}
+
+    model_options = state.model_options(include_default=False)
+    model_value = str(selected.get("model_id") or "")
+    if model_value and model_value not in model_options:
+        model_options[model_value] = str(selected.get("model_name") or "当前模型")
+
+    try:
+        review_default = review_service.get_account_editorial_review_default(
+            account_id
+        )
+    except Exception:  # noqa: BLE001
+        review_default = {}
+
+    account_layout = dict(selected.get("layout") or {})
+    article_prompt_settings = dict(account_layout.get("article_prompt") or {})
+    image_prompt_settings = dict(account_layout.get("inline_images") or {})
+    article_prompt_value = (
+        str(article_prompt_settings.get("prompt_template_id") or "")
+        if str(article_prompt_settings.get("prompt_mode") or "")
+        == PROMPT_MODE_TEMPLATE
+        else PROMPT_MODE_DEFAULT
+    )
+    image_prompt_value = (
+        str(image_prompt_settings.get("prompt_template_id") or "")
+        if str(image_prompt_settings.get("prompt_mode") or "")
+        == PROMPT_MODE_TEMPLATE
+        else PROMPT_MODE_DEFAULT
+    )
+    prompt_binding_values = {
+        ARTICLE_PROMPT_PURPOSE: article_prompt_value,
+        IMAGE_PROMPT_PURPOSE: image_prompt_value,
+    }
+
+    def select_account(value: str) -> None:
+        selected_account_state["id"] = value
+        set_user_setting = getattr(state.db, "set_user_setting", None)
+        if callable(set_user_setting):
+            set_user_setting("ui.last_config_account_id", value)
+        on_refresh()
+
+    async def open_template() -> None:
+        result = on_template(account_id)
+        if asyncio.iscoroutine(result):
+            await result
+
+    def open_rule_dialog(section: str) -> None:
+        with ui.dialog() as dialog, ui.card().classes(
+            (
+                "ops-dialog-xl ops-dialog-scroll"
+                if section == "prompts"
+                else "ops-dialog-md ops-dialog-scroll"
+            )
+        ):
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label(
+                    {
+                        "prompts": "提示词配置",
+                        "review": "AI 评审方案",
+                    }[section]
+                ).classes("ops-review-page-title")
+                ui.button(icon="close", on_click=dialog.close).props(
+                    "flat round dense aria-label=关闭"
+                )
+            if section == "prompts":
+                ui.label("当前公众号使用的提示词").classes("ops-panel-title")
+                ui.label(
+                    "先为当前公众号选择模板；下方可新增、编辑和删除自定义提示词模板。"
+                ).classes("ops-panel-subtitle")
+                binding_host = ui.column().classes("w-full ops-prompt-binding-host")
+
+                def render_prompt_binding() -> None:
+                    binding_host.clear()
+                    fresh_article_prompts = public_prompt_templates(
+                        state.db, purpose=ARTICLE_PROMPT_PURPOSE
+                    )
+                    fresh_image_prompts = public_prompt_templates(
+                        state.db, purpose=IMAGE_PROMPT_PURPOSE
+                    )
+                    fresh_article_value = str(
+                        prompt_binding_values[ARTICLE_PROMPT_PURPOSE]
+                        or PROMPT_MODE_DEFAULT
+                    )
+                    fresh_image_value = str(
+                        prompt_binding_values[IMAGE_PROMPT_PURPOSE]
+                        or PROMPT_MODE_DEFAULT
+                    )
+                    with binding_host:
+                        with ui.element("div").classes("ops-config-form"):
+                            with ui.element("div").classes("ops-config-field"):
+                                ui.label("文章提示词模板").classes(
+                                    "ops-config-field-label"
+                                )
+                                article_select = ui.select(
+                                    {
+                                        PROMPT_MODE_DEFAULT: "系统默认写作提示词",
+                                        **{
+                                            str(item["id"]): str(item["name"])
+                                            for item in fresh_article_prompts
+                                        },
+                                    },
+                                    value=fresh_article_value,
+                                ).classes("w-full").props(
+                                    "outlined dense options-dense hide-bottom-space"
+                                )
+                            with ui.element("div").classes("ops-config-field"):
+                                ui.label("图片提示词模板").classes(
+                                    "ops-config-field-label"
+                                )
+                                image_select = ui.select(
+                                    {
+                                        PROMPT_MODE_DEFAULT: "系统默认图片提示词",
+                                        **{
+                                            str(item["id"]): str(item["name"])
+                                            for item in fresh_image_prompts
+                                        },
+                                    },
+                                    value=fresh_image_value,
+                                ).classes("w-full").props(
+                                    "outlined dense options-dense hide-bottom-space"
+                                )
+
+                        def save_prompts() -> None:
+                            prompt_binding_values[ARTICLE_PROMPT_PURPOSE] = str(
+                                article_select.value or PROMPT_MODE_DEFAULT
+                            )
+                            prompt_binding_values[IMAGE_PROMPT_PURPOSE] = str(
+                                image_select.value or PROMPT_MODE_DEFAULT
+                            )
+                            on_prompt(
+                                account_id,
+                                ARTICLE_PROMPT_PURPOSE,
+                                prompt_binding_values[ARTICLE_PROMPT_PURPOSE],
+                            )
+                            on_prompt(
+                                account_id,
+                                IMAGE_PROMPT_PURPOSE,
+                                prompt_binding_values[IMAGE_PROMPT_PURPOSE],
+                            )
+
+                        with ui.row().classes("w-full justify-end"):
+                            ui.button(
+                                "保存当前公众号提示词",
+                                on_click=save_prompts,
+                            ).props("unelevated color=primary no-caps")
+
+                render_prompt_binding()
+                ui.separator()
+                ui.label("管理自定义提示词").classes("ops-panel-title")
+                build_prompt_templates_panel(
+                    state,
+                    on_templates_change=render_prompt_binding,
+                )
+            else:
+                review_options = enabled_profile_options(review_service)
+                review_select = ui.select(
+                    review_options,
+                    value=str(review_default.get("profile_id") or "") or None,
+                    label="默认 AI 评审方案",
+                ).classes("w-full").props("outlined stack-label")
+
+                def save_review_profile() -> None:
+                    on_review(account_id, str(review_select.value or ""))
+                    dialog.close()
+                    on_refresh()
+
+                ui.button("保存评审方案", on_click=save_review_profile).props(
+                    "unelevated color=primary no-caps"
+                )
+        dialog.open()
+
+    with host, ui.element("div").classes("ops-account-workspace"):
+        with ui.element("aside").classes("ops-panel ops-account-directory"):
+            with ui.element("div").classes("ops-panel-heading"):
+                with ui.column().classes("gap-0"):
+                    ui.label("账号列表").classes("ops-panel-title")
+                    ui.label(f"{len(all_accounts)} 个公众号").classes(
+                        "ops-panel-subtitle"
+                    )
+                ready_count = sum(
+                    1
+                    for item in all_accounts
+                    if bool(item.get("enabled") and item.get("has_model"))
+                )
+                ui.badge(f"{ready_count} 个就绪").classes(
+                    "ops-badge ops-badge-green"
+                )
+            with ui.element("div").classes("ops-account-directory-list"):
+                for item in visible_accounts:
+                    item_id = str(item["id"])
+                    is_selected = item_id == account_id
+                    item_name = str(item["name"])
+                    item_enabled = bool(item.get("enabled"))
+                    with ui.element("div").classes(
+                        "ops-account-directory-row"
+                    ):
+                        with ui.element("button").classes(
+                            "ops-account-directory-item"
+                        ).props(
+                            f'type=button aria-pressed={str(is_selected).lower()} '
+                            f'aria-label="选择公众号：{item_name}"'
+                        ).on(
+                            "click",
+                            lambda _=None, value=item_id: select_account(value),
+                        ):
+                            with ui.element("span").classes("ops-task-avatar"):
+                                ui.icon("apartment", size="19px").classes(
+                                    "ops-semantic-icon"
+                                )
+                            with ui.column().classes("ops-flex-copy gap-0"):
+                                ui.label(item_name).classes("ops-account-name")
+                                ui.label(
+                                    str(item.get("model_name") or "暂未绑定模型")
+                                ).classes("ops-panel-subtitle")
+                            with ui.row().classes("ops-account-directory-status"):
+                                if bool(
+                                    item.get("enabled") and item.get("has_model")
+                                ):
+                                    ui.badge("可生成").classes(
+                                        "ops-badge ops-badge-green"
+                                    )
+                                else:
+                                    ui.badge("待配置").classes(
+                                        "ops-badge ops-badge-warm"
+                                    )
+                                if item_id == account_id and can_write_draft:
+                                    ui.badge("可写草稿").classes(
+                                        "ops-badge ops-badge-green"
+                                    )
+                                elif item_id == account_id and can_generate:
+                                    ui.badge("仅生成").classes(
+                                        "ops-badge ops-badge-warm"
+                                    )
+                        with ui.button(icon="more_horiz").classes(
+                            "ops-account-directory-more"
+                        ).props(
+                            f"flat round dense aria-label={item_name}更多操作"
+                        ):
+                            with ui.menu():
+                                ui.menu_item(
+                                    "编辑基础信息",
+                                    on_click=lambda _=None, aid=item_id: on_edit(aid),
+                                )
+                                ui.menu_item(
+                                    "配置版本",
+                                    on_click=lambda _=None, aid=item_id: on_versions(
+                                        aid
+                                    ),
+                                )
+                                ui.menu_item(
+                                    "停用公众号" if item_enabled else "启用公众号",
+                                    on_click=lambda _=None, aid=item_id, enabled=item_enabled: (
+                                        on_enabled(aid, not enabled)
+                                    ),
+                                )
+                                ui.menu_item(
+                                    "删除公众号",
+                                    on_click=lambda _=None, aid=item_id, name=item_name: (
+                                        on_delete(aid, name)
+                                    ),
+                                )
+            with ui.element("div").classes("ops-account-directory-footer"):
+                ui.button("添加公众号", icon="add", on_click=on_add).classes(
+                    "w-full"
+                ).props("outline color=primary no-caps")
+
+        with ui.element("section").classes("ops-panel ops-account-config"):
+            with ui.element("div").classes("ops-panel-heading"):
+                with ui.column().classes("gap-0 ops-flex-copy"):
+                    ui.label(f'{selected["name"]} · 配置中心').classes(
+                        "ops-panel-title"
+                    )
+                    versions = []
+                    try:
+                        versions = json.loads(
+                            state.db.get_setting(
+                                f"ui.account_config_versions.{account_id}"
+                            )
+                            or "[]"
+                        )
+                    except (AttributeError, json.JSONDecodeError, TypeError):
+                        versions = []
+                    last_saved = (
+                        str(versions[0].get("saved_at") or "")
+                        if versions
+                        else "尚未保存版本"
+                    )
+                    ui.label(f"最后保存：{last_saved}").classes(
+                        "ops-panel-subtitle"
+                    )
+                with ui.row().classes("ops-config-header-actions"):
+                    connection_status = (
+                        "连接正常"
+                        if connection_ok
+                        else (
+                            "连接异常"
+                            if connection_health
+                            else "等待检测"
+                        )
+                    )
+                    ui.badge(
+                        connection_status
+                    ).classes(
+                        "ops-badge "
+                        + (
+                            "ops-badge-green"
+                            if connection_ok
+                            else (
+                                "ops-badge-danger"
+                                if connection_health
+                                else "ops-badge-warm"
+                            )
+                        )
+                    )
+                    test_btn = ui.button("检测连接").props(
+                        "outline dense color=primary no-caps"
+                    )
+                    test_btn.on_click(
+                        lambda _=None, btn=test_btn: on_test(account_id, btn)
+                    )
+
+            with ui.element("div").classes(
+                "ops-config-body ops-config-body-unified"
+            ):
+                content_config_section = ui.element("section").classes(
+                    "ops-config-section ops-config-section-wide"
+                )
+                with content_config_section:
+                    with ui.element("div").classes("ops-config-section-heading"):
+                        ui.label("创作与模型").classes("ops-panel-title")
+                        ui.badge("账号级默认值").classes("ops-badge")
+                    with ui.element("div").classes("ops-config-form"):
+                        with ui.element("div").classes("ops-config-field"):
+                            ui.label("内容定位").classes("ops-config-field-label")
+                            plan_select = ui.select(
+                                creation_plan_options,
+                                value=selected_plan_id or None,
+                                label="内容定位 / 创作方案",
+                            ).props(
+                                "outlined dense options-dense hide-bottom-space"
+                            )
+                        with ui.element("div").classes("ops-config-field"):
+                            ui.label("默认模型").classes("ops-config-field-label")
+                            model_select = ui.select(
+                                model_options,
+                                value=model_value or None,
+                                label="默认模型",
+                            ).props(
+                                "outlined dense options-dense hide-bottom-space"
+                            )
+                        with ui.element("div").classes("ops-config-field"):
+                            ui.label("默认改写强度").classes("ops-config-field-label")
+                            intensity_select = ui.select(
+                                {
+                                    "light": "轻度润色",
+                                    "standard": "标准改写",
+                                    "strong": "深度重构",
+                                },
+                                value=str(
+                                    defaults.get("rewrite_intensity") or "standard"
+                                ),
+                                label="默认改写强度",
+                            ).props(
+                                "outlined dense options-dense hide-bottom-space"
+                            )
+                        with ui.element("div").classes("ops-config-field"):
+                            ui.label("目标字数").classes("ops-config-field-label")
+                            word_count_input = ui.input(
+                                value=str(
+                                    defaults.get("target_words") or "1800–2200 字"
+                                ),
+                                label="目标字数",
+                            ).props("outlined dense hide-bottom-space")
+
+                    with ui.element("div").classes(
+                        "ops-config-entry-grid ops-config-entry-grid-single"
+                    ), ui.element("button").classes(
+                        "ops-config-entry"
+                    ).props("type=button").on(
+                        "click", lambda: open_rule_dialog("prompts")
+                    ):
+                        with ui.element("span").classes(
+                            "ops-config-entry-icon"
+                        ):
+                            ui.icon("edit", size="17px").classes(
+                                "ops-semantic-icon"
+                            )
+                        with ui.column().classes("ops-flex-copy gap-0"):
+                            ui.label("提示词配置").classes(
+                                "ops-config-entry-title"
+                            )
+                            ui.label("文章与图片提示词").classes(
+                                "ops-config-entry-detail"
+                            )
+
+                assets_config_section = ui.element("section").classes(
+                    "ops-config-section ops-config-section-wide"
+                )
+                with assets_config_section:
+                    with ui.element("div").classes("ops-config-section-heading"):
+                        ui.label("排版与图片").classes("ops-panel-title")
+                        ui.badge("3 项已配置").classes(
+                            "ops-badge ops-badge-green"
+                        )
+                    with ui.element("div").classes("ops-config-entry-grid"):
+                        entries = (
+                            ("排版模板", "公众号专属排版", "smartphone", lambda: on_layout(account_id)),
+                            ("正文配图", "图片间隔与生成规则", "auto_awesome", lambda: on_images(account_id)),
+                            ("封面规则", "素材与 AI 封面", "bookmark", lambda: on_images(account_id)),
+                        )
+                        for title, detail, icon, action in entries:
+                            with ui.element("button").classes(
+                                "ops-config-entry"
+                            ).props("type=button").on("click", action):
+                                with ui.element("span").classes(
+                                    "ops-config-entry-icon"
+                                ):
+                                    ui.icon(icon, size="17px").classes(
+                                        "ops-semantic-icon"
+                                    )
+                                with ui.column().classes("ops-flex-copy gap-0"):
+                                    ui.label(title).classes("ops-config-entry-title")
+                                    ui.label(detail).classes("ops-config-entry-detail")
+
+                review_config_section = ui.element("section").classes(
+                    "ops-config-section ops-config-section-wide"
+                )
+                with review_config_section:
+                    with ui.element("div").classes("ops-config-section-heading"):
+                        ui.label("AI 评审与写入").classes("ops-panel-title")
+                        ui.badge("2 项已配置").classes(
+                            "ops-badge ops-badge-green"
+                        )
+                    with ui.element("div").classes("ops-config-entry-grid"):
+                        entries = (
+                            (
+                                "AI 评审方案",
+                                str(review_default.get("profile_name") or "默认方案"),
+                                "assignment_turned_in",
+                                lambda: open_rule_dialog("review"),
+                            ),
+                            (
+                                "草稿写入规则",
+                                "人工确认后允许写入",
+                                "verified_user",
+                                open_template,
+                            ),
+                        )
+                        for title, detail, icon, action in entries:
+                            with ui.element("button").classes(
+                                "ops-config-entry"
+                            ).props("type=button").on("click", action):
+                                with ui.element("span").classes(
+                                    "ops-config-entry-icon"
+                                ):
+                                    ui.icon(icon, size="17px").classes(
+                                        "ops-semantic-icon"
+                                    )
+                                with ui.column().classes("ops-flex-copy gap-0"):
+                                    ui.label(title).classes(
+                                        "ops-config-entry-title"
+                                    )
+                                    ui.label(detail).classes(
+                                        "ops-config-entry-detail"
+                                    )
+
+            def save_current_configuration() -> None:
+                try:
+                    if str(model_select.value or "") != model_value:
+                        record = state.db.get_official_account(account_id) or {}
+                        save_account(
+                            state.db,
+                            account_id=account_id,
+                            name=str(record.get("name") or selected["name"]),
+                            app_id=str(record.get("app_id") or ""),
+                            app_secret=None,
+                            model_id=str(model_select.value or ""),
+                            enabled=bool(record.get("enabled", True)),
+                        )
+                    if str(plan_select.value or "") != selected_plan_id:
+                        on_plan(account_id, str(plan_select.value or ""))
+                    state.db.set_user_setting(
+                        f"ui.account_defaults.{account_id}",
+                        json.dumps(
+                            {
+                                "rewrite_intensity": str(
+                                    intensity_select.value or "standard"
+                                ),
+                                "target_words": str(
+                                    word_count_input.value or "1800–2200 字"
+                                ),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                    on_save_version(account_id, "手动保存")
+                    ui.notify("公众号配置已保存", type="positive")
+                    on_refresh()
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(
+                        f"保存配置失败：{sanitize_failure_text(exc)}",
+                        type="negative",
+                        timeout=10000,
+                    )
+
+            with ui.element("div").classes("ops-config-footer"):
+                ui.label("所有配置使用结构化表单保存，不需要编辑 JSON。")
+                with ui.row().classes("ops-config-footer-actions"):
+                    ui.button(
+                        "恢复上个版本",
+                        on_click=lambda: on_versions(account_id),
+                    ).props("outline dense color=primary no-caps")
+                    ui.button(
+                        "保存配置",
+                        on_click=save_current_configuration,
+                    ).props("unelevated dense color=primary no-caps")
 
 
 def _build_help_panel() -> None:

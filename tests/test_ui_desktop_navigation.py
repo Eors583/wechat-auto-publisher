@@ -77,18 +77,17 @@ def _tab_labels(function: Any) -> list[str]:
     return [str(node.args[0].value) for node in calls]
 
 
-def test_primary_navigation_is_reduced_to_four_clear_entries() -> None:
+def test_primary_navigation_exposes_the_five_confirmed_workbench_entries() -> None:
     labels = _tab_labels(desktop.create_desktop_app)
 
-    assert labels[:4] == ["工作台", "选题库", "任务中心", "设置"]
-    assert "公众号配置" not in labels
-    assert "数据概览" not in labels
+    assert labels[:5] == ["创作台", "选题雷达", "任务队列", "公众号", "文章审核"]
 
 
 def test_generation_can_move_to_the_background_task_center() -> None:
     source = inspect.getsource(desktop._build_wizard)  # noqa: SLF001
 
-    assert 'ui.button("进入后台处理")' in source
+    assert '"后台开始生成"' in source
+    assert '"查看后台任务"' in source
     assert "def open_background_generation()" in source
     assert "tabs.set_value(tab_jobs)" in source
     assert "state.task_center_refresh(active_batch_id)" in source

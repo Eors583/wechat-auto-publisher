@@ -34,14 +34,26 @@ def test_topic_center_merges_articles_into_followed_accounts() -> None:
     assert "关注文章" not in TOPIC_CENTER_TABS
 
 
+def test_topic_center_primary_sections_are_visible_tabs_not_an_overflow_menu() -> None:
+    source = inspect.getsource(build_topic_center)
+
+    assert '"workspace-tabs w-full ops-topic-secondary-tabs"' in source
+    assert "ops-topic-more-nav" not in source
+    assert "with ui.menu()" not in source
+
+
 def test_topic_center_mounts_each_inner_page_only_when_selected() -> None:
     source = inspect.getsource(build_topic_center)
     assert "mounted_inner_tabs" in source
     assert "scheduled_inner_tabs" in source
     assert "inner_tabs.on_value_change" in source
-    assert "lambda: mount_inner_tab(tab)" in source
-    assert "immediate=False" in source
-    assert 'ui.label("正在加载页面…")' in source
+    assert "scheduled_inner_tabs.add(tab_name)" in source
+    assert "mount_inner_tab(tab)" in source
+    schedule_source = source[
+        source.index("def schedule_inner_tab(tab: Any) -> None:") :
+        source.index("schedule_inner_tab(hot_tab)")
+    ]
+    assert "client_timer(" not in schedule_source
 
 
 def test_hot_topic_cards_reuse_one_account_options_query_per_render() -> None:
@@ -49,6 +61,19 @@ def test_hot_topic_cards_reuse_one_account_options_query_per_render() -> None:
     assert source.count("state.account_options()") == 1
     assert "target_account_count = len(target_account_ids)" in source
     assert "len(state.account_options())" not in source
+
+
+def test_hot_topics_use_bounded_pagination_instead_of_dom_stacking() -> None:
+    source = inspect.getsource(_build_hot_topics)
+
+    assert "service.paginate_topics(" in source
+    assert 'result_runtime = {"page": 1, "page_size": 6}' in source
+    assert 'classes("ops-topic-table")' in source
+    assert 'classes("ops-topic-table-head")' in source
+    assert "ui.pagination(" in source
+    assert "boundary_links=" not in source
+    assert 'max-pages=7' in source
+    assert "加载更多选题" not in source
 
 
 def test_topic_source_operations_are_serialized_and_report_one_clear_status() -> None:
@@ -90,14 +115,29 @@ def test_followed_article_fetch_error_is_safe_and_actionable() -> None:
     )
     assert "限制了查询频率" in limited
 
+    jizhile = followed_article_fetch_error_message(
+        "极致了 API 请求失败，api_key=private-key verifycode=private-code"
+    )
+    assert "private-key" not in jizhile
+    assert "private-code" not in jizhile
+
+    combined = followed_article_fetch_error_message(
+        "公众号后台搜索（需登录态）：登录态失效；极致了 API（实时文章）：账户余额不足"
+    )
+    assert "公众号后台搜索" in combined
+    assert "极致了 API" in combined
+
 
 def test_followed_article_fetch_failure_uses_persistent_configuration_dialog() -> None:
     source = inspect.getsource(open_followed_articles_dialog)
     assert 'ui.dialog().props("persistent")' in source
     assert '"获取公众号文章失败"' in source
     assert '"去配置登录态"' in source
+    assert '"配置极致了 API"' in source
     assert "dialog.close()" in source
     assert "on_configure_backend()" in source
+    assert "on_configure_jizhile()" in source
+    assert '"获取最新文章（自动切换）"' in source
     assert 'ui.notify(f"获取失败：' not in source
     assert 'ui.notify(f"加载更多失败：' not in source
 

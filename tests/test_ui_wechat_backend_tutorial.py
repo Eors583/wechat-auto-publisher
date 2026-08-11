@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from nicegui import ui
 import pytest
+from nicegui import ui
 
 from app.providers.wechat_backend_search import (
     WechatBackendSearchError,
@@ -32,6 +32,16 @@ class _FakeFollowedContentService:
 
     def list_accounts(self) -> list[dict[str, Any]]:
         return []
+
+    def get_jizhile_settings(self) -> dict[str, Any]:
+        return {
+            "enabled": False,
+            "has_key": False,
+            "has_verifycode": False,
+            "session_label": "",
+            "remain_money": None,
+            "checked_at": "",
+        }
 
 
 class _FakeState:
@@ -98,6 +108,30 @@ def test_backend_login_dialog_contains_embedded_beginner_tutorial() -> None:
     assert "修改密码、退出后台、触发安全验证或登录一段时间后" in snapshot
     assert "凭证可能失效" in snapshot
     assert "留空输入框会保留已保存内容" in snapshot
+
+
+def test_followed_accounts_exposes_jizhile_api_configuration() -> None:
+    try:
+        topics._build_followed_accounts(
+            _FakeState(),
+            _FakeFollowedContentService(),
+            workspace_tabs=object(),
+            tab_wizard=object(),
+        )
+        _click_button("配置 API")
+        snapshot = _snapshot()
+    finally:
+        ui.context.client.remove_all_elements()
+
+    assert "更多设置：文章获取数据源" in snapshot
+    assert "极致了 API" in snapshot
+    assert "配置极致了 API" in snapshot
+    assert "API Key" in snapshot
+    assert "附加码（可选）" in snapshot
+    assert "历史文章接口文档" in snapshot
+    assert "连接测试只查询账户余额" in snapshot
+    assert "测试并保存" in snapshot
+    assert "页面不会回显明文" in snapshot
 
 
 def test_backend_login_input_normalizers_accept_beginner_copy_formats() -> None:
