@@ -2445,14 +2445,18 @@ def build_review_page(
                         ).classes(
                             "ops-activity-stage"
                         )
-                        review_progress_bar = ui.linear_progress(
-                            value=float(progress.get("value") or 0.05)
-                        ).classes("ops-activity-progress").props(
+                        with ui.linear_progress(
+                            value=float(progress.get("value") or 0.05),
+                            show_value=False,
+                            size="20px",
+                        ).props(
                             "rounded color=primary track-color=blue-1"
-                        )
-                        review_progress_percent = ui.label(
-                            f'{round(float(progress.get("value") or 0) * 100)}%'
-                        ).classes("ops-activity-percent")
+                        ).classes("background-activity-progress") as review_progress_bar:
+                            review_progress_percent = ui.label(
+                                f'{round(float(progress.get("value") or 0) * 100)}%'
+                            ).classes(
+                                "absolute-center background-activity-progress-label"
+                            )
                     review_progress_column.set_visibility(review_is_active)
 
                     async def refresh_review_progress() -> None:

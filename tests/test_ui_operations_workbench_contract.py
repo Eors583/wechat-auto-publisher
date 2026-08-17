@@ -141,6 +141,10 @@ def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:
 def test_review_action_is_replaced_by_persisted_progress() -> None:
     source = inspect.getsource(tasks.build_review_page)
 
+    assert "show_value=False" in source
+    assert 'size="20px"' in source
+    assert "absolute-center background-activity-progress-label" in source
+    assert 'classes("ops-activity-percent")' not in source
     assert 'review_progress_stage.set_text("正在创建评审任务")' in source
     assert "review_action_button.set_visibility(False)" in source
     assert "review_progress_column.set_visibility(True)" in source
