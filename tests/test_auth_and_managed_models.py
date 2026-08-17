@@ -12,6 +12,7 @@ from app.db import Database
 from app.db_backend import postgres_schema_sql, postgres_statement
 from app.services.auth import AuthService
 from app.services.batches import BatchService
+from app.ui.state import AppState
 
 
 def test_default_admin_registration_and_persisted_login(tmp_path) -> None:
@@ -146,6 +147,51 @@ def test_user_models_follow_login_account_and_keep_platform_fallback(
         assert "不属于当前登录账号" in str(exc)
     else:
         raise AssertionError("another user's model must not be editable")
+
+
+def test_model_selector_labels_official_and_custom_and_protects_official_delete(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CREDENTIAL_ENCRYPTION_KEY",
+        "test-only-model-selector-ownership-key",
+    )
+    root_db = Database(tmp_path / "model-selector.db")
+    official_id = save_model(
+        root_db.for_user(""),
+        name="平台 Manus",
+        provider_type=GEMINI,
+        api_base="",
+        model="manus-platform",
+        api_key="platform-secret",
+    )
+    user_db = root_db.for_user("user-a")
+    custom_id = save_model(
+        user_db,
+        name="我的模型",
+        provider_type=GEMINI,
+        api_base="",
+        model="custom-model",
+        api_key="user-secret",
+    )
+
+    ui_state = object.__new__(AppState)
+    ui_state.db = user_db
+    options = ui_state.model_options(include_default=False)
+
+    assert options[official_id].startswith("官方 · API · ")
+    assert options[custom_id].startswith("自定义 · API · ")
+
+    try:
+        user_db.delete_ai_model(official_id)
+    except ValueError as exc:
+        assert "不属于当前登录账号" in str(exc)
+    else:
+        raise AssertionError("official model deletion must be rejected")
+
+    user_db.delete_ai_model(custom_id)
+    assert user_db.get_ai_model(custom_id) is None
 
 
 def test_private_model_rejects_insecure_or_internal_api_base(

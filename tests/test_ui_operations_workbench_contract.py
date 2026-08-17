@@ -152,6 +152,9 @@ def test_account_configuration_fields_are_vertically_centered() -> None:
     assert "height: var(--ui-control-height-field) !important" in APP_CSS
     assert ".ops-config-form div.q-field__native" in APP_CSS
     assert "align-items: center" in APP_CSS
+    assert ".ops-config-field > .q-field" in APP_CSS
+    assert ".ops-config-field .q-select .q-field__native > span" in APP_CSS
+    assert "text-overflow: ellipsis" in APP_CSS
 
 
 def test_default_model_select_can_open_the_custom_model_editor() -> None:
@@ -163,6 +166,19 @@ def test_default_model_select_can_open_the_custom_model_editor() -> None:
     assert 'render_panel=False' in source
     assert ".ops-dialog-model-editor" in APP_CSS
     assert ".ops-model-kind-toggle" in APP_CSS
+
+
+def test_default_model_select_marks_source_and_only_custom_models_are_deletable() -> None:
+    source = inspect.getsource(desktop._render_account_config_workspace)
+
+    assert "ops-model-option-badge-official" in source
+    assert "ops-model-option-badge-custom" in source
+    assert 'with model_select.add_slot("append")' in source
+    assert '"ops-model-select-delete"' in source
+    assert "is_owned_custom_model(candidate_id)" in source
+    assert "官方模型由后台维护，不能在这里删除" in source
+    assert "state.db.delete_ai_model(delete_model_id)" in source
+    assert ".ops-model-select-delete" in APP_CSS
 
 
 def test_account_layout_editor_can_import_a_public_wechat_article() -> None:

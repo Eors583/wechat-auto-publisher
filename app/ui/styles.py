@@ -2790,6 +2790,22 @@ APP_CSS += """
   line-height: 18px;
 }
 .ops-config-field .q-field__label { display: none !important; }
+.ops-config-field > .q-field,
+.ops-config-field .q-field__control,
+.ops-config-field .q-field__control-container,
+.ops-config-field .q-field__native {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.ops-config-field .q-select .q-field__native { overflow: hidden; }
+.ops-config-field .q-select .q-field__native > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ops-config-form .q-field__control { min-height: var(--ui-control-height-field) !important; height: var(--ui-control-height-field); }
 .ops-config-form .q-field__control-container {
   justify-content: center;
@@ -2807,6 +2823,52 @@ APP_CSS += """
 }
 .ops-config-form input.q-field__native {
   line-height: var(--ui-control-height-field);
+}
+.ops-model-option {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: var(--ui-control-height-button);
+  padding: var(--ui-space-2) var(--ui-space-3);
+}
+.ops-model-option .q-item__section--avatar {
+  min-width: 0;
+  padding-right: var(--ui-space-2);
+}
+.ops-model-option-copy { min-width: 0; }
+.ops-model-option-copy .q-item__label {
+  overflow: hidden;
+  color: var(--ui-color-text-primary);
+  font-size: var(--ui-font-size-base);
+  line-height: var(--ui-line-height-base);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ops-model-option-badge {
+  min-width: var(--ui-control-height-button);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1;
+}
+.ops-badge.ops-model-option-badge-official {
+  color: var(--ui-color-brand-dark) !important;
+  background: var(--ui-color-brand-soft) !important;
+}
+.ops-badge.ops-model-option-badge-custom {
+  color: var(--ui-color-purple-dark) !important;
+  background: var(--ui-color-purple-soft) !important;
+}
+.ops-model-select-delete {
+  width: var(--ui-control-height-sm);
+  min-width: var(--ui-control-height-sm);
+  height: var(--ui-control-height-sm);
+}
+.ops-model-select-menu {
+  width: auto !important;
+  max-width: min(
+    var(--ui-layout-dialog-sm),
+    calc(100vw - (2 * var(--ui-space-4)))
+  ) !important;
+  overflow-x: hidden;
 }
 .ops-config-entry-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ui-space-2); }
 .ops-config-entry-grid-single {

@@ -184,7 +184,8 @@ class AppState:
             raise ValueError(f"unsupported model purpose: {purpose}")
         options = {
             str(item["id"]): (
-                f'{"本地" if item.get("connection_type") == "local" else "API"}'
+                f'{"官方" if item.get("scope") == "platform" else "自定义"}'
+                f' · {"本地" if item.get("connection_type") == "local" else "API"}'
                 f' · {item["name"]} · {item["model"]}'
             )
             for item in public_models(

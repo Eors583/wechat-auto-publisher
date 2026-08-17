@@ -4709,25 +4709,68 @@ def _render_account_config_workspace(
                                 value=model_value or None,
                                 label="默认模型",
                             ).props(
-                                "outlined dense options-dense hide-bottom-space"
+                                "outlined dense options-dense hide-bottom-space "
+                                "popup-content-class=ops-model-select-menu"
                             )
+                            model_select.add_slot(
+                                "option",
+                                f"""
+                                <q-item v-bind="props.itemProps" class="ops-model-option">
+                                  <q-item-section
+                                    avatar
+                                    v-if="props.opt.label.startsWith('官方 · ') || props.opt.label.startsWith('自定义 · ')"
+                                  >
+                                    <span
+                                      class="ops-badge ops-model-option-badge"
+                                      :class="props.opt.label.startsWith('官方 · ') ? 'ops-model-option-badge-official' : 'ops-model-option-badge-custom'"
+                                    >{{{{ props.opt.label.startsWith('官方 · ') ? '官方' : '自定义' }}}}</span>
+                                  </q-item-section>
+                                  <q-item-section class="ops-model-option-copy">
+                                    <q-item-label
+                                      lines="1"
+                                      :title="props.opt.label.replace(/^(官方|自定义) · /, '')"
+                                    >
+                                      {{{{ props.opt.label.replace(/^(官方|自定义) · /, '') }}}}
+                                    </q-item-label>
+                                  </q-item-section>
+                                </q-item>
+                                """,
+                            )
+                            with model_select.add_slot("append"):
+                                delete_selected_model_button = ui.button(
+                                    icon="delete_outline"
+                                ).classes("ops-model-select-delete").props(
+                                    "flat round dense color=negative "
+                                    "aria-label=删除当前自定义模型"
+                                )
                             previous_model_value = {
                                 "value": model_value or None
                             }
 
+                            def refreshed_model_options() -> dict[str, str]:
+                                fresh = state.model_options(include_default=False)
+                                fresh[ADD_CUSTOM_MODEL_VALUE] = "＋ 添加自定义模型"
+                                return fresh
+
+                            def is_owned_custom_model(candidate_id: str) -> bool:
+                                return str(
+                                    model_select.options.get(candidate_id) or ""
+                                ).startswith("自定义 · ")
+
+                            def sync_model_delete_visibility(candidate_id: str) -> None:
+                                delete_selected_model_button.set_visibility(
+                                    is_owned_custom_model(candidate_id)
+                                )
+
                             def use_saved_model(saved: dict[str, Any]) -> None:
                                 saved_id = str(saved.get("id") or "")
-                                fresh_options = state.model_options(
-                                    include_default=False
-                                )
-                                fresh_options[ADD_CUSTOM_MODEL_VALUE] = (
-                                    "＋ 添加自定义模型"
-                                )
+                                fresh_options = refreshed_model_options()
                                 previous_model_value["value"] = saved_id
                                 model_select.set_options(
                                     fresh_options,
                                     value=saved_id,
                                 )
+                                sync_model_delete_visibility(saved_id)
                                 ui.notify(
                                     "自定义模型已选中，请点击下方“保存配置”完成公众号绑定",
                                     type="positive",
@@ -4746,13 +4789,98 @@ def _render_account_config_workspace(
                                     model_select.set_value(
                                         previous_model_value["value"]
                                     )
+                                    sync_model_delete_visibility(
+                                        str(previous_model_value["value"] or "")
+                                    )
                                     open_custom_model_editor()
                                     return
                                 previous_model_value["value"] = (
                                     selected_value or None
                                 )
+                                sync_model_delete_visibility(selected_value)
 
                             model_select.on_value_change(handle_model_choice)
+
+                            def request_model_delete() -> None:
+                                delete_model_id = str(model_select.value or "")
+                                record = state.db.get_ai_model(delete_model_id)
+                                owner_user_id = str(
+                                    (record or {}).get("owner_user_id") or ""
+                                )
+                                if (
+                                    not is_owned_custom_model(delete_model_id)
+                                    or not owner_user_id
+                                    or owner_user_id != state.current_user_id
+                                ):
+                                    ui.notify("官方模型由后台维护，不能在这里删除", type="warning")
+                                    return
+
+                                model_name = str(record.get("name") or "自定义模型")
+                                with ui.dialog() as delete_dialog, ui.card().classes(
+                                    "ops-dialog-sm"
+                                ):
+                                    ui.label("删除自定义模型").classes(
+                                        "ops-review-page-title"
+                                    )
+                                    ui.label(
+                                        f"确认删除“{model_name}”？删除后无法恢复。"
+                                    ).classes("ops-panel-subtitle")
+
+                                    def confirm_model_delete() -> None:
+                                        try:
+                                            state.db.delete_ai_model(delete_model_id)
+                                            fresh_options = refreshed_model_options()
+                                            current_value = str(
+                                                model_select.value or ""
+                                            )
+                                            next_value = (
+                                                model_value
+                                                if current_value == delete_model_id
+                                                else current_value
+                                            )
+                                            if next_value not in fresh_options:
+                                                next_value = ""
+                                            previous_model_value["value"] = (
+                                                next_value or None
+                                            )
+                                            model_select.set_options(
+                                                fresh_options,
+                                                value=next_value or None,
+                                            )
+                                            sync_model_delete_visibility(next_value)
+                                            state.refresh_model_selects()
+                                            delete_dialog.close()
+                                            ui.notify(
+                                                "自定义模型已删除",
+                                                type="positive",
+                                            )
+                                        except Exception as exc:  # noqa: BLE001
+                                            ui.notify(
+                                                sanitize_failure_text(exc),
+                                                type="negative",
+                                                timeout=7000,
+                                            )
+
+                                    with ui.row().classes(
+                                        "w-full justify-end q-mt-md"
+                                    ):
+                                        ui.button(
+                                            "取消",
+                                            on_click=delete_dialog.close,
+                                        ).props("flat no-caps")
+                                        ui.button(
+                                            "确认删除",
+                                            icon="delete_outline",
+                                            on_click=confirm_model_delete,
+                                        ).props(
+                                            "unelevated color=negative no-caps"
+                                        )
+                                delete_dialog.open()
+
+                            delete_selected_model_button.on_click(
+                                request_model_delete
+                            )
+                            sync_model_delete_visibility(model_value)
                         with ui.element("div").classes("ops-config-field"):
                             ui.label("默认改写强度").classes("ops-config-field-label")
                             intensity_select = ui.select(
