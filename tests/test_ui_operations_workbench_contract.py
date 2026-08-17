@@ -113,6 +113,18 @@ def test_review_workbench_supports_article_navigation_and_background_rewrite() -
     assert "历史版本" in source
 
 
+def test_review_page_contains_long_content_and_exposes_failure_reason() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    assert 'latest_review.get("error")' in source
+    assert 'ui.label("AI 评审失败原因")' in source
+    assert "ops-review-failure-status" in source
+    assert "aria-label=查看AI评审失败原因" in source
+    assert ".ops-review-editor-grid > *" in APP_CSS
+    assert ".ops-title-candidates .q-radio__label" in APP_CSS
+    assert "overflow-y: auto" in APP_CSS
+
+
 def test_feature_mapping_document_covers_every_confirmed_page() -> None:
     mapping = (ROOT / "docs" / "新版前端功能映射与验收清单.md").read_text(
         encoding="utf-8"

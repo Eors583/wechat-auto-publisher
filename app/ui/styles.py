@@ -2980,14 +2980,22 @@ APP_CSS += """
 .ops-document-canvas::-webkit-scrollbar,
 .ops-review-body-editor textarea::-webkit-scrollbar { display: none; }
 .ops-document-canvas iframe { width: 100%; min-height: 100%; border: 0; }
-.ops-review-editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-3); height: 100%; padding: var(--ui-space-4); overflow: hidden; }
+.ops-review-editor-grid { display: grid; flex: 1 1 auto; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto auto minmax(280px, 1fr) auto; gap: var(--ui-space-3); width: 100%; height: 100%; min-width: 0; min-height: 0; padding: var(--ui-space-4); overflow: hidden; }
+.ops-review-editor-grid > * { width: 100%; min-width: 0; box-sizing: border-box; }
 .ops-review-digest-editor,
 .ops-review-body-editor { grid-column: 1 / -1; }
 .ops-review-body-editor { min-height: 0; }
-.ops-review-body-editor .q-field__control { height: 100%; min-height: 280px; }
+.ops-review-body-editor .q-field__control,
+.ops-review-body-editor .q-field__control-container,
+.ops-review-body-editor textarea.q-field__native { width: 100%; min-width: 0; height: 100%; min-height: 280px; box-sizing: border-box; }
 .ops-review-editor-grid > .q-btn { justify-self: end; grid-column: 1 / -1; }
-.ops-assets-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-3); padding: var(--ui-space-4); }
-.ops-title-candidates { max-height: 360px; overflow: hidden; }
+.ops-assets-grid { display: grid; flex: 1 1 auto; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: var(--ui-space-3); width: 100%; height: 100%; min-width: 0; min-height: 0; padding: var(--ui-space-4); overflow-y: auto; }
+.ops-assets-grid > .ops-config-section { width: 100%; min-width: 0; height: auto; min-height: 204px; box-sizing: border-box; }
+.ops-title-candidates { width: 100%; max-width: 100%; max-height: 360px; min-width: 0; overflow-x: hidden; overflow-y: auto; overflow-wrap: anywhere; }
+.ops-title-candidates .q-radio { max-width: 100%; }
+.ops-title-candidates .q-radio__label { min-width: 0; overflow-wrap: anywhere; }
+.ops-review-failure-status { cursor: pointer; }
+.ops-review-failure-reason { max-width: min(560px, calc(100vw - 64px)); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ops-review-cover-preview { width: 100%; aspect-ratio: 2.35 / 1; border-radius: var(--ui-radius-sm); overflow: hidden; }
 .ops-assets-actions { gap: var(--ui-space-2); margin-top: var(--ui-space-3); }
 .ops-history-row { display: flex; align-items: center; gap: var(--ui-space-3); margin: var(--ui-space-3); padding: var(--ui-space-3); border: 1px solid var(--ui-color-border); border-radius: var(--ui-radius-md); background: var(--ui-color-bg-subtle); }

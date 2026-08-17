@@ -1995,6 +1995,19 @@ def build_review_page(
             getattr(owner_client, "is_deleted", False)
         )
 
+    def show_review_failure() -> None:
+        failure_reason = sanitize_failure_text(
+            latest_review.get("error") or "服务器未记录具体失败原因，请重新评审"
+        )
+        with ui.dialog() as dialog, ui.card().classes("ops-dialog-card"):
+            ui.label("AI 评审失败原因").classes("ops-panel-title")
+            ui.label(failure_reason).classes("ops-review-failure-reason")
+            with ui.row().classes("w-full justify-end"):
+                ui.button("关闭", on_click=dialog.close).props(
+                    "flat color=primary no-caps"
+                )
+        dialog.open()
+
     def reopen(target: dict[str, Any] | None = None) -> None:
         target_job = target or job
         page_alive["value"] = False
@@ -2256,22 +2269,28 @@ def build_review_page(
                             str(latest_review.get("profile_name") or "专业深度型")
                         ).classes("ops-panel-subtitle")
                     review_status = str(latest_review.get("status") or "")
-                    ui.badge(
-                        {
-                            "completed": "评审完成",
-                            "candidate_ready": "候选稿待选择",
-                            "running": "评审中",
-                            "rewriting": "改写中",
-                            "failed": "评审失败",
-                        }.get(review_status, "尚未评审")
-                    ).classes(
-                        "ops-badge "
-                        + (
-                            "ops-badge-green"
-                            if review_status in {"completed", "applied", "source_kept"}
-                            else "ops-badge-warm"
-                        )
+                    status_label = {
+                        "completed": "评审完成",
+                        "candidate_ready": "候选稿待选择",
+                        "running": "评审中",
+                        "rewriting": "改写中",
+                        "failed": "评审失败",
+                    }.get(review_status, "尚未评审")
+                    status_classes = "ops-badge " + (
+                        "ops-badge-green"
+                        if review_status in {"completed", "applied", "source_kept"}
+                        else "ops-badge-warm"
                     )
+                    if review_status == "failed":
+                        ui.button(
+                            status_label,
+                            icon="info_outline",
+                            on_click=show_review_failure,
+                        ).classes(f"{status_classes} ops-review-failure-status").props(
+                            "flat dense no-caps aria-label=查看AI评审失败原因"
+                        ).tooltip("点击查看失败原因")
+                    else:
+                        ui.badge(status_label).classes(status_classes)
                 with ui.element("div").classes("ops-panel-body"):
                     score = int(
                         review_result.get("overall_score")
