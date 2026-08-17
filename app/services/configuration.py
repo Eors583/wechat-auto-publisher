@@ -280,6 +280,8 @@ class ConfigurationService:
         enabled: bool = True,
         model_id: str | None = None,
     ) -> dict[str, Any]:
+        if model_id is not None:
+            model_id = self._editable_model_id(model_id)
         saved_id = persist_model(
             self.db,
             model_id=model_id,

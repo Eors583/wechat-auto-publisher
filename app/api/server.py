@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
 from app.api.editorial_reviews import create_editorial_review_router
+from app.ai.image_providers import is_image_provider
 from app.config import load_config
 from app.db import customer_data_scope
 from app.services import (
@@ -501,7 +502,8 @@ def create_api_app(
         dependencies=[Depends(require_admin)],
     )
     def admin_models() -> list[dict[str, Any]]:
-        return configuration_service.list_models(include_config=False)
+        with customer_data_scope(""):
+            return configuration_service.list_models(include_config=False)
 
     @app.post(
         "/api/v1/admin/models",
@@ -509,15 +511,16 @@ def create_api_app(
     )
     def save_admin_model(payload: AdminModelRequest) -> dict[str, Any]:
         try:
-            return configuration_service.save_model(
-                model_id=payload.id,
-                name=payload.name,
-                provider_type=payload.provider_type,
-                api_base=payload.api_base,
-                model=payload.model,
-                api_key=payload.api_key,
-                enabled=payload.enabled,
-            )
+            with customer_data_scope(""):
+                return configuration_service.save_model(
+                    model_id=payload.id,
+                    name=payload.name,
+                    provider_type=payload.provider_type,
+                    api_base=payload.api_base,
+                    model=payload.model,
+                    api_key=payload.api_key,
+                    enabled=payload.enabled,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -527,7 +530,8 @@ def create_api_app(
     )
     def test_admin_model(model_id: str) -> dict[str, Any]:
         try:
-            return configuration_service.test_model(model_id)
+            with customer_data_scope(""):
+                return configuration_service.test_model(model_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -537,7 +541,8 @@ def create_api_app(
     )
     def delete_admin_model(model_id: str) -> dict[str, Any]:
         try:
-            return configuration_service.delete_model(model_id)
+            with customer_data_scope(""):
+                return configuration_service.delete_model(model_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -597,14 +602,65 @@ def create_api_app(
     @app.get("/api/v1/models", dependencies=[Depends(require_token)])
     def available_models(
         purpose: str = Query(default="text", pattern="^(text|image)$"),
+        enabled_only: bool = Query(default=True),
     ) -> list[dict[str, Any]]:
         """Models users may select; credentials are always removed."""
 
         return configuration_service.list_models(
-            enabled_only=True,
+            enabled_only=enabled_only,
             purpose=purpose,
             include_config=False,
         )
+
+    @app.post("/api/v1/models", dependencies=[Depends(require_token)])
+    def save_user_model(payload: AdminModelRequest) -> dict[str, Any]:
+        """Create or update one model owned by the authenticated user."""
+
+        if is_image_provider(payload.provider_type):
+            raise HTTPException(
+                status_code=400,
+                detail="个人模型配置目前仅支持文本大模型",
+            )
+        try:
+            return configuration_service.save_model(
+                model_id=payload.id,
+                name=payload.name,
+                provider_type=payload.provider_type,
+                api_base=payload.api_base,
+                model=payload.model,
+                api_key=payload.api_key,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/models/{model_id}/test",
+        dependencies=[Depends(require_token)],
+    )
+    def test_user_model(model_id: str) -> dict[str, Any]:
+        try:
+            model = configuration_service.get_model(model_id)
+            if not bool(model.get("editable")):
+                raise HTTPException(
+                    status_code=403,
+                    detail="平台公共模型只能由管理员测试",
+                )
+            return configuration_service.test_model(model_id)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete(
+        "/api/v1/models/{model_id}",
+        dependencies=[Depends(require_token)],
+    )
+    def delete_user_model(model_id: str) -> dict[str, Any]:
+        try:
+            return configuration_service.delete_model(model_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get(
         "/api/v1/onboarding/status",

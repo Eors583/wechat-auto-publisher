@@ -106,10 +106,13 @@ class Database:
             ).strip()
             or _PROCESS_OWNER_SESSION_ID
         )
-        # ``owner_user_id`` scopes all customer-owned records. Platform
-        # configuration (models, relay and administrator settings) deliberately
-        # remains unscoped. An empty value is kept for migration/admin tooling.
-        self._owner_user_id = str(owner_user_id or "").strip()
+        # ``None`` inherits the current request scope. An explicit empty value
+        # is the platform scope used by administrator tooling.
+        self._owner_user_id = (
+            None
+            if owner_user_id is None
+            else str(owner_user_id or "").strip()
+        )
         if self.backend == "sqlite":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         # PostgreSQL schema setup executes the full migration script under an
@@ -139,7 +142,9 @@ class Database:
 
     @property
     def owner_user_id(self) -> str:
-        return self._owner_user_id or _ACTIVE_OWNER_USER_ID.get()
+        if self._owner_user_id is not None:
+            return self._owner_user_id
+        return _ACTIVE_OWNER_USER_ID.get()
 
     def _owner_clause(
         self,
@@ -251,6 +256,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS ai_models (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL,
                     provider_type TEXT NOT NULL DEFAULT 'openai_compatible',
                     api_base TEXT,
@@ -655,6 +661,7 @@ class Database:
             # installations receive an empty owner first; the default
             # administrator claims those rows after authentication is seeded.
             for table_name in (
+                "ai_models",
                 "official_accounts",
                 "jobs",
                 "prompt_templates",
@@ -2867,28 +2874,49 @@ class Database:
 
     def list_ai_models(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            sql = "SELECT * FROM ai_models"
+            owner_user_id = self.owner_user_id
+            clauses = ["owner_user_id IN ('', ?)"] if owner_user_id else ["owner_user_id = ''"]
+            params: list[Any] = [owner_user_id] if owner_user_id else []
             if enabled_only:
-                sql += " WHERE enabled = 1"
-            sql += " ORDER BY created_at, name"
-            return [dict(row) for row in conn.execute(sql).fetchall()]
+                clauses.append("enabled = 1")
+            sql = (
+                "SELECT * FROM ai_models WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY owner_user_id, created_at, name"
+            )
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
     def get_ai_model(self, model_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
+            owner_user_id = self.owner_user_id
+            owner_clause = (
+                "owner_user_id IN ('', ?)" if owner_user_id else "owner_user_id = ''"
+            )
+            params: tuple[Any, ...] = (
+                (model_id, owner_user_id) if owner_user_id else (model_id,)
+            )
             row = conn.execute(
-                "SELECT * FROM ai_models WHERE id = ?", (model_id,)
+                f"SELECT * FROM ai_models WHERE id = ? AND {owner_clause}",
+                params,
             ).fetchone()
             return dict(row) if row else None
 
     def upsert_ai_model(self, model: dict[str, Any]) -> None:
         now = _utc_now()
         with self.connect() as conn:
+            owner_user_id = self.owner_user_id
+            existing = conn.execute(
+                "SELECT owner_user_id FROM ai_models WHERE id = ?",
+                (str(model["id"]),),
+            ).fetchone()
+            if existing and str(existing["owner_user_id"] or "") != owner_user_id:
+                raise ValueError("该模型不属于当前登录账号")
             conn.execute(
                 """
                 INSERT INTO ai_models (
-                    id, name, provider_type, api_base, model,
+                    id, owner_user_id, name, provider_type, api_base, model,
                     api_key_encrypted, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     provider_type=excluded.provider_type,
@@ -2900,6 +2928,7 @@ class Database:
                 """,
                 (
                     model["id"],
+                    owner_user_id,
                     model["name"],
                     model.get("provider_type", "openai_compatible"),
                     model.get("api_base"),
@@ -2913,13 +2942,29 @@ class Database:
 
     def delete_ai_model(self, model_id: str) -> None:
         with self.connect() as conn:
-            used = conn.execute(
-                "SELECT name FROM official_accounts WHERE model_id = ? LIMIT 1",
+            owner_user_id = self.owner_user_id
+            model = conn.execute(
+                "SELECT owner_user_id FROM ai_models WHERE id = ?",
                 (model_id,),
+            ).fetchone()
+            if not model or str(model["owner_user_id"] or "") != owner_user_id:
+                raise ValueError("该模型不属于当前登录账号")
+            account_sql = "SELECT name FROM official_accounts WHERE model_id = ?"
+            account_params: list[Any] = [model_id]
+            if owner_user_id:
+                account_sql += " AND owner_user_id = ?"
+                account_params.append(owner_user_id)
+            account_sql += " LIMIT 1"
+            used = conn.execute(
+                account_sql,
+                account_params,
             ).fetchone()
             if used:
                 raise ValueError(f"该模型正被公众号“{used['name']}”使用，请先修改公众号绑定")
-            conn.execute("DELETE FROM ai_models WHERE id = ?", (model_id,))
+            conn.execute(
+                "DELETE FROM ai_models WHERE id = ? AND owner_user_id = ?",
+                (model_id, owner_user_id),
+            )
 
     def list_prompt_templates(
         self,

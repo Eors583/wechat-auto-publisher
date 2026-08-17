@@ -8,6 +8,7 @@ import uuid
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -18,6 +19,7 @@ from app.ai.image_providers import (
     resolved_image_endpoint,
 )
 from app.db import Database
+from app.services.url_validation import validate_external_url
 
 OPENAI_COMPATIBLE = "openai_compatible"
 GEMINI = "gemini"
@@ -173,6 +175,10 @@ def save_model(
         api_base = api_base.strip() or "https://api.manus.ai"
     if provider_type == OPENAI_COMPATIBLE and not api_base.strip():
         raise ValueError("OpenAI 兼容接口必须填写 API Base URL")
+    if db.owner_user_id and api_base.strip():
+        if urlparse(api_base.strip()).scheme != "https":
+            raise ValueError("个人模型的 API Base URL 必须使用 HTTPS")
+        validate_external_url(api_base.strip())
     if is_image_provider(provider_type):
         api_base = resolved_image_endpoint(provider_type, api_base)
         if provider_type == OPENAI_IMAGE and not api_base:
@@ -211,9 +217,12 @@ def public_models(
     elif purpose == "image":
         models = [item for item in models if is_image_provider(item.get("provider_type"))]
     for item in models:
+        record_owner = str(item.pop("owner_user_id", "") or "")
         item.pop("api_key_encrypted", None)
         item["enabled"] = bool(item.get("enabled"))
         item["has_api_key"] = True
+        item["scope"] = "private" if record_owner else "platform"
+        item["editable"] = record_owner == db.owner_user_id
     return models
 
 

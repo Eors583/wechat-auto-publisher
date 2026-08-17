@@ -12,7 +12,7 @@ from app.ai.image_providers import (
     IMAGE_VOLCENGINE,
     IMAGE_ZHIPU,
 )
-from app.ai.model_registry import GEMINI, MANUS, OPENAI_COMPATIBLE
+from app.ai.model_registry import GEMINI, MANUS, OPENAI_COMPATIBLE, save_model
 from app.db import Database
 from app.ui.panels.models import (
     IMAGE_PROVIDER_GUIDES,
@@ -234,3 +234,49 @@ def test_model_editor_uses_free_text_model_name_instead_of_select(
         == "推荐模型"
         for element in elements
     )
+
+
+def test_user_model_panel_marks_platform_models_read_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CREDENTIAL_ENCRYPTION_KEY",
+        "test-only-user-model-panel-key",
+    )
+    state = _PanelState(tmp_path)
+    platform_db = state.db.for_user("")
+    state.db = state.db.for_user("current-user")
+    save_model(
+        platform_db,
+        name="平台公共模型",
+        provider_type=GEMINI,
+        api_base="",
+        model="gemini-platform",
+        api_key="platform-key",
+    )
+    save_model(
+        state.db,
+        name="我的私有模型",
+        provider_type=GEMINI,
+        api_base="",
+        model="gemini-private",
+        api_key="private-key",
+    )
+
+    try:
+        build_models_panel(state, purpose="text")
+        texts = _rendered_texts()
+        buttons = [
+            element
+            for element in ui.context.client.elements.values()
+            if type(element).__name__ == "Button"
+        ]
+    finally:
+        ui.context.client.remove_all_elements()
+
+    assert "平台公共模型" in texts
+    assert "我的私有模型" in texts
+    assert "由平台管理员维护，可直接绑定到你的公众号。" in texts
+    assert sum(getattr(item, "text", None) == "编辑" for item in buttons) == 1
+    assert sum(getattr(item, "text", None) == "删除" for item in buttons) == 1

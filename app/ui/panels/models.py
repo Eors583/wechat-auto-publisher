@@ -19,6 +19,7 @@ from app.ai.image_providers import (
     is_image_provider,
 )
 from app.ai.model_registry import GEMINI, MANUS, OPENAI_COMPATIBLE
+from app.db import Database
 from app.services.configuration import ConfigurationService
 from app.services.onboarding import OnboardingService, TEXT_MODEL_PRESETS
 from app.services.onboarding_errors import friendly_model_error
@@ -94,14 +95,20 @@ def infer_text_provider_preset(record: dict[str, Any] | None) -> str:
     return "custom"
 
 
-def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
+def build_models_panel(
+    state: AppState,
+    *,
+    purpose: str = "text",
+    db: Database | None = None,
+) -> None:
     """Manage model credentials and teach the complete setup flow in place."""
 
     loaded = state.reload_config()
     config = loaded if isinstance(loaded, dict) else state.config
+    model_db = db or state.db
     image_panel = purpose == "image"
-    configuration = ConfigurationService(state.db, config)
-    onboarding = OnboardingService(state.db, config)
+    configuration = ConfigurationService(model_db, config)
+    onboarding = OnboardingService(model_db, config)
     text_presets = {
         str(item["id"]): item for item in onboarding.model_presets()
     }
@@ -168,7 +175,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
     def open_editor(model_id: str | None = None) -> None:
         owner_client = ui.context.client
         current_model_id = model_id
-        record = state.db.get_ai_model(model_id) if model_id else None
+        record = model_db.get_ai_model(model_id) if model_id else None
         initial_image_provider = (
             infer_image_provider(
                 str((record or {}).get("provider_type") or ""),
@@ -702,6 +709,7 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
 
             for item in models:
                 editable_model_id = str(item["id"])
+                is_editable = bool(item.get("editable"))
                 with ui.element("div").classes("card w-full"):
                     with ui.row().classes("w-full items-center justify-between"):
                         with ui.column().classes("gap-0").style(
@@ -743,49 +751,59 @@ def build_models_panel(state: AppState, *, purpose: str = "text") -> None:
                                     if tested_path.exists()
                                     else "text-warning"
                                 )
-                        enabled_switch = ui.switch(
-                            "启用",
-                            value=bool(item["enabled"]),
-                        )
-                        enabled_switch.on_value_change(
-                            lambda event, mid=editable_model_id: set_enabled(
-                                mid,
-                                bool(event.value),
+                        if is_editable:
+                            enabled_switch = ui.switch(
+                                "启用",
+                                value=bool(item["enabled"]),
                             )
-                        )
+                            enabled_switch.on_value_change(
+                                lambda event, mid=editable_model_id: set_enabled(
+                                    mid,
+                                    bool(event.value),
+                                )
+                            )
+                        else:
+                            ui.badge("平台公共模型").props(
+                                "outline color=primary"
+                            )
                     with ui.row().classes("q-mt-sm"):
-                        test_btn = ui.button(
-                            "检查配置" if image_panel else "测试连接"
-                        ).props("outline dense color=teal-9 no-caps")
-                        test_btn.on_click(
-                            lambda _=None, mid=editable_model_id, btn=test_btn: run_connection_test(
-                                mid,
-                                btn,
-                            )
-                        )
-                        if image_panel:
-                            generate_btn = ui.button(
-                                "生成测试图",
-                                icon="auto_awesome",
-                            ).props(
-                                "unelevated dense color=indigo-7 no-caps"
-                            )
-                            generate_btn.on_click(
-                                lambda _=None, mid=editable_model_id, btn=generate_btn: run_generation_test(
+                        if is_editable:
+                            test_btn = ui.button(
+                                "检查配置" if image_panel else "测试连接"
+                            ).props("outline dense color=teal-9 no-caps")
+                            test_btn.on_click(
+                                lambda _=None, mid=editable_model_id, btn=test_btn: run_connection_test(
                                     mid,
                                     btn,
                                 )
                             )
-                        ui.button(
-                            "编辑",
-                            on_click=lambda mid=editable_model_id: open_editor(mid),
-                        ).props("flat dense color=teal-9 no-caps")
-                        ui.button(
-                            "删除",
-                            on_click=lambda mid=editable_model_id, name=str(
-                                item["name"]
-                            ): confirm_delete(mid, name),
-                        ).props("flat dense color=red-7 no-caps")
+                            if image_panel:
+                                generate_btn = ui.button(
+                                    "生成测试图",
+                                    icon="auto_awesome",
+                                ).props(
+                                    "unelevated dense color=indigo-7 no-caps"
+                                )
+                                generate_btn.on_click(
+                                    lambda _=None, mid=editable_model_id, btn=generate_btn: run_generation_test(
+                                        mid,
+                                        btn,
+                                    )
+                                )
+                            ui.button(
+                                "编辑",
+                                on_click=lambda mid=editable_model_id: open_editor(mid),
+                            ).props("flat dense color=teal-9 no-caps")
+                            ui.button(
+                                "删除",
+                                on_click=lambda mid=editable_model_id, name=str(
+                                    item["name"]
+                                ): confirm_delete(mid, name),
+                            ).props("flat dense color=red-7 no-caps")
+                        else:
+                            ui.label(
+                                "由平台管理员维护，可直接绑定到你的公众号。"
+                            ).classes("muted")
 
     render_models()
 

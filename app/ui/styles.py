@@ -910,6 +910,28 @@ body, .q-page, .nicegui-content {
   justify-content: flex-end;
   gap: 8px;
 }
+.ops-user-models-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding-top: var(--ui-space-3);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ops-user-models-body > .nicegui-column,
+.ops-user-models-body .card,
+.ops-user-models-body .card > .nicegui-row,
+.ops-user-models-body .card > .nicegui-column {
+  min-width: 0;
+  max-width: 100%;
+}
+.ops-user-models-body .card .q-label,
+.ops-user-models-body .card .muted {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .q-btn {
   border-radius: 10px !important;
   font-weight: 700 !important;

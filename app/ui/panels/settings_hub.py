@@ -32,9 +32,12 @@ def build_model_management_panel(state: AppState) -> None:
             ui.label("无权访问后台管理").classes(
                 "text-h6 text-weight-bold text-negative"
             )
-            ui.label("普通用户只能选择平台已经启用的模型。").classes("muted")
+            ui.label(
+                "请回到主站右上角“设置 → 我的大模型”管理个人模型。"
+            ).classes("muted")
         return
-    service = ConfigurationService(state.db, config)
+    platform_db = state.db.for_user("")
+    service = ConfigurationService(platform_db, config)
     models = service.list_models(include_config=False)
     text_count = sum(
         1
@@ -51,7 +54,7 @@ def build_model_management_panel(state: AppState) -> None:
         with ui.element("div").classes("card w-full"):
             ui.label("商户后台管理").classes("text-h6 text-weight-bold")
             ui.label(
-                "模型密钥只由管理员维护；普通用户不会看到 API Key、接口地址或协议配置。"
+                "这里维护平台公共模型；普通用户在自己的账号下维护私有模型和密钥。"
             ).classes("muted")
             users = state.auth.list_users()
             ui.label(
@@ -106,10 +109,14 @@ def build_model_management_panel(state: AppState) -> None:
 
         render_users()
 
-        text_options = state.model_options(
-            include_default=False,
-            purpose="text",
-        )
+        text_options = {
+            str(item["id"]): f'{item["name"]} · {item["model"]}'
+            for item in service.list_models(
+                enabled_only=True,
+                purpose="text",
+                include_config=False,
+            )
+        }
         current_default_model = str(
             state.db.get_setting("merchant.default_text_model_id") or ""
         )
@@ -191,12 +198,12 @@ def build_model_management_panel(state: AppState) -> None:
     def mount_text_models() -> None:
         text_host.clear()
         with text_host:
-            build_models_panel(state, purpose="text")
+            build_models_panel(state, purpose="text", db=platform_db)
 
     def mount_image_models() -> None:
         image_host.clear()
         with image_host:
-            build_models_panel(state, purpose="image")
+            build_models_panel(state, purpose="image", db=platform_db)
 
     mounts = {
         str(all_tab.props["name"]): mount_overview,

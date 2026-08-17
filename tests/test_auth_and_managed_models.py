@@ -5,7 +5,7 @@ import textwrap
 from fastapi.testclient import TestClient
 
 from app.accounts import apply_account_selection, public_accounts, save_account
-from app.ai.model_registry import OPENAI_COMPATIBLE, save_model
+from app.ai.model_registry import GEMINI, OPENAI_COMPATIBLE, public_models, save_model
 from app.api.server import create_api_app
 from app.config import load_config
 from app.db import Database
@@ -78,6 +78,226 @@ def test_auth_api_and_admin_model_boundary(tmp_path) -> None:
             "/api/v1/admin/models",
             headers=user_header,
         ).status_code == 403
+
+
+def test_user_models_follow_login_account_and_keep_platform_fallback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CREDENTIAL_ENCRYPTION_KEY",
+        "test-only-user-model-ownership-key",
+    )
+    db = Database(tmp_path / "user-models.db")
+    platform_db = db.for_user("")
+    user_a_db = db.for_user("user-a")
+    user_b_db = db.for_user("user-b")
+
+    platform_id = save_model(
+        platform_db,
+        name="平台 Gemini",
+        provider_type=GEMINI,
+        api_base="",
+        model="gemini-platform",
+        api_key="platform-secret",
+    )
+    user_a_id = save_model(
+        user_a_db,
+        name="用户 A Gemini",
+        provider_type=GEMINI,
+        api_base="",
+        model="gemini-user-a",
+        api_key="user-a-secret",
+    )
+    user_b_id = save_model(
+        user_b_db,
+        name="用户 B Gemini",
+        provider_type=GEMINI,
+        api_base="",
+        model="gemini-user-b",
+        api_key="user-b-secret",
+    )
+
+    user_a_models = {item["id"]: item for item in public_models(user_a_db)}
+    assert set(user_a_models) == {platform_id, user_a_id}
+    assert user_a_models[platform_id]["scope"] == "platform"
+    assert user_a_models[platform_id]["editable"] is False
+    assert user_a_models[user_a_id]["scope"] == "private"
+    assert user_a_models[user_a_id]["editable"] is True
+    assert user_b_id not in user_a_models
+
+    assert {item["id"] for item in public_models(db.for_user("user-a"))} == {
+        platform_id,
+        user_a_id,
+    }
+    assert {item["id"] for item in public_models(platform_db)} == {platform_id}
+
+    try:
+        save_model(
+            user_b_db,
+            model_id=user_a_id,
+            name="越权修改",
+            provider_type=GEMINI,
+            api_base="",
+            model="gemini-hijack",
+            api_key="hijack-secret",
+        )
+    except ValueError as exc:
+        assert "不属于当前登录账号" in str(exc)
+    else:
+        raise AssertionError("another user's model must not be editable")
+
+
+def test_private_model_rejects_insecure_or_internal_api_base(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CREDENTIAL_ENCRYPTION_KEY",
+        "test-only-private-model-url-key",
+    )
+    user_db = Database(tmp_path / "private-model-url.db").for_user("user-a")
+
+    try:
+        save_model(
+            user_db,
+            name="不安全接口",
+            provider_type=OPENAI_COMPATIBLE,
+            api_base="http://api.example.com/v1",
+            model="example-model",
+            api_key="private-key",
+        )
+    except ValueError as exc:
+        assert "HTTPS" in str(exc)
+    else:
+        raise AssertionError("private model API Base must require HTTPS")
+
+    try:
+        save_model(
+            user_db,
+            name="内网接口",
+            provider_type=OPENAI_COMPATIBLE,
+            api_base="https://127.0.0.1/v1",
+            model="example-model",
+            api_key="private-key",
+        )
+    except ValueError as exc:
+        assert "本机或内网" in str(exc)
+    else:
+        raise AssertionError("private model API Base must reject local targets")
+
+
+def test_user_can_save_model_through_api_without_exposing_credentials(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CREDENTIAL_ENCRYPTION_KEY",
+        "test-only-user-model-api-key",
+    )
+    config = {
+        "_root": str(tmp_path),
+        "_db_path": str(tmp_path / "user-model-api.db"),
+        "_db_target": str(tmp_path / "user-model-api.db"),
+        "_data_dir": str(tmp_path / "data"),
+        "auth": {"required": True},
+        "api": {"token": ""},
+        "ai": {},
+        "feishu": {"enabled": False},
+        "wechat": {},
+    }
+    app = create_api_app(
+        config,
+        BatchService(config),
+        start_feishu=False,
+    )
+
+    with TestClient(app) as client:
+        admin = client.post(
+            "/api/v1/auth/login",
+            json={"username": "lanxue", "password": "lanxue"},
+        ).json()
+        admin_headers = {"Authorization": f"Bearer {admin['token']}"}
+        shared = client.post(
+            "/api/v1/admin/models",
+            headers=admin_headers,
+            json={
+                "name": "平台 Gemini",
+                "provider_type": "gemini",
+                "api_base": "",
+                "model": "gemini-platform",
+                "api_key": "platform-api-key",
+                "enabled": True,
+            },
+        )
+        assert shared.status_code == 200
+        shared_model_id = str(shared.json()["id"])
+
+        first = client.post(
+            "/api/v1/auth/register",
+            json={"username": "model_owner", "password": "secret123"},
+        ).json()
+        second = client.post(
+            "/api/v1/auth/register",
+            json={"username": "model_other", "password": "secret123"},
+        ).json()
+        first_headers = {"Authorization": f"Bearer {first['token']}"}
+        second_headers = {"Authorization": f"Bearer {second['token']}"}
+
+        reserved_id = client.post(
+            "/api/v1/models",
+            headers=first_headers,
+            json={
+                "id": "config:reserved",
+                "name": "冲突模型",
+                "provider_type": "gemini",
+                "api_base": "",
+                "model": "gemini-2.5-flash",
+                "api_key": "private-user-key",
+                "enabled": True,
+            },
+        )
+        assert reserved_id.status_code == 400
+
+        saved = client.post(
+            "/api/v1/models",
+            headers=first_headers,
+            json={
+                "name": "我的 Gemini",
+                "provider_type": "gemini",
+                "api_base": "",
+                "model": "gemini-2.5-flash",
+                "api_key": "private-user-key",
+                "enabled": True,
+            },
+        )
+        assert saved.status_code == 200
+        model_id = str(saved.json()["id"])
+        assert "private-user-key" not in saved.text
+        assert saved.json()["scope"] == "private"
+        assert saved.json()["editable"] is True
+
+        first_models = client.get(
+            "/api/v1/models",
+            headers=first_headers,
+        ).json()
+        second_models = client.get(
+            "/api/v1/models",
+            headers=second_headers,
+        ).json()
+        first_by_id = {str(item["id"]): item for item in first_models}
+        assert model_id in {str(item["id"]) for item in first_models}
+        assert model_id not in {str(item["id"]) for item in second_models}
+        assert first_by_id[shared_model_id]["scope"] == "platform"
+        assert first_by_id[shared_model_id]["editable"] is False
+        assert shared_model_id in {str(item["id"]) for item in second_models}
+
+        deleted = client.delete(
+            f"/api/v1/models/{model_id}",
+            headers=first_headers,
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
 
 
 def test_auth_required_cannot_be_disabled_by_legacy_environment(
@@ -156,6 +376,9 @@ def test_postgres_sql_translation_keeps_repository_contract() -> None:
     assert lastrowid is True
     assert "BIGSERIAL PRIMARY KEY" in postgres_schema_sql(
         "id INTEGER PRIMARY KEY AUTOINCREMENT"
+    )
+    assert "owner_user_id TEXT NOT NULL DEFAULT ''" in postgres_schema_sql(
+        "owner_user_id TEXT NOT NULL DEFAULT ''"
     )
 
     statement, lastrowid = postgres_statement(

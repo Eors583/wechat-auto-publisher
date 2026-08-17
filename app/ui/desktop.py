@@ -67,6 +67,7 @@ from app.ui.panels.onboarding_wizard import (
     configuration_health_needs_refresh,
     should_show_onboarding,
 )
+from app.ui.panels.models import build_models_panel
 from app.ui.panels.overview import build_overview_cards
 from app.ui.panels.prompts import build_prompt_templates_panel
 from app.ui.panels.review_jury import enabled_profile_options
@@ -235,6 +236,31 @@ def create_desktop_app() -> None:
         )
         return
 
+    with ui.dialog().props("maximized").classes(
+        "fullscreen-editor-dialog"
+    ) as user_models_dialog:
+        with ui.card().classes("fullscreen-editor-card"):
+            with ui.row().classes("fullscreen-editor-header"):
+                with ui.column().classes("gap-0"):
+                    ui.label("我的大模型").classes("text-h6 text-weight-bold")
+                    ui.label(
+                        "配置只属于当前登录账号，API Key 加密保存到数据库。"
+                    ).classes("muted")
+                ui.space()
+                ui.button(
+                    icon="close",
+                    on_click=user_models_dialog.close,
+                ).props("flat round color=grey-8 aria-label=关闭我的大模型")
+            user_models_host = ui.column().classes(
+                "ops-user-models-body w-full"
+            )
+
+    def open_user_models() -> None:
+        user_models_host.clear()
+        with user_models_host:
+            build_models_panel(page_state, purpose="text")
+        user_models_dialog.open()
+
     with ui.element("div").classes("shell ops-workbench-shell"):
         with ui.element("div").classes("ops-sidebar-brand"):
             with ui.element("span").classes("ops-sidebar-brand-mark"):
@@ -294,12 +320,18 @@ def create_desktop_app() -> None:
                 ).classes("ops-topbar-icon-button").props(
                     "flat round dense aria-label=查看后台活动"
                 )
-                ui.button(
-                    icon="settings",
-                    on_click=lambda: tabs.set_value(tab_accounts),
-                ).classes("ops-topbar-icon-button").props(
-                    "flat round dense aria-label=打开公众号设置"
-                )
+                with ui.button(icon="settings").classes(
+                    "ops-topbar-icon-button"
+                ).props("flat round dense aria-label=打开设置"):
+                    with ui.menu():
+                        ui.menu_item(
+                            "公众号与创作规则",
+                            on_click=lambda: tabs.set_value(tab_accounts),
+                        )
+                        ui.menu_item(
+                            "我的大模型",
+                            on_click=open_user_models,
+                        )
 
         health_state = {"status": onboarding_status}
 
@@ -421,6 +453,7 @@ def create_desktop_app() -> None:
                     "flat round dense aria-label=用户菜单"
                 ):
                     with ui.menu():
+                        ui.menu_item("我的大模型", on_click=open_user_models)
                         ui.menu_item(
                             "退出登录",
                             on_click=lambda: (
@@ -4845,7 +4878,7 @@ def _build_help_panel() -> None:
             """
 **第一次使用**
 
-模型与 API Key 由管理员在“设置 → 后台管理”中统一维护。普通用户只需在公众号管理中选择平台已经启用的模型，不需要接触密钥和接口协议；飞书管理员可在“设置 → 飞书”中按页面引导完成连接。
+每个用户都可以在右上角“设置 → 我的大模型”中保存自己的 API Key、接口地址和模型名称；这些配置只跟随当前登录账号。平台公共模型仍可直接选择，但只能由管理员维护。
 
 1. **选择内容**：在工作台直接粘贴链接、正文或输入话题；需要找热点和关注文章时，点击“从选题库选择”  
 2. **选择公众号**：系统会自动使用每个公众号已经保存的模型、创作规则、排版和图片配置  

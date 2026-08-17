@@ -250,6 +250,15 @@ def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> N
     assert "flex-wrap: wrap" in action_css[:400]
 
 
+def test_authenticated_user_can_open_personal_model_settings() -> None:
+    source = inspect.getsource(desktop.create_desktop_app)
+
+    assert 'ui.label("我的大模型")' in source
+    assert 'ui.menu_item("我的大模型", on_click=open_user_models)' in source
+    assert "build_models_panel(page_state, purpose=\"text\")" in source
+    assert "配置只属于当前登录账号" in source
+
+
 def test_custom_prompt_template_manager_is_available_from_account_configuration() -> None:
     source = inspect.getsource(desktop._render_account_config_workspace)
 
