@@ -2498,6 +2498,9 @@ def build_review_page(
                         asyncio.create_task(run_rewrite_background())
                         ui.notify("已转入后台改写，可继续使用其他功能", type="info")
 
+                    current_review_status = str(
+                        latest_review.get("status") or ""
+                    )
                     if not latest_review:
                         ui.button(
                             "后台开始 AI 评审",
@@ -2506,7 +2509,15 @@ def build_review_page(
                         ).classes("w-full").props(
                             "flat color=primary no-caps"
                         )
-                    elif str(latest_review.get("status") or "") not in {
+                    elif current_review_status == "failed":
+                        ui.button(
+                            "重新评审",
+                            icon="refresh",
+                            on_click=start_review_background,
+                        ).classes("w-full").props(
+                            "flat color=primary no-caps"
+                        )
+                    elif current_review_status not in {
                         "running",
                         "rewriting",
                         "candidate_ready",

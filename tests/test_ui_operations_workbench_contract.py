@@ -125,6 +125,16 @@ def test_review_page_contains_long_content_and_exposes_failure_reason() -> None:
     assert "overflow-y: auto" in APP_CSS
 
 
+def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    failed_branch = source.index('current_review_status == "failed"')
+    rewrite_action = source.index('"按已选意见后台改写"')
+    assert failed_branch < rewrite_action
+    assert '"重新评审"' in source[failed_branch:rewrite_action]
+    assert "on_click=start_review_background" in source[failed_branch:rewrite_action]
+
+
 def test_feature_mapping_document_covers_every_confirmed_page() -> None:
     mapping = (ROOT / "docs" / "新版前端功能映射与验收清单.md").read_text(
         encoding="utf-8"
