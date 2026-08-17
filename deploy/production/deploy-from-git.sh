@@ -94,6 +94,7 @@ healthy=false
 for _ in $(seq 1 36); do
   if curl -fsS http://127.0.0.1:18776/health >/dev/null \
     && curl -fsS http://127.0.0.1:18775/ >/dev/null \
+    && curl -fsS http://127.0.0.1:18778/publisher/ >/dev/null \
     && curl -fsS http://127.0.0.1:18777/ >/dev/null; then
     healthy=true
     break

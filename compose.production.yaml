@@ -95,6 +95,28 @@ services:
     networks:
       - internal
 
+  web_https:
+    build: *app_build
+    image: wechat-auto-publisher:${APP_VERSION:-production}
+    command:
+      - python
+      - -m
+      - app.ui.server
+    environment:
+      <<: *app_environment
+      WECHAT_PUBLISHER_UI_ROOT_PATH: /publisher
+      NICEGUI_STORAGE_PATH: /app/data/nicegui/web-https
+    volumes:
+      - app_data:/app/data
+    ports:
+      - "18778:18765"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
   admin:
     build: *app_build
     image: wechat-auto-publisher:${APP_VERSION:-production}

@@ -15,11 +15,13 @@ REQUIRED_CONTAINERS=(
   wechat-publisher-postgres-1
   wechat-publisher-api-1
   wechat-publisher-web-1
+  wechat-publisher-web_https-1
   wechat-publisher-admin-1
 )
 HEALTH_URLS=(
   http://127.0.0.1:18776/health
   http://127.0.0.1:18775/
+  http://127.0.0.1:18778/publisher/
   http://127.0.0.1:18777/admin/
 )
 
