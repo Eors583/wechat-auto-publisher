@@ -28,5 +28,5 @@ def test_https_publisher_reuses_the_existing_api_certificate_host() -> None:
     assert "WECHAT_PUBLISHER_UI_ROOT_PATH: /publisher" in compose
     assert '"18778:18765"' in compose
     assert "location /publisher/" in nginx
-    assert "proxy_pass http://127.0.0.1:18778;" in nginx
+    assert "proxy_pass http://127.0.0.1:18778/;" in nginx
     assert "http://127.0.0.1:18778/publisher/" in deploy

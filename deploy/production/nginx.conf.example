@@ -71,7 +71,7 @@ server {
     client_max_body_size 30m;
 
     location /publisher/ {
-        proxy_pass http://127.0.0.1:18778;
+        proxy_pass http://127.0.0.1:18778/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
