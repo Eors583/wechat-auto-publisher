@@ -141,6 +141,21 @@ def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:
     assert "on_click=start_review_background" in source[failed_branch:]
 
 
+def test_review_issues_show_problem_and_suggestion_before_selection() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    assert 'issue.get("problem")' in source
+    assert 'issue.get("suggestion")' in source
+    assert 'issue.get("category")' in source
+    assert 'issue.get("location")' in source
+    assert 'issue.get("can_auto_apply")' in source
+    assert 'f"问题：{problem}"' in source
+    assert 'f"建议：{suggestion}"' in source
+    assert "此项需人工处理，不会自动改写" in source
+    assert ".ops-issue-content" in APP_CSS
+    assert "overflow-wrap: anywhere" in APP_CSS
+
+
 def test_review_action_is_replaced_by_persisted_progress() -> None:
     source = inspect.getsource(tasks.build_review_page)
 

@@ -3034,6 +3034,16 @@ APP_CSS += """
 .ops-issue { display: grid; gap: var(--ui-space-1); padding: 10px; border-left: 3px solid var(--ui-color-warning); color: var(--ui-color-warning); background: var(--ui-color-warning-soft); }
 .ops-issue-risk { border-left-color: var(--ui-color-danger); color: var(--ui-color-danger); background: var(--ui-color-danger-soft); }
 .ops-issue-label { font-weight: var(--ui-font-weight-medium); }
+.ops-issue-content,
+.ops-issue-manual-note {
+  min-width: 0;
+  max-width: 100%;
+  line-height: var(--ui-line-height-base);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.ops-issue-suggestion { color: var(--ui-color-text-primary); }
+.ops-issue-manual-note { font-size: var(--ui-font-size-xs); }
 .ops-review-footer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-2); margin-top: 14px; }
 .ops-review-rewrite-action { grid-column: 1 / -1; width: 100%; }
 .ops-review-job-panel { display: grid; grid-template-rows: 70px minmax(0, 1fr); min-height: 0; }

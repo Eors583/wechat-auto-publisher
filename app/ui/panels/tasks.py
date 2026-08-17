@@ -2315,20 +2315,33 @@ def build_review_page(
                         for issue in issues[:3]:
                             issue_id = str(issue.get("id") or "")
                             blocking = bool(issue.get("blocks_draft"))
+                            can_auto_apply = bool(issue.get("can_auto_apply"))
+                            category = str(issue.get("category") or "综合建议")
+                            location = str(issue.get("location") or "全文")
+                            problem = str(issue.get("problem") or "").strip()
+                            suggestion = str(issue.get("suggestion") or "").strip()
                             with ui.element("div").classes(
                                 "ops-issue ops-issue-risk" if blocking else "ops-issue"
                             ):
                                 ui.label(
-                                    "阻断项" if blocking else "可优化"
+                                    " · ".join(
+                                        (
+                                            "阻断项" if blocking else "可优化",
+                                            location,
+                                            category,
+                                        )
+                                    )
                                 ).classes("ops-issue-label")
                                 ui.label(
-                                    str(
-                                        issue.get("message")
-                                        or issue.get("description")
-                                        or issue.get("title")
-                                        or "评审建议"
-                                    )
-                                )
+                                    f"问题：{problem}"
+                                    if problem
+                                    else "问题：该项评审内容不完整，请重新评审"
+                                ).classes("ops-issue-content")
+                                ui.label(
+                                    f"建议：{suggestion}"
+                                    if suggestion
+                                    else "建议：请重新运行 AI 评审后再作选择"
+                                ).classes("ops-issue-content ops-issue-suggestion")
                                 if blocking and issue_id:
                                     async def resolve_issue(
                                         issue_value: str = issue_id,
@@ -2350,7 +2363,7 @@ def build_review_page(
                                         "已人工核实",
                                         on_click=resolve_issue,
                                     ).props("flat dense color=negative no-caps")
-                                elif issue_id:
+                                elif issue_id and can_auto_apply:
                                     checkbox = ui.checkbox(
                                         "纳入后台改写",
                                         value=issue_id in selected_issue_ids,
@@ -2361,6 +2374,10 @@ def build_review_page(
                                             if bool(event.value)
                                             else selected_issue_ids.discard(value)
                                         )
+                                    )
+                                elif issue_id:
+                                    ui.label("此项需人工处理，不会自动改写").classes(
+                                        "ops-issue-manual-note"
                                     )
 
                     async def mark_needs_changes() -> None:
