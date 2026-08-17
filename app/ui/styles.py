@@ -1429,6 +1429,38 @@ body,
 .ops-dialog-lg { width: min(var(--ui-layout-dialog-lg), calc(100vw - var(--ui-space-8))) !important; max-width: var(--ui-layout-dialog-lg) !important; }
 .ops-dialog-xl { width: min(var(--ui-layout-dialog-xl), calc(100vw - var(--ui-space-8))) !important; max-width: var(--ui-layout-dialog-xl) !important; }
 .ops-dialog-scroll { max-height: calc(100vh - var(--ui-space-8)); overflow-y: auto; }
+.ops-dialog-model-editor {
+  width: min(var(--ui-layout-dialog-md), calc(100vw - var(--ui-space-8))) !important;
+  max-width: var(--ui-layout-dialog-md) !important;
+  min-width: 0;
+  max-height: calc(100dvh - var(--ui-space-8));
+  padding: var(--ui-space-6) !important;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.ops-dialog-model-editor > *,
+.ops-dialog-model-editor .q-field,
+.ops-dialog-model-editor .q-field__control,
+.ops-dialog-model-editor .q-field__control-container,
+.ops-dialog-model-editor .q-field__native {
+  min-width: 0;
+  max-width: 100%;
+}
+.ops-dialog-model-editor .q-label,
+.ops-dialog-model-editor .muted {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.ops-model-kind-toggle {
+  min-height: var(--ui-segment-height);
+  padding: var(--ui-space-1);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-color-bg-subtle);
+}
+.ops-model-kind-toggle .q-btn {
+  min-height: var(--ui-control-height-button);
+  border-radius: var(--ui-radius-xs) !important;
+}
 .ops-review-copy { white-space: pre-wrap; line-height: var(--ui-line-height-relaxed); overflow-wrap: anywhere; }
 .ops-cover-thumb { width: 180px; aspect-ratio: 2.35 / 1; }
 .ops-cover-ratio { aspect-ratio: 2.35 / 1; }

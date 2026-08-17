@@ -185,7 +185,7 @@ def test_text_model_panel_renders_three_steps_inside_existing_page(tmp_path) -> 
     assert "1. 选择厂商" in texts
     assert "2. 获取并粘贴 Key" in texts
     assert "3. 测试并绑定公众号" in texts
-    assert "添加文本模型" in texts
+    assert "添加自定义模型" in texts
     assert all("独立向导" not in text for text in texts)
 
 
@@ -217,7 +217,7 @@ def test_model_editor_uses_free_text_model_name_instead_of_select(
 
     try:
         build_models_panel(state, purpose="text")
-        _click_button("添加文本模型")
+        _click_button("添加自定义模型")
         elements = list(ui.context.client.elements.values())
     finally:
         ui.context.client.remove_all_elements()

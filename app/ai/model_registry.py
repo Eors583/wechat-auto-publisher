@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import hashlib
+import ipaddress
 import os
 import uuid
 from ctypes import wintypes
@@ -22,10 +23,17 @@ from app.db import Database
 from app.services.url_validation import validate_external_url
 
 OPENAI_COMPATIBLE = "openai_compatible"
+LOCAL_OPENAI_COMPATIBLE = "local_openai_compatible"
 GEMINI = "gemini"
 MANUS = "manus"
 OPENAI_IMAGE = IMAGE_CUSTOM
-PROVIDER_TYPES = {OPENAI_COMPATIBLE, GEMINI, MANUS, *IMAGE_PROVIDER_TYPES}
+PROVIDER_TYPES = {
+    OPENAI_COMPATIBLE,
+    LOCAL_OPENAI_COMPATIBLE,
+    GEMINI,
+    MANUS,
+    *IMAGE_PROVIDER_TYPES,
+}
 CONFIG_MODEL_PREFIX = "config:"
 
 _CONFIG_MODEL_LABELS = {
@@ -171,11 +179,41 @@ def save_model(
         raise ValueError("显示名称和模型名称不能为空")
     if provider_type not in PROVIDER_TYPES:
         raise ValueError("不支持的接口类型")
+    if provider_type == LOCAL_OPENAI_COMPATIBLE:
+        if not db.owner_user_id:
+            raise ValueError("本地模型必须由登录用户在公众号配置中添加")
+        parsed = urlparse(api_base.strip())
+        hostname = str(parsed.hostname or "").casefold()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        try:
+            is_loopback = bool(
+                hostname and ipaddress.ip_address(hostname).is_loopback
+            )
+        except ValueError:
+            is_loopback = False
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not port
+            or (
+                hostname not in {"localhost", "localhost.localdomain"}
+                and not is_loopback
+            )
+        ):
+            raise ValueError(
+                "本地模型地址必须是带端口的 localhost/127.0.0.1/::1 地址"
+            )
     if provider_type == MANUS:
         api_base = api_base.strip() or "https://api.manus.ai"
     if provider_type == OPENAI_COMPATIBLE and not api_base.strip():
         raise ValueError("OpenAI 兼容接口必须填写 API Base URL")
-    if db.owner_user_id and api_base.strip():
+    if (
+        db.owner_user_id
+        and provider_type != LOCAL_OPENAI_COMPATIBLE
+        and api_base.strip()
+    ):
         if urlparse(api_base.strip()).scheme != "https":
             raise ValueError("个人模型的 API Base URL 必须使用 HTTPS")
         validate_external_url(api_base.strip())
@@ -185,9 +223,13 @@ def save_model(
             raise ValueError("自定义生图接口必须填写 API Base URL")
     existing = db.get_ai_model(model_id) if model_id else None
     encrypted = encrypt_api_key(api_key.strip()) if api_key and api_key.strip() else ""
-    if not encrypted and existing:
+    if (
+        not encrypted
+        and existing
+        and str(existing.get("provider_type") or "") == provider_type
+    ):
         encrypted = str(existing["api_key_encrypted"])
-    if not encrypted:
+    if not encrypted and provider_type != LOCAL_OPENAI_COMPATIBLE:
         raise ValueError("API Key 不能为空")
     model_id = model_id or f"custom_{uuid.uuid4().hex[:12]}"
     db.upsert_ai_model(
@@ -218,11 +260,17 @@ def public_models(
         models = [item for item in models if is_image_provider(item.get("provider_type"))]
     for item in models:
         record_owner = str(item.pop("owner_user_id", "") or "")
+        has_api_key = bool(str(item.get("api_key_encrypted") or ""))
         item.pop("api_key_encrypted", None)
         item["enabled"] = bool(item.get("enabled"))
-        item["has_api_key"] = True
+        item["has_api_key"] = has_api_key
         item["scope"] = "private" if record_owner else "platform"
         item["editable"] = record_owner == db.owner_user_id
+        item["connection_type"] = (
+            "local"
+            if item.get("provider_type") == LOCAL_OPENAI_COMPATIBLE
+            else "api"
+        )
     return models
 
 
@@ -247,6 +295,7 @@ def apply_model_selection(
         if not record or not bool(record.get("enabled")):
             raise ValueError(f"所选模型不可用或已停用：{model_id}")
         custom[model_id] = {
+            "id": model_id,
             "name": record["name"],
             "provider_type": record["provider_type"],
             "api_base": record.get("api_base") or "",
@@ -282,7 +331,10 @@ def test_model_connection(db: Database, model_id: str) -> str:
     if not record:
         raise ValueError("模型不存在")
     key = decrypt_api_key(record["api_key_encrypted"])
-    if is_image_provider(record["provider_type"]):
+    if record["provider_type"] == LOCAL_OPENAI_COMPATIBLE:
+        client = build_text_client(db, {}, model_id)
+        client.complete("只回复 OK", max_tokens=8, temperature=0, max_attempts=1)
+    elif is_image_provider(record["provider_type"]):
         from app.ai.image_generator import test_image_endpoint
 
         return test_image_endpoint(
@@ -351,6 +403,7 @@ def build_text_client(
 ) -> Any:
     """Build one configured text client for short assistant completions."""
     from app.ai.gemini import GeminiClient
+    from app.ai.local_browser import LocalBrowserCompatClient
     from app.ai.manus import ManusClient
     from app.ai.openai_compat import OpenAICompatClient
 
@@ -380,6 +433,13 @@ def build_text_client(
         name = str(record.get("name") or model_id)
         key = decrypt_api_key(str(record.get("api_key_encrypted") or ""))
 
+    if provider_type == LOCAL_OPENAI_COMPATIBLE:
+        return LocalBrowserCompatClient(
+            db=db,
+            model_id=model_id,
+            model=str(record.get("model") or ""),
+            provider_name=name,
+        )
     if provider == "manus" or provider_type == MANUS:
         # Manus runs a remote asynchronous task. Editorial reviews and long
         # generations regularly need more than the generic HTTP-style 120s

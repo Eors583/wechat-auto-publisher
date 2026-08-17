@@ -154,6 +154,17 @@ def test_account_configuration_fields_are_vertically_centered() -> None:
     assert "align-items: center" in APP_CSS
 
 
+def test_default_model_select_can_open_the_custom_model_editor() -> None:
+    source = inspect.getsource(desktop._render_account_config_workspace)
+
+    assert '"＋ 添加自定义模型"' in source
+    assert "ADD_CUSTOM_MODEL_VALUE" in source
+    assert "open_custom_model_editor()" in source
+    assert 'render_panel=False' in source
+    assert ".ops-dialog-model-editor" in APP_CSS
+    assert ".ops-model-kind-toggle" in APP_CSS
+
+
 def test_account_layout_editor_can_import_a_public_wechat_article() -> None:
     source = inspect.getsource(desktop._build_accounts_panel)
 

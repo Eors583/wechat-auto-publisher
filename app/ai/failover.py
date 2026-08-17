@@ -6,6 +6,8 @@ import re
 import time
 from typing import Any
 
+from app.db import Database
+
 from . import (
     RewriteResult,
     SUBTITLE_CANDIDATE_COUNT,
@@ -60,7 +62,12 @@ DOMESTIC_PRESETS: dict[str, dict[str, str]] = {
 
 
 class FailoverRewriter:
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        db: Database | None = None,
+    ) -> None:
         self.config = config
         ai = config.get("ai", {})
         self.primary = ai.get("primary", "deepseek")
@@ -104,7 +111,18 @@ class FailoverRewriter:
         # 界面中由用户添加的模型。ID 是稳定选择值，名称仅用于日志展示。
         for model_id, custom_cfg in (ai.get("custom_models") or {}).items():
             provider_type = str(custom_cfg.get("provider_type") or "openai_compatible")
-            if provider_type == "manus":
+            if provider_type == "local_openai_compatible":
+                if db is None:
+                    raise ValueError("本地模型需要绑定用户数据库连接")
+                from .local_browser import LocalBrowserCompatClient
+
+                self._clients[model_id] = LocalBrowserCompatClient(
+                    db=db,
+                    model_id=str(custom_cfg.get("id") or model_id),
+                    model=str(custom_cfg.get("model") or ""),
+                    provider_name=str(custom_cfg.get("name") or model_id),
+                )
+            elif provider_type == "manus":
                 self._clients[model_id] = ManusClient(
                     api_key=str(custom_cfg.get("api_key") or ""),
                     api_base=str(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from nicegui import run, ui
 
@@ -18,7 +18,12 @@ from app.ai.image_providers import (
     infer_image_provider,
     is_image_provider,
 )
-from app.ai.model_registry import GEMINI, MANUS, OPENAI_COMPATIBLE
+from app.ai.model_registry import (
+    GEMINI,
+    LOCAL_OPENAI_COMPATIBLE,
+    MANUS,
+    OPENAI_COMPATIBLE,
+)
 from app.db import Database
 from app.services.configuration import ConfigurationService
 from app.services.onboarding import OnboardingService, TEXT_MODEL_PRESETS
@@ -100,11 +105,14 @@ def build_models_panel(
     *,
     purpose: str = "text",
     db: Database | None = None,
-) -> None:
+    render_panel: bool = True,
+    on_model_saved: Callable[[dict[str, Any]], None] | None = None,
+) -> Callable[[str | None], None]:
     """Manage model credentials and teach the complete setup flow in place."""
 
-    loaded = state.reload_config()
-    config = loaded if isinstance(loaded, dict) else state.config
+    state_config = dict(getattr(state, "config", {}) or {})
+    loaded = state.reload_config() if render_panel else state_config
+    config = loaded if isinstance(loaded, dict) else state_config
     model_db = db or state.db
     image_panel = purpose == "image"
     configuration = ConfigurationService(model_db, config)
@@ -112,7 +120,7 @@ def build_models_panel(
     text_presets = {
         str(item["id"]): item for item in onboarding.model_presets()
     }
-    host = ui.column().classes("w-full")
+    host = ui.column().classes("w-full") if render_panel else None
 
     def image_test_path(model_id: str) -> Path:
         return (
@@ -187,20 +195,36 @@ def build_models_panel(
         initial_text_provider = (
             infer_text_provider_preset(record) if not image_panel else ""
         )
+        initial_connection_type = (
+            "local"
+            if str((record or {}).get("provider_type") or "")
+            == LOCAL_OPENAI_COMPATIBLE
+            else "api"
+        )
 
-        with ui.dialog() as dialog, ui.card().classes("w-full").style(
-            "max-width:760px"
+        with ui.dialog() as dialog, ui.card().classes(
+            "ops-dialog-model-editor ops-dialog-scroll"
         ):
             ui.label(
                 ("编辑图片模型" if record else "添加图片模型")
                 if image_panel
-                else ("编辑文本模型" if record else "添加文本模型")
+                else ("编辑自定义模型" if record else "添加自定义模型")
             ).classes("text-h6 text-weight-bold")
             ui.label(
                 "按顺序填写：选择厂商 → 打开官方页面获取 API Key → 保存并生成测试图。"
                 if image_panel
-                else "按顺序填写：选择厂商 → 打开官方页面获取 API Key → 保存并测试连接。"
+                else "选择模型类型并填写连接信息，保存前建议先测试连接。"
             ).classes("muted")
+
+            connection_in = None
+            if not image_panel:
+                ui.label("模型类型").classes("ops-config-field-label")
+                connection_in = ui.toggle(
+                    {"api": "API 模型", "local": "本地模型"},
+                    value=initial_connection_type,
+                ).classes("ops-model-kind-toggle w-full").props(
+                    "spread no-caps unelevated"
+                )
 
             name_in = ui.input(
                 "配置名称（可选）",
@@ -293,6 +317,41 @@ def build_models_panel(
                     model_in.update()
                     return
 
+                if str(connection_in.value or "api") == "local":
+                    type_in.set_visibility(False)
+                    base_in.set_visibility(True)
+                    official_help.clear()
+                    with official_help:
+                        ui.label(
+                            "请求会由当前登录用户打开的网页转发到自己电脑上的本地模型。"
+                        ).classes("text-weight-medium")
+                        ui.label(
+                            "生成期间请保持本页面打开；Ollama 或 LM Studio 必须允许当前网页跨域访问。"
+                        ).classes("muted")
+                        ui.label(
+                            "常用地址：Ollama 为 http://localhost:11434/v1，LM Studio 通常为 http://localhost:1234/v1。"
+                        ).classes("muted")
+                    endpoint_note.text = (
+                        "这里只允许带端口的 localhost、127.0.0.1 或 ::1 地址；服务器不会直接访问该地址。"
+                    )
+                    model_note.text = "填写本地服务中已经下载并启用的准确模型名称。"
+                    key_in.props(
+                        'label="API Key（本地服务不需要时可留空）" '
+                        'placeholder="可选，仅在本地服务启用鉴权时填写"'
+                    )
+                    if reset_model:
+                        base_in.value = "http://localhost:11434/v1"
+                        model_in.value = "qwen2.5:7b"
+                        base_in.update()
+                        model_in.update()
+                    return
+
+                type_in.set_visibility(True)
+                key_in.props(
+                    'label="第 2 步：粘贴 API Key" '
+                    'placeholder="从上方官方页面复制，不要填写登录密码"'
+                )
+
                 preset_id = str(type_in.value or "custom")
                 preset = text_presets[preset_id]
                 is_custom = preset_id == "custom"
@@ -345,6 +404,10 @@ def build_models_panel(
                 model_in.update()
 
             type_in.on_value_change(lambda _: sync_type(reset_model=True))
+            if connection_in is not None:
+                connection_in.on_value_change(
+                    lambda _: sync_type(reset_model=True)
+                )
             sync_type()
 
             def persist_form() -> dict[str, Any]:
@@ -361,6 +424,11 @@ def build_models_panel(
                     )
                     selected_model = str(model_in.value or "")
                     provider_label = image_preset.label
+                elif str(connection_in.value or "api") == "local":
+                    provider_type = LOCAL_OPENAI_COMPATIBLE
+                    selected_base = str(base_in.value or "")
+                    selected_model = str(model_in.value or "")
+                    provider_label = "本地模型"
                 else:
                     text_preset = text_presets[selected_provider]
                     provider_type = str(text_preset["provider_type"])
@@ -394,6 +462,8 @@ def build_models_panel(
                         missing_ok=True
                     )
                 state.refresh_model_selects()
+                if on_model_saved is not None:
+                    on_model_saved(saved)
                 return saved
 
             async def submit(*, test_after_save: bool, button: Any) -> None:
@@ -422,7 +492,7 @@ def build_models_panel(
                             (
                                 "图片模型已保存，但还未验证。请继续点击“生成测试图”。"
                                 if image_panel
-                                else "文本模型已保存，但还未验证。请继续点击“测试连接”。"
+                                else "自定义模型已保存，但还未验证。请继续点击“测试连接”。"
                             ),
                             type="warning",
                             timeout=7000,
@@ -453,7 +523,7 @@ def build_models_panel(
                         dialog.close()
                         ui.notify(
                             str(result.get("message") or "连接成功")
-                            + "，文本模型接入完成",
+                            + "，自定义模型接入完成",
                             type="positive",
                         )
                         render_models()
@@ -578,6 +648,8 @@ def build_models_panel(
         )
 
     def render_models() -> None:
+        if host is None:
+            return
         host.clear()
         listed = configuration.list_models(
             purpose="image" if image_panel else "text",
@@ -655,7 +727,7 @@ def build_models_panel(
                             else "每个公众号可以一对一绑定不同文本模型。"
                         ).classes("muted")
                     ui.button(
-                        "添加图片模型" if image_panel else "添加文本模型",
+                        "添加图片模型" if image_panel else "添加自定义模型",
                         on_click=lambda: open_editor(),
                     ).props("unelevated color=teal-9 no-caps icon=add")
 
@@ -703,7 +775,7 @@ def build_models_panel(
                     ui.label(
                         "点击上方“添加图片模型”，厂商、接口和常用模型名称都已替你准备好，模型名称也可直接输入。"
                         if image_panel
-                        else "点击上方“添加文本模型”，选择厂商后只需去官方页面复制 API Key。"
+                        else "点击上方“添加自定义模型”，可选择本地模型或 API 模型。"
                     ).classes("muted")
                 return
 
@@ -723,6 +795,10 @@ def build_models_panel(
                                 )
                                 if is_image_provider(item.get("provider_type"))
                                 else (
+                                    "本地模型"
+                                    if item["provider_type"]
+                                    == LOCAL_OPENAI_COMPATIBLE
+                                    else (
                                     "Gemini"
                                     if item["provider_type"] == GEMINI
                                     else (
@@ -730,14 +806,21 @@ def build_models_panel(
                                         if item["provider_type"] == MANUS
                                         else "OpenAI 兼容"
                                     )
+                                    )
                                 )
                             )
                             ui.label(f'{kind} · {item["model"]}').classes("muted")
                             if item.get("api_base"):
                                 ui.label(str(item["api_base"])).classes("muted")
-                            ui.label("API Key：••••••••（已加密保存）").classes(
-                                "muted"
-                            )
+                            ui.label(
+                                "API Key：••••••••（已加密保存）"
+                                if item.get("has_api_key")
+                                else "API Key：本地服务未启用鉴权"
+                            ).classes("muted")
+                            if item.get("connection_type") == "local":
+                                ui.label(
+                                    "通过当前浏览器连接本机；生成期间请保持网页打开"
+                                ).classes("text-warning")
                             if image_panel:
                                 tested_path = image_test_path(
                                     editable_model_id
@@ -806,6 +889,7 @@ def build_models_panel(
                             ).classes("muted")
 
     render_models()
+    return open_editor
 
 
 __all__ = [

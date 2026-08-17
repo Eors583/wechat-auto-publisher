@@ -183,7 +183,10 @@ class AppState:
         if purpose not in {"text", "image"}:
             raise ValueError(f"unsupported model purpose: {purpose}")
         options = {
-            str(item["id"]): f'{item["name"]} · {item["model"]}'
+            str(item["id"]): (
+                f'{"本地" if item.get("connection_type") == "local" else "API"}'
+                f' · {item["name"]} · {item["model"]}'
+            )
             for item in public_models(
                 self.db,
                 enabled_only=True,

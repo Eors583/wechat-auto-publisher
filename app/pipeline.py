@@ -43,7 +43,7 @@ class Pipeline:
             str(config.get("_db_target") or config["_db_path"])
         )
         self.notifier = Notifier((config.get("notify") or {}).get("webhook_url"))
-        self.rewriter = FailoverRewriter(config)
+        self.rewriter = FailoverRewriter(config, db=self.db)
         self.renderer = TemplateRenderer(config)
         self.scorer = TitleScorer()
         self.cancel_event = cancel_event or threading.Event()

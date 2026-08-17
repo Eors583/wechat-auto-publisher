@@ -267,6 +267,20 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS local_model_requests (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    request_json TEXT NOT NULL,
+                    response_text TEXT,
+                    error TEXT,
+                    claimed_by TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (model_id) REFERENCES ai_models(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS prompt_templates (
                     id TEXT PRIMARY KEY,
                     owner_user_id TEXT NOT NULL DEFAULT '',
@@ -655,6 +669,8 @@ class Database:
                     ON draft_deliveries(status, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_user
                     ON user_sessions(user_id, expires_at);
+                CREATE INDEX IF NOT EXISTS idx_local_model_requests_owner_status
+                    ON local_model_requests(owner_user_id, status, created_at);
                 """
             )
             # Customer-owned records are scoped to the login account. Existing
@@ -2964,6 +2980,168 @@ class Database:
             conn.execute(
                 "DELETE FROM ai_models WHERE id = ? AND owner_user_id = ?",
                 (model_id, owner_user_id),
+            )
+
+    def create_local_model_request(
+        self,
+        model_id: str,
+        payload: dict[str, Any],
+    ) -> str:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            raise ValueError("本地模型请求必须绑定登录用户")
+        model = self.get_ai_model(model_id)
+        if (
+            not model
+            or str(model.get("provider_type") or "")
+            != "local_openai_compatible"
+        ):
+            raise ValueError("本地模型不存在或不属于当前登录账号")
+        request_id = uuid.uuid4().hex
+        now = _utc_now()
+        expired_before = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).isoformat(timespec="microseconds")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM local_model_requests
+                WHERE owner_user_id = ? AND updated_at < ?
+                """,
+                (owner_user_id, expired_before),
+            )
+            conn.execute(
+                """
+                INSERT INTO local_model_requests (
+                    id, owner_user_id, model_id, status, request_json,
+                    response_text, error, claimed_by, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, '', '', '', ?, ?)
+                """,
+                (
+                    request_id,
+                    owner_user_id,
+                    model_id,
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        return request_id
+
+    def claim_local_model_request(
+        self,
+        claimed_by: str,
+    ) -> dict[str, Any] | None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id or not str(claimed_by or "").strip():
+            return None
+        now = _utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM local_model_requests
+                WHERE owner_user_id = ? AND status = 'pending'
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                (owner_user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            request_id = str(row["id"])
+            updated = conn.execute(
+                """
+                UPDATE local_model_requests
+                SET status = 'running', claimed_by = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND status = 'pending'
+                """,
+                (str(claimed_by), now, request_id, owner_user_id),
+            )
+            if updated.rowcount != 1:
+                return None
+            claimed = conn.execute(
+                """
+                SELECT * FROM local_model_requests
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (request_id, owner_user_id),
+            ).fetchone()
+        if claimed is None:
+            return None
+        result = dict(claimed)
+        result["request"] = _loads_json(result.get("request_json"), {})
+        return result
+
+    def complete_local_model_request(
+        self,
+        request_id: str,
+        claimed_by: str,
+        *,
+        response_text: str = "",
+        error: str = "",
+    ) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return
+        status = "failed" if str(error or "").strip() else "completed"
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE local_model_requests
+                SET status = ?, response_text = ?, error = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND claimed_by = ?
+                """,
+                (
+                    status,
+                    str(response_text or ""),
+                    str(error or "")[:2000],
+                    _utc_now(),
+                    str(request_id),
+                    owner_user_id,
+                    str(claimed_by),
+                ),
+            )
+
+    def fail_local_model_request(self, request_id: str, error: str) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE local_model_requests
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (
+                    str(error or "")[:2000],
+                    _utc_now(),
+                    str(request_id),
+                    owner_user_id,
+                ),
+            )
+
+    def get_local_model_request(self, request_id: str) -> dict[str, Any] | None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM local_model_requests
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (str(request_id), owner_user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_local_model_request(self, request_id: str) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM local_model_requests WHERE id = ? AND owner_user_id = ?",
+                (str(request_id), owner_user_id),
             )
 
     def list_prompt_templates(

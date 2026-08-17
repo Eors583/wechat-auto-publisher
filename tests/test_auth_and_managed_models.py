@@ -292,12 +292,40 @@ def test_user_can_save_model_through_api_without_exposing_credentials(
         assert first_by_id[shared_model_id]["editable"] is False
         assert shared_model_id in {str(item["id"]) for item in second_models}
 
+        local_saved = client.post(
+            "/api/v1/models",
+            headers=first_headers,
+            json={
+                "name": "我的本地 Ollama",
+                "provider_type": "local_openai_compatible",
+                "api_base": "http://localhost:11434/v1",
+                "model": "qwen2.5:7b",
+                "api_key": None,
+                "enabled": True,
+            },
+        )
+        assert local_saved.status_code == 200
+        assert local_saved.json()["connection_type"] == "local"
+        assert local_saved.json()["has_api_key"] is False
+        local_model_id = str(local_saved.json()["id"])
+        assert local_model_id not in {
+            str(item["id"])
+            for item in client.get(
+                "/api/v1/models",
+                headers=second_headers,
+            ).json()
+        }
+
         deleted = client.delete(
             f"/api/v1/models/{model_id}",
             headers=first_headers,
         )
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
+        assert client.delete(
+            f"/api/v1/models/{local_model_id}",
+            headers=first_headers,
+        ).status_code == 200
 
 
 def test_auth_required_cannot_be_disabled_by_legacy_environment(

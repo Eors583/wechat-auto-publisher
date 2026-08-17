@@ -54,6 +54,7 @@ from app.ui.interaction_feedback import (
     install_interaction_feedback,
 )
 from app.ui.lifecycle import client_timer
+from app.ui.local_model_bridge import install_local_model_bridge
 from app.ui.panels.auth import (
     build_auth_screen,
     current_desktop_user,
@@ -102,6 +103,7 @@ logger = logging.getLogger(__name__)
 # Compatibility hook for isolated UI tests. Real pages create their own state
 # so desktop, browser and reconnecting clients never share element references.
 state: AppState | None = None
+ADD_CUSTOM_MODEL_VALUE = "__add_custom_model__"
 
 
 _PREFLIGHT_REPAIR_ACTIONS: dict[str, tuple[str, str]] = {
@@ -235,6 +237,11 @@ def create_desktop_app() -> None:
             on_completed=lambda _account_id: ui.navigate.to("/"),
         )
         return
+
+    if callable(
+        getattr(getattr(page_state, "db", None), "claim_local_model_request", None)
+    ):
+        install_local_model_bridge(page_state)
 
     with ui.dialog().props("maximized").classes(
         "fullscreen-editor-dialog"
@@ -4359,6 +4366,7 @@ def _render_account_config_workspace(
     model_value = str(selected.get("model_id") or "")
     if model_value and model_value not in model_options:
         model_options[model_value] = str(selected.get("model_name") or "当前模型")
+    model_options[ADD_CUSTOM_MODEL_VALUE] = "＋ 添加自定义模型"
 
     try:
         review_default = review_service.get_account_editorial_review_default(
@@ -4703,6 +4711,48 @@ def _render_account_config_workspace(
                             ).props(
                                 "outlined dense options-dense hide-bottom-space"
                             )
+                            previous_model_value = {
+                                "value": model_value or None
+                            }
+
+                            def use_saved_model(saved: dict[str, Any]) -> None:
+                                saved_id = str(saved.get("id") or "")
+                                fresh_options = state.model_options(
+                                    include_default=False
+                                )
+                                fresh_options[ADD_CUSTOM_MODEL_VALUE] = (
+                                    "＋ 添加自定义模型"
+                                )
+                                previous_model_value["value"] = saved_id
+                                model_select.set_options(
+                                    fresh_options,
+                                    value=saved_id,
+                                )
+                                ui.notify(
+                                    "自定义模型已选中，请点击下方“保存配置”完成公众号绑定",
+                                    type="positive",
+                                )
+
+                            open_custom_model_editor = build_models_panel(
+                                state,
+                                purpose="text",
+                                render_panel=False,
+                                on_model_saved=use_saved_model,
+                            )
+
+                            def handle_model_choice(event: Any) -> None:
+                                selected_value = str(event.value or "")
+                                if selected_value == ADD_CUSTOM_MODEL_VALUE:
+                                    model_select.set_value(
+                                        previous_model_value["value"]
+                                    )
+                                    open_custom_model_editor()
+                                    return
+                                previous_model_value["value"] = (
+                                    selected_value or None
+                                )
+
+                            model_select.on_value_change(handle_model_choice)
                         with ui.element("div").classes("ops-config-field"):
                             ui.label("默认改写强度").classes("ops-config-field-label")
                             intensity_select = ui.select(
@@ -4821,6 +4871,8 @@ def _render_account_config_workspace(
 
             def save_current_configuration() -> None:
                 try:
+                    if str(model_select.value or "") == ADD_CUSTOM_MODEL_VALUE:
+                        raise ValueError("请先完成自定义模型配置")
                     if str(model_select.value or "") != model_value:
                         record = state.db.get_official_account(account_id) or {}
                         save_account(
