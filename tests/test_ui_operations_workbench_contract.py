@@ -135,6 +135,18 @@ def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:
     assert "on_click=start_review_background" in source[failed_branch:rewrite_action]
 
 
+def test_review_action_is_replaced_by_persisted_progress() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    assert 'review_progress_stage.set_text("正在创建评审任务")' in source
+    assert "review_action_button.set_visibility(False)" in source
+    assert "review_progress_column.set_visibility(True)" in source
+    assert "service.list_editorial_reviews" in source
+    assert "editorial_review_progress(refreshed)" in source
+    assert "review_progress_bar.set_value" in source
+    assert "client_timer(" in source
+
+
 def test_feature_mapping_document_covers_every_confirmed_page() -> None:
     mapping = (ROOT / "docs" / "新版前端功能映射与验收清单.md").read_text(
         encoding="utf-8"

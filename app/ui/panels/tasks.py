@@ -2425,21 +2425,85 @@ def build_review_page(
                         else "0 运行中"
                     ).classes("ops-badge")
                 with ui.element("div").classes("ops-panel-body"):
-                    if str(latest_review.get("status") or "") in {
+                    current_review_status = str(
+                        latest_review.get("status") or ""
+                    )
+                    review_is_active = current_review_status in {
                         "running",
                         "rewriting",
-                    }:
-                        ui.label(str(progress.get("stage") or "处理中")).classes(
+                    }
+                    review_progress_state = {
+                        "active": review_is_active,
+                        "timer": None,
+                    }
+                    review_progress_column = ui.column().classes(
+                        "w-full gap-2 ops-review-live-progress"
+                    )
+                    with review_progress_column:
+                        review_progress_stage = ui.label(
+                            str(progress.get("stage") or "正在创建评审任务")
+                        ).classes(
                             "ops-activity-stage"
                         )
-                        ui.linear_progress(
+                        review_progress_bar = ui.linear_progress(
                             value=float(progress.get("value") or 0.05)
                         ).classes("ops-activity-progress").props(
                             "rounded color=primary track-color=blue-1"
                         )
-                        ui.label(
+                        review_progress_percent = ui.label(
                             f'{round(float(progress.get("value") or 0) * 100)}%'
                         ).classes("ops-activity-percent")
+                    review_progress_column.set_visibility(review_is_active)
+
+                    async def refresh_review_progress() -> None:
+                        if not alive():
+                            timer = review_progress_state.get("timer")
+                            if timer is not None:
+                                timer.cancel()
+                            return
+                        try:
+                            reviews = await run.io_bound(
+                                lambda: service.list_editorial_reviews(
+                                    job_id=job_id, limit=1
+                                )
+                            )
+                        except Exception:  # noqa: BLE001
+                            return
+                        refreshed = dict(reviews[0]) if reviews else {}
+                        refreshed_status = str(refreshed.get("status") or "")
+                        if refreshed_status not in {"running", "rewriting"}:
+                            review_progress_state["active"] = False
+                            timer = review_progress_state.get("timer")
+                            if timer is not None:
+                                timer.cancel()
+                            reopen()
+                            return
+                        refreshed_progress = editorial_review_progress(refreshed)
+                        review_progress_stage.set_text(
+                            str(refreshed_progress.get("stage") or "处理中")
+                        )
+                        review_progress_bar.set_value(
+                            float(refreshed_progress.get("value") or 0.05)
+                        )
+                        review_progress_percent.set_text(
+                            str(refreshed_progress.get("percent") or "5%")
+                        )
+
+                    def start_review_progress() -> None:
+                        review_progress_state["active"] = True
+                        review_progress_stage.set_text("正在创建评审任务")
+                        review_progress_bar.set_value(0.05)
+                        review_progress_percent.set_text("5%")
+                        review_progress_column.set_visibility(True)
+                        if review_progress_state.get("timer") is None:
+                            review_progress_state["timer"] = client_timer(
+                                2.0,
+                                refresh_review_progress,
+                                immediate=False,
+                            )
+
+                    if review_is_active:
+                        start_review_progress()
 
                     async def run_review_background() -> None:
                         try:
@@ -2460,6 +2524,10 @@ def build_review_page(
                                 )
 
                     def start_review_background() -> None:
+                        review_action_button = review_action_state.get("button")
+                        if review_action_button is not None:
+                            review_action_button.set_visibility(False)
+                        start_review_progress()
                         asyncio.create_task(run_review_background())
                         ui.notify("AI 评审已转入后台，可继续使用其他功能", type="info")
 
@@ -2498,11 +2566,9 @@ def build_review_page(
                         asyncio.create_task(run_rewrite_background())
                         ui.notify("已转入后台改写，可继续使用其他功能", type="info")
 
-                    current_review_status = str(
-                        latest_review.get("status") or ""
-                    )
+                    review_action_state: dict[str, Any] = {"button": None}
                     if not latest_review:
-                        ui.button(
+                        review_action_state["button"] = ui.button(
                             "后台开始 AI 评审",
                             icon="rate_review",
                             on_click=start_review_background,
@@ -2510,7 +2576,7 @@ def build_review_page(
                             "flat color=primary no-caps"
                         )
                     elif current_review_status == "failed":
-                        ui.button(
+                        review_action_state["button"] = ui.button(
                             "重新评审",
                             icon="refresh",
                             on_click=start_review_background,
