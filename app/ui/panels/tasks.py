@@ -2400,7 +2400,22 @@ def build_review_page(
                             else:
                                 on_back()
 
+                    review_action_state: dict[str, Any] = {"button": None}
+                    rewrite_action_state: dict[str, Any] = {"button": None}
                     with ui.element("div").classes("ops-review-footer-actions"):
+                        if latest_review and review_status not in {
+                            "running",
+                            "rewriting",
+                            "candidate_ready",
+                            "failed",
+                        }:
+                            rewrite_action_state["button"] = ui.button(
+                                "按已选意见后台改写",
+                                icon="auto_fix_high",
+                                on_click=lambda: start_rewrite_background(),
+                            ).classes("ops-review-rewrite-action").props(
+                                "flat dense color=primary no-caps"
+                            )
                         ui.button(
                             "需要修改",
                             on_click=mark_needs_changes,
@@ -2458,6 +2473,10 @@ def build_review_page(
                                 "absolute-center background-activity-progress-label"
                             )
                     review_progress_column.set_visibility(review_is_active)
+                    review_idle_label = ui.label(
+                        "当前没有运行中的后台任务"
+                    ).classes("ops-activity-stage")
+                    review_idle_label.set_visibility(not review_is_active)
 
                     async def refresh_review_progress() -> None:
                         if not alive():
@@ -2493,11 +2512,14 @@ def build_review_page(
                             str(refreshed_progress.get("percent") or "5%")
                         )
 
-                    def start_review_progress() -> None:
+                    def start_review_progress(
+                        stage: str = "正在创建评审任务",
+                    ) -> None:
                         review_progress_state["active"] = True
-                        review_progress_stage.set_text("正在创建评审任务")
+                        review_progress_stage.set_text(stage)
                         review_progress_bar.set_value(0.05)
                         review_progress_percent.set_text("5%")
+                        review_idle_label.set_visibility(False)
                         review_progress_column.set_visibility(True)
                         if review_progress_state.get("timer") is None:
                             review_progress_state["timer"] = client_timer(
@@ -2556,18 +2578,27 @@ def build_review_page(
                                 )
                             )
                             if alive():
-                                ui.notify(
-                                    "改写候选稿已生成，请选择使用版本",
-                                    type="positive",
-                                )
-                                reopen()
+                                def show_rewrite_completed() -> None:
+                                    ui.notify(
+                                        "改写候选稿已生成，请选择使用版本",
+                                        type="positive",
+                                    )
+                                    reopen()
+
+                                owner_client.safe_invoke(show_rewrite_completed)
                         except Exception as exc:  # noqa: BLE001
                             if alive():
-                                ui.notify(
-                                    f"后台改写失败：{sanitize_failure_text(exc)}",
-                                    type="negative",
-                                    timeout=10000,
-                                )
+                                safe_error = sanitize_failure_text(exc)
+
+                                def show_rewrite_failed() -> None:
+                                    ui.notify(
+                                        f"后台改写失败：{safe_error}",
+                                        type="negative",
+                                        timeout=10000,
+                                    )
+                                    reopen()
+
+                                owner_client.safe_invoke(show_rewrite_failed)
 
                     def start_rewrite_background() -> None:
                         if not latest_review:
@@ -2576,10 +2607,13 @@ def build_review_page(
                         if not selected_issue_ids:
                             ui.notify("请至少勾选一条可改写意见", type="warning")
                             return
+                        rewrite_action_button = rewrite_action_state.get("button")
+                        if rewrite_action_button is not None:
+                            rewrite_action_button.set_visibility(False)
+                        start_review_progress("正在根据已选意见生成改写候选稿")
                         asyncio.create_task(run_rewrite_background())
                         ui.notify("已转入后台改写，可继续使用其他功能", type="info")
 
-                    review_action_state: dict[str, Any] = {"button": None}
                     if not latest_review:
                         review_action_state["button"] = ui.button(
                             "后台开始 AI 评审",
@@ -2596,19 +2630,6 @@ def build_review_page(
                         ).classes("w-full").props(
                             "flat color=primary no-caps"
                         )
-                    elif current_review_status not in {
-                        "running",
-                        "rewriting",
-                        "candidate_ready",
-                    }:
-                        ui.button(
-                            "按已选意见后台改写",
-                            icon="auto_fix_high",
-                            on_click=start_rewrite_background,
-                        ).classes("w-full").props(
-                            "flat color=primary no-caps"
-                        )
-
                     if str(latest_review.get("status") or "") == "candidate_ready":
                         applications = service.list_editorial_review_applications(
                             str(latest_review["id"]), limit=1

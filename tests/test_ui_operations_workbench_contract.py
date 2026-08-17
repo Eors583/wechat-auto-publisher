@@ -133,9 +133,12 @@ def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:
 
     failed_branch = source.index('current_review_status == "failed"')
     rewrite_action = source.index('"按已选意见后台改写"')
-    assert failed_branch < rewrite_action
-    assert '"重新评审"' in source[failed_branch:rewrite_action]
-    assert "on_click=start_review_background" in source[failed_branch:rewrite_action]
+    rewrite_gate = source.rfind(
+        "if latest_review and review_status not in", 0, rewrite_action
+    )
+    assert '"failed",' in source[rewrite_gate:rewrite_action]
+    assert '"重新评审"' in source[failed_branch:]
+    assert "on_click=start_review_background" in source[failed_branch:]
 
 
 def test_review_action_is_replaced_by_persisted_progress() -> None:
@@ -145,7 +148,8 @@ def test_review_action_is_replaced_by_persisted_progress() -> None:
     assert 'size="20px"' in source
     assert "absolute-center background-activity-progress-label" in source
     assert 'classes("ops-activity-percent")' not in source
-    assert 'review_progress_stage.set_text("正在创建评审任务")' in source
+    assert 'stage: str = "正在创建评审任务"' in source
+    assert "review_progress_stage.set_text(stage)" in source
     assert "review_action_button.set_visibility(False)" in source
     assert "review_progress_column.set_visibility(True)" in source
     assert "service.list_editorial_reviews" in source
@@ -153,6 +157,19 @@ def test_review_action_is_replaced_by_persisted_progress() -> None:
     assert "review_progress_bar.set_value" in source
     assert "client_timer(" in source
     assert "owner_client.safe_invoke" in source
+
+
+def test_background_rewrite_action_precedes_decisions_and_starts_progress() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    rewrite = source.index('"按已选意见后台改写"')
+    needs_changes = source.index('"需要修改"', rewrite)
+    confirm = source.index('"确认此文章"', needs_changes)
+    assert rewrite < needs_changes < confirm
+    assert 'classes("ops-review-rewrite-action")' in source
+    assert "start_review_progress(\"正在根据已选意见生成改写候选稿\")" in source
+    assert '"当前没有运行中的后台任务"' in source
+    assert ".ops-review-rewrite-action" in APP_CSS
 
 
 def test_feature_mapping_document_covers_every_confirmed_page() -> None:

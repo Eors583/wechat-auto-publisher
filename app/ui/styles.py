@@ -3035,6 +3035,7 @@ APP_CSS += """
 .ops-issue-risk { border-left-color: var(--ui-color-danger); color: var(--ui-color-danger); background: var(--ui-color-danger-soft); }
 .ops-issue-label { font-weight: var(--ui-font-weight-medium); }
 .ops-review-footer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-2); margin-top: 14px; }
+.ops-review-rewrite-action { grid-column: 1 / -1; width: 100%; }
 .ops-review-job-panel { display: grid; grid-template-rows: 70px minmax(0, 1fr); min-height: 0; }
 .ops-review-job-panel .ops-panel-heading { min-height: 70px; height: 70px; }
 .ops-review-job-panel .ops-panel-body { display: grid; align-content: start; gap: var(--ui-space-2); min-height: 0; overflow: hidden; }
