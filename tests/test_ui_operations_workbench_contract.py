@@ -88,6 +88,9 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
         assert f'"{label}"' in source
     assert 'ui.label("今日处理顺序")' in source
     assert "ops-queue-workspace" in APP_CSS
+    assert "container-type: inline-size" in APP_CSS
+    assert "@container (max-width: 720px)" in APP_CSS
+    assert ".ops-flow-panel { display: none; }" in APP_CSS
     assert 'runtime["visible_limit"]' in source
     for label in ("打开审核", "写入草稿", "恢复失败任务", "查看进度"):
         assert f'"{label}"' in row_source

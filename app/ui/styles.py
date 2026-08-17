@@ -2616,7 +2616,10 @@ APP_CSS += """
 }
 .ops-list-panel,
 .ops-flow-panel { display: grid; min-height: 0; overflow: hidden; }
-.ops-list-panel { grid-template-rows: auto minmax(0, 1fr); }
+.ops-list-panel {
+  container-type: inline-size;
+  grid-template-rows: auto minmax(0, 1fr);
+}
 .ops-list-panel .ops-panel-heading,
 .ops-flow-panel .ops-panel-heading { min-height: 72px; }
 .ops-task-list {
@@ -2659,6 +2662,14 @@ APP_CSS += """
   align-items: center;
   justify-content: center;
   white-space: nowrap;
+}
+@container (max-width: 720px) {
+  .ops-task-row-card,
+  .ops-batch-row-card {
+    grid-template-columns: 38px minmax(0, 1fr) 84px !important;
+  }
+  .ops-task-row-state,
+  .ops-task-row-badge { display: none !important; }
 }
 .ops-flow-panel { grid-template-rows: auto minmax(0, 1fr) auto; }
 .ops-flow-list { display: grid; align-content: start; gap: var(--ui-space-2); padding: var(--ui-space-3); }
@@ -3100,6 +3111,8 @@ APP_CSS += """
   .ops-metric-item { grid-template-columns: 32px minmax(0, 1fr); gap: 7px; }
   .ops-metric-hint { display: none; }
   .ops-create-priority-panel { display: none; }
+  .ops-queue-workspace { grid-template-columns: minmax(0, 1fr); }
+  .ops-flow-panel { display: none; }
   .wizard-layout {
     grid-template-areas:
       "heading"
