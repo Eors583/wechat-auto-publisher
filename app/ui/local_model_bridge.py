@@ -38,6 +38,7 @@ return await (async (config) => {{
     const response = await fetch(config.url, {{
       method: 'POST',
       mode: 'cors',
+      targetAddressSpace: 'local',
       credentials: 'omit',
       headers,
       body: JSON.stringify(config.payload),
@@ -58,7 +59,7 @@ return await (async (config) => {{
   }} catch (error) {{
     return {{
       ok: false,
-      error: `无法从当前浏览器访问本地模型：${{error?.message || error}}。请保持本页面打开，并在 Ollama/LM Studio 中允许当前网页跨域访问。`,
+      error: `无法从当前浏览器访问本地模型：${{error?.message || error}}。请允许当前网页访问本地网络，并在本地 API 中允许当前网站跨域访问（Authorization、Content-Type 和 Private Network）。`,
     }};
   }}
 }})({config});
