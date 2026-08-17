@@ -1818,12 +1818,11 @@ APP_CSS += """
     ". ."
     "metrics metrics"
     ". ."
-    "source priority"
-    "account priority"
+    "workflow priority"
     ". ."
     "recent recent";
   grid-template-columns: minmax(0, 1.55fr) minmax(270px, .85fr);
-  grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) minmax(0, 1fr) 12px 164px;
+  grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) 12px 164px;
   gap: 0 var(--ui-layout-page-gap) !important;
   align-items: stretch !important;
   align-content: stretch;
@@ -1831,6 +1830,20 @@ APP_CSS += """
 .wizard-layout > .ops-page-heading { grid-area: heading; }
 .wizard-layout > .ops-metric-grid { grid-area: metrics; }
 .wizard-layout > .ops-recent-panel { grid-area: recent; }
+.ops-create-workflow-panel {
+  grid-area: workflow;
+  display: grid;
+  grid-template-rows: max-content max-content;
+  align-content: start;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
 .ops-metric-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(118px, 1fr));
@@ -1889,44 +1902,36 @@ APP_CSS += """
   white-space: nowrap;
 }
 .ops-create-source-section {
-  grid-area: source;
   display: grid;
-  grid-template-rows: 70px minmax(0, 1fr);
+  grid-template-rows: 70px max-content;
   float: none !important;
   clear: none !important;
-  width: auto !important;
+  width: 100% !important;
   min-width: 0;
-  min-height: 0;
-  height: 100%;
-  align-self: stretch;
+  height: auto;
   margin: 0 !important;
-  overflow: hidden;
-  border-bottom: 0;
-  border-radius: var(--ui-radius-lg) var(--ui-radius-lg) 0 0;
+  overflow: visible;
+  border-bottom: 1px solid var(--ui-color-border);
+  border-radius: 0;
   box-shadow: none;
 }
 .ops-create-account-section {
-  grid-area: account;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto auto auto auto auto;
   float: none !important;
   clear: none !important;
-  width: auto !important;
+  width: 100% !important;
   position: relative;
-  align-self: stretch;
   min-width: 0;
   min-height: 0;
-  height: 100% !important;
+  height: auto !important;
   margin: 0 !important;
   padding: 6px 14px 10px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  overflow: visible;
   border-top: 0;
-  border-radius: 0 0 var(--ui-radius-lg) var(--ui-radius-lg);
-  box-shadow: var(--ui-shadow-card);
+  border-radius: 0;
+  box-shadow: none;
 }
 .ops-create-source-section .ops-panel-heading { min-height: 70px; }
 .ops-create-form-body {
@@ -1934,12 +1939,9 @@ APP_CSS += """
   align-content: start;
   gap: var(--ui-space-2);
   min-width: 0;
-  min-height: 0;
+  min-height: max-content;
   padding: 14px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  overflow: visible;
 }
 .ops-field {
   display: grid;
@@ -2081,13 +2083,10 @@ APP_CSS += """
   align-content: start;
   gap: 6px !important;
   min-height: 0;
-  height: 100%;
-  max-height: 100%;
+  height: auto;
+  max-height: none;
   padding-right: var(--ui-space-1);
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  overflow: visible;
 }
 .ops-create-account-choice {
   display: grid;
@@ -2926,9 +2925,8 @@ APP_CSS += """
       ". ."
       "metrics metrics"
       ". ."
-      "source priority"
-      "account priority";
-    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr) minmax(0, 1fr);
+      "workflow priority";
+    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr);
     gap: 0 9px !important;
   }
   .ops-metric-grid { height: 64px; max-height: 64px; }
@@ -2973,15 +2971,12 @@ APP_CSS += """
       "."
       "metrics"
       "."
-      "source"
-      "account"
+      "workflow"
       "."
       "recent";
     grid-template-columns: 1fr;
-    grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) minmax(0, 1fr) 12px 164px;
+    grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) 12px 164px;
   }
-  .ops-create-source-section,
-  .ops-create-account-section { grid-column: 1; }
   .ops-task-row-card,
   .ops-batch-row-card { grid-template-columns: 38px minmax(0, 1fr) auto !important; }
   .ops-task-row-state,
@@ -2996,9 +2991,8 @@ APP_CSS += """
       "."
       "metrics"
       "."
-      "source"
-      "account";
-    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr) minmax(0, 1fr);
+      "workflow";
+    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr);
   }
 }
 

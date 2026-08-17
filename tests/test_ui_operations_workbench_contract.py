@@ -211,10 +211,28 @@ def test_account_and_creation_directories_show_every_account_with_inner_scroll()
 
 
 def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> None:
-    assert '"source priority"\n    "account priority"' in APP_CSS
-    assert ".ops-create-account-section {\n  grid-area: account;" in APP_CSS
+    source = inspect.getsource(desktop._build_wizard)
+    assert '"ops-panel ops-create-workflow-panel"' in source
+    assert "source_section.move(workflow_panel)" in source
+    assert "account_section.move(workflow_panel)" in source
+
+    assert '"workflow priority"' in APP_CSS
+    assert '"source priority"' not in APP_CSS
+    assert '"account priority"' not in APP_CSS
     assert "margin: 295px 0 0 !important" not in APP_CSS
     assert "margin-top: 236px !important" not in APP_CSS
+
+    workflow_css = APP_CSS[APP_CSS.index(".ops-create-workflow-panel {") :]
+    assert "grid-area: workflow" in workflow_css[:500]
+    assert "overflow-y: auto" in workflow_css[:500]
+    assert "grid-template-rows: max-content max-content" in workflow_css[:500]
+
+    source_body_css = APP_CSS[APP_CSS.index(".ops-create-form-body {") :]
+    account_list_css = APP_CSS[APP_CSS.index(".ops-create-account-list {") :]
+    assert "overflow: visible" in source_body_css[:400]
+    assert "height: auto" in account_list_css[:500]
+    assert "max-height: none" in account_list_css[:500]
+    assert "overflow: visible" in account_list_css[:500]
 
     textarea_css = APP_CSS[
         APP_CSS.index(

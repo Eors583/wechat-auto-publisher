@@ -1195,9 +1195,12 @@ def _build_wizard(
         )
         client_timer(0.01, on_source_change, once=True)
 
+    workflow_panel = ui.element("section").classes(
+        "ops-panel ops-create-workflow-panel"
+    )
     with ui.element("section").classes(
-        "ops-panel source-card ops-create-source-section"
-    ):
+        "ops-create-source-section"
+    ) as source_section:
         with ui.element("div").classes("ops-panel-heading"):
             with ui.column().classes("gap-0"):
                 ui.label("新建内容任务").classes("ops-panel-title")
@@ -1403,9 +1406,11 @@ def _build_wizard(
 
             client_timer(0.5, consume_pending_rewrite)
 
+    source_section.move(workflow_panel)
+
     with ui.element("section").classes(
-        "ops-panel action-card ops-create-account-section"
-    ):
+        "ops-create-account-section"
+    ) as account_section:
         account_options = state.account_options()
         remembered_accounts = state.remembered_account_ids()
         account_items = list(account_options.items())
@@ -2211,6 +2216,8 @@ def _build_wizard(
 
         start_btn.on_click(start_rewrite)
         background_btn.on_click(open_background_generation)
+
+    account_section.move(workflow_panel)
 
     _render_creation_priority_and_recent(
         state,
