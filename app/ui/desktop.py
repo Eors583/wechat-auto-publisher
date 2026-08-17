@@ -2434,6 +2434,17 @@ def _build_accounts_panel(
     selected_account_state = {
         "id": str(initial_account_id or remembered_config_account_id or "")
     }
+    model_option_actions: dict[str, Callable[[Any], None]] = {}
+    model_option_event = f"account_model_option_action_{host.id}"
+
+    def dispatch_model_option_action(event: Any) -> None:
+        payload = event.args if isinstance(event.args, dict) else {}
+        action = str(payload.get("action") or "")
+        callback = model_option_actions.get(action)
+        if callback is not None:
+            callback(payload.get("option"))
+
+    ui.on(model_option_event, dispatch_model_option_action)
 
     def _account_version_key(account_id: str) -> str:
         return f"ui.account_config_versions.{account_id}"
@@ -3807,6 +3818,7 @@ def _build_accounts_panel(
 
     def render_accounts() -> None:
         host.clear()
+        model_option_actions.clear()
         with host:
             _render_account_config_workspace(
                 state,
@@ -3828,6 +3840,8 @@ def _build_accounts_panel(
                 on_plan=set_account_creation_plan,
                 on_enabled=set_enabled,
                 on_delete=confirm_delete,
+                model_option_actions=model_option_actions,
+                model_option_event=model_option_event,
             )
         return
         all_accounts = public_accounts(state.db)
@@ -4285,6 +4299,8 @@ def _render_account_config_workspace(
     on_plan: Callable[[str, str], None],
     on_enabled: Callable[[str, bool], None],
     on_delete: Callable[[str, str], None],
+    model_option_actions: dict[str, Callable[[Any], None]],
+    model_option_event: str,
 ) -> None:
     """Render the approved 260px directory and fixed account config center."""
 
@@ -4733,16 +4749,35 @@ def _render_account_config_workspace(
                                       {{{{ props.opt.label.replace(/^(官方|自定义) · /, '') }}}}
                                     </q-item-label>
                                   </q-item-section>
+                                  <q-item-section
+                                    side
+                                    class="ops-model-option-actions"
+                                    v-if="props.opt.label.startsWith('自定义 · ')"
+                                  >
+                                    <q-btn
+                                      flat
+                                      round
+                                      dense
+                                      icon="edit"
+                                      class="ops-model-option-action ops-model-option-edit"
+                                      :aria-label="`编辑${{props.opt.label.replace(/^自定义 · /, '')}}`"
+                                      title="编辑自定义模型"
+                                      @click.stop.prevent="$root.$refs.r0.$emit('{model_option_event}', {{action: 'edit', option: props.opt.value}})"
+                                    />
+                                    <q-btn
+                                      flat
+                                      round
+                                      dense
+                                      icon="delete_outline"
+                                      class="ops-model-option-action ops-model-option-delete"
+                                      :aria-label="`删除${{props.opt.label.replace(/^自定义 · /, '')}}`"
+                                      title="删除自定义模型"
+                                      @click.stop.prevent="$root.$refs.r0.$emit('{model_option_event}', {{action: 'delete', option: props.opt.value}})"
+                                    />
+                                  </q-item-section>
                                 </q-item>
                                 """,
                             )
-                            with model_select.add_slot("append"):
-                                delete_selected_model_button = ui.button(
-                                    icon="delete_outline"
-                                ).classes("ops-model-select-delete").props(
-                                    "flat round dense color=negative "
-                                    "aria-label=删除当前自定义模型"
-                                )
                             previous_model_value = {
                                 "value": model_value or None
                             }
@@ -4752,15 +4787,30 @@ def _render_account_config_workspace(
                                 fresh[ADD_CUSTOM_MODEL_VALUE] = "＋ 添加自定义模型"
                                 return fresh
 
-                            def is_owned_custom_model(candidate_id: str) -> bool:
-                                return str(
-                                    model_select.options.get(candidate_id) or ""
-                                ).startswith("自定义 · ")
+                            def model_id_for_option(option: Any) -> str:
+                                try:
+                                    return list(model_select.options)[int(option)]
+                                except (IndexError, TypeError, ValueError):
+                                    return ""
 
-                            def sync_model_delete_visibility(candidate_id: str) -> None:
-                                delete_selected_model_button.set_visibility(
-                                    is_owned_custom_model(candidate_id)
+                            def owned_custom_model_record(
+                                option: Any,
+                            ) -> tuple[str, dict[str, Any] | None]:
+                                candidate_id = model_id_for_option(option)
+                                label = str(
+                                    model_select.options.get(candidate_id) or ""
                                 )
+                                record = state.db.get_ai_model(candidate_id)
+                                owner_user_id = str(
+                                    (record or {}).get("owner_user_id") or ""
+                                )
+                                if (
+                                    not label.startswith("自定义 · ")
+                                    or not owner_user_id
+                                    or owner_user_id != state.current_user_id
+                                ):
+                                    return candidate_id, None
+                                return candidate_id, record
 
                             def use_saved_model(saved: dict[str, Any]) -> None:
                                 saved_id = str(saved.get("id") or "")
@@ -4770,7 +4820,6 @@ def _render_account_config_workspace(
                                     fresh_options,
                                     value=saved_id,
                                 )
-                                sync_model_delete_visibility(saved_id)
                                 ui.notify(
                                     "自定义模型已选中，请点击下方“保存配置”完成公众号绑定",
                                     type="positive",
@@ -4789,31 +4838,31 @@ def _render_account_config_workspace(
                                     model_select.set_value(
                                         previous_model_value["value"]
                                     )
-                                    sync_model_delete_visibility(
-                                        str(previous_model_value["value"] or "")
-                                    )
                                     open_custom_model_editor()
                                     return
                                 previous_model_value["value"] = (
                                     selected_value or None
                                 )
-                                sync_model_delete_visibility(selected_value)
 
                             model_select.on_value_change(handle_model_choice)
 
-                            def request_model_delete() -> None:
-                                delete_model_id = str(model_select.value or "")
-                                record = state.db.get_ai_model(delete_model_id)
-                                owner_user_id = str(
-                                    (record or {}).get("owner_user_id") or ""
-                                )
-                                if (
-                                    not is_owned_custom_model(delete_model_id)
-                                    or not owner_user_id
-                                    or owner_user_id != state.current_user_id
-                                ):
-                                    ui.notify("官方模型由后台维护，不能在这里删除", type="warning")
+                            def request_model_edit(option: Any) -> None:
+                                edit_model_id, record = owned_custom_model_record(option)
+                                if not edit_model_id or not record:
+                                    ui.notify("官方模型由后台维护，不能在这里编辑", type="warning")
                                     return
+                                model_select.run_method("hidePopup")
+                                open_custom_model_editor(edit_model_id)
+
+                            def request_model_delete(option: Any) -> None:
+                                delete_model_id, record = owned_custom_model_record(option)
+                                if not delete_model_id or not record:
+                                    ui.notify(
+                                        "官方模型由后台维护，不能在这里删除",
+                                        type="warning",
+                                    )
+                                    return
+                                model_select.run_method("hidePopup")
 
                                 model_name = str(record.get("name") or "自定义模型")
                                 with ui.dialog() as delete_dialog, ui.card().classes(
@@ -4847,7 +4896,6 @@ def _render_account_config_workspace(
                                                 fresh_options,
                                                 value=next_value or None,
                                             )
-                                            sync_model_delete_visibility(next_value)
                                             state.refresh_model_selects()
                                             delete_dialog.close()
                                             ui.notify(
@@ -4877,10 +4925,10 @@ def _render_account_config_workspace(
                                         )
                                 delete_dialog.open()
 
-                            delete_selected_model_button.on_click(
-                                request_model_delete
+                            model_option_actions.update(
+                                edit=request_model_edit,
+                                delete=request_model_delete,
                             )
-                            sync_model_delete_visibility(model_value)
                         with ui.element("div").classes("ops-config-field"):
                             ui.label("默认改写强度").classes("ops-config-field-label")
                             intensity_select = ui.select(

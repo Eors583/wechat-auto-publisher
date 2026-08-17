@@ -185,12 +185,21 @@ def test_default_model_select_marks_source_and_only_custom_models_are_deletable(
 
     assert "ops-model-option-badge-official" in source
     assert "ops-model-option-badge-custom" in source
-    assert 'with model_select.add_slot("append")' in source
-    assert '"ops-model-select-delete"' in source
-    assert "is_owned_custom_model(candidate_id)" in source
+    assert "v-if=\"props.opt.label.startsWith('自定义 · ')\"" in source
+    assert "ops-model-option-edit" in source
+    assert "ops-model-option-delete" in source
+    assert source.index("ops-model-option-edit") < source.index(
+        "ops-model-option-delete"
+    )
+    assert 'with model_select.add_slot("append")' not in source
+    assert "$root.$refs.r0.$emit" in source
+    assert "open_custom_model_editor(edit_model_id)" in source
+    assert "owned_custom_model_record(option)" in source
     assert "官方模型由后台维护，不能在这里删除" in source
     assert "state.db.delete_ai_model(delete_model_id)" in source
-    assert ".ops-model-select-delete" in APP_CSS
+    assert ".ops-model-option-actions" in APP_CSS
+    assert ".ops-model-option-edit" in APP_CSS
+    assert ".ops-model-option-delete" in APP_CSS
 
 
 def test_account_layout_editor_can_import_a_public_wechat_article() -> None:

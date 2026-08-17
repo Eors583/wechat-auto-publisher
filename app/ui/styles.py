@@ -2857,11 +2857,22 @@ APP_CSS += """
   color: var(--ui-color-purple-dark) !important;
   background: var(--ui-color-purple-soft) !important;
 }
-.ops-model-select-delete {
+.ops-model-option-actions {
+  display: flex !important;
+  flex: 0 0 auto;
+  flex-direction: row !important;
+  flex-wrap: nowrap;
+  gap: var(--ui-space-1);
+  min-width: 0;
+  padding-left: var(--ui-space-2);
+}
+.ops-model-option-action {
   width: var(--ui-control-height-sm);
   min-width: var(--ui-control-height-sm);
   height: var(--ui-control-height-sm);
 }
+.ops-model-option-edit { color: var(--ui-color-brand); }
+.ops-model-option-delete { color: var(--ui-color-danger); }
 .ops-model-select-menu {
   width: auto !important;
   max-width: min(
