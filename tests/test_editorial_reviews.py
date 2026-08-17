@@ -13,6 +13,7 @@ from app.services.editorial_reviews import (
     EditorialReviewConflict,
     build_review_prompt,
     build_rewrite_prompt,
+    compact_manus_review_prompt,
     merge_review_config,
     normalize_review_result,
     normalize_rewrite_candidate,
@@ -20,6 +21,30 @@ from app.services.editorial_reviews import (
     review_result_schema,
     rewrite_candidate_schema,
 )
+
+
+def test_manus_review_prompt_keeps_representative_content_under_limit() -> None:
+    prompt = (
+        "评审规则与标题" * 500
+        + "正文开头-必须保留"
+        + "正文中段-必须保留".join(["内容"] * 4000)
+        + "正文结尾-必须保留"
+        + "结构示例：" + json.dumps(review_result_schema(), ensure_ascii=False)
+    )
+
+    compact = compact_manus_review_prompt(prompt)
+
+    assert len(compact) <= 4500
+    assert compact.startswith(prompt[:100])
+    assert "超长内容已均匀抽取" in compact
+    assert compact.endswith(prompt[-1200:])
+    assert "正文中段" in compact
+
+
+def test_manus_review_prompt_leaves_short_messages_unchanged() -> None:
+    prompt = "评审这篇短文章"
+
+    assert compact_manus_review_prompt(prompt) == prompt
 
 
 class _QueuedClient:

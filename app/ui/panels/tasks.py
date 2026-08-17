@@ -2513,15 +2513,24 @@ def build_review_page(
                                 )
                             )
                             if alive():
-                                ui.notify("AI 评审已完成", type="positive")
-                                reopen()
+                                def show_review_completed() -> None:
+                                    ui.notify("AI 评审已完成", type="positive")
+                                    reopen()
+
+                                owner_client.safe_invoke(show_review_completed)
                         except Exception as exc:  # noqa: BLE001
                             if alive():
-                                ui.notify(
-                                    f"AI 评审失败：{sanitize_failure_text(exc)}",
-                                    type="negative",
-                                    timeout=10000,
-                                )
+                                safe_error = sanitize_failure_text(exc)
+
+                                def show_review_failed() -> None:
+                                    ui.notify(
+                                        f"AI 评审失败：{safe_error}",
+                                        type="negative",
+                                        timeout=10000,
+                                    )
+                                    reopen()
+
+                                owner_client.safe_invoke(show_review_failed)
 
                     def start_review_background() -> None:
                         review_action_button = review_action_state.get("button")

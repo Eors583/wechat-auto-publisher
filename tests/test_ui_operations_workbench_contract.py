@@ -145,6 +145,7 @@ def test_review_action_is_replaced_by_persisted_progress() -> None:
     assert "editorial_review_progress(refreshed)" in source
     assert "review_progress_bar.set_value" in source
     assert "client_timer(" in source
+    assert "owner_client.safe_invoke" in source
 
 
 def test_feature_mapping_document_covers_every_confirmed_page() -> None:
