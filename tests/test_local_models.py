@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 from app.ai.failover import FailoverRewriter
 from app.ai.local_browser import LocalBrowserCompatClient
@@ -193,6 +194,19 @@ def test_cockpit_key_cannot_be_saved_with_the_ollama_address(tmp_path) -> None:
         )
     except ValueError as exc:
         assert "Cockpit Tools" in str(exc)
-        assert "11797" in str(exc)
+        assert "11798" in str(exc)
     else:
         raise AssertionError("Cockpit Tools key/address mismatch must fail")
+
+
+def test_model_panel_routes_cockpit_through_the_local_browser_bridge() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "ui"
+        / "panels"
+        / "models.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"cockpit": ("http://localhost:11798/v1", "")' in source
+    assert 'selected_base.replace(\n                            ":11797", ":11798", 1' in source

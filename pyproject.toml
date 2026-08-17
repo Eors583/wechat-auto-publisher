@@ -29,6 +29,7 @@ dependencies = [
 wechat-auto = "app.cli:app"
 wechat-auto-ui = "app.ui.desktop:main"
 wechat-auto-api = "app.api.server:main"
+wechat-cockpit-bridge = "app.local_model_cors_bridge:main"
 
 [build-system]
 requires = ["setuptools>=68"]

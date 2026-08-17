@@ -235,7 +235,10 @@ def build_models_panel(
                     },
                     value=(
                         "cockpit"
-                        if ":11797" in str((record or {}).get("api_base") or "")
+                        if any(
+                            port in str((record or {}).get("api_base") or "")
+                            for port in (":11797", ":11798")
+                        )
                         else "lm_studio"
                         if ":1234" in str((record or {}).get("api_base") or "")
                         else "ollama"
@@ -347,7 +350,7 @@ def build_models_panel(
                             "生成期间请保持 HTTPS 页面打开；本地服务必须允许当前网页跨域访问。"
                         ).classes("muted")
                         ui.label(
-                            "Cockpit Tools 请复制“服务配置”中的地址、密钥和模型 ID；默认端口为 11797。"
+                            "Cockpit Tools 经本地桥接器使用 11798；桥接器再安全转发到 Cockpit 的 11797。"
                         ).classes("muted")
                         ui.label(
                             "Ollama 常用 11434，LM Studio 常用 1234；不同服务的地址和密钥不能混用。"
@@ -362,7 +365,7 @@ def build_models_panel(
                     )
                     if reset_model:
                         local_defaults = {
-                            "cockpit": ("http://localhost:11797/v1", ""),
+                            "cockpit": ("http://localhost:11798/v1", ""),
                             "ollama": ("http://localhost:11434/v1", "qwen2.5:7b"),
                             "lm_studio": ("http://localhost:1234/v1", ""),
                             "custom": ("", ""),
@@ -459,6 +462,13 @@ def build_models_panel(
                 elif str(connection_in.value or "api") == "local":
                     provider_type = LOCAL_OPENAI_COMPATIBLE
                     selected_base = str(base_in.value or "")
+                    if (
+                        str(local_provider_in.value or "") == "cockpit"
+                        and ":11797" in selected_base
+                    ):
+                        selected_base = selected_base.replace(
+                            ":11797", ":11798", 1
+                        )
                     selected_model = str(model_in.value or "")
                     provider_label = "本地模型"
                 else:

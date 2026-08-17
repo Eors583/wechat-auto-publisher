@@ -209,7 +209,7 @@ def save_model(
             raise ValueError(
                 "Cockpit Tools 密钥不能配合 Ollama 的 11434 地址使用；"
                 "请填写 Cockpit Tools“服务配置”中显示的 API 地址，"
-                "通常为 http://localhost:11797/v1"
+                "浏览器桥接地址通常为 http://localhost:11798/v1"
             )
     if provider_type == MANUS:
         api_base = api_base.strip() or "https://api.manus.ai"
