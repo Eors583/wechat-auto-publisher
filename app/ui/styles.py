@@ -854,12 +854,18 @@ body, .q-page, .nicegui-content {
   font-size: 12px;
   line-height: 1.55;
 }
-.article-body-input .q-field__control {
-  min-height: 300px;
+.article-body-input,
+.article-body-input .q-field__inner,
+.article-body-input .q-field__control,
+.article-body-input .q-field__control-container,
+.article-body-input textarea.q-field__native {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .article-body-input textarea.q-field__native {
-  min-height: 250px !important;
-  resize: vertical !important;
+  overflow-y: auto !important;
+  resize: none !important;
 }
 .body-input-tools {
   width: 100%;
@@ -1813,10 +1819,11 @@ APP_CSS += """
     "metrics metrics"
     ". ."
     "source priority"
+    "account priority"
     ". ."
     "recent recent";
   grid-template-columns: minmax(0, 1.55fr) minmax(270px, .85fr);
-  grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) 12px 164px;
+  grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) minmax(0, 1fr) 12px 164px;
   gap: 0 var(--ui-layout-page-gap) !important;
   align-items: stretch !important;
   align-content: stretch;
@@ -1883,34 +1890,57 @@ APP_CSS += """
 }
 .ops-create-source-section {
   grid-area: source;
+  display: grid;
+  grid-template-rows: 70px minmax(0, 1fr);
   float: none !important;
   clear: none !important;
   width: auto !important;
-  align-self: start;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  align-self: stretch;
   margin: 0 !important;
+  overflow: hidden;
   border-bottom: 0;
   border-radius: var(--ui-radius-lg) var(--ui-radius-lg) 0 0;
   box-shadow: none;
 }
 .ops-create-account-section {
-  grid-area: source;
-  display: flex;
-  flex-direction: column;
+  grid-area: account;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   float: none !important;
   clear: none !important;
   width: auto !important;
   position: relative;
   align-self: stretch;
+  min-width: 0;
   min-height: 0;
-  height: auto !important;
-  margin: 295px 0 0 !important;
-  padding: 6px 14px 49px;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 6px 14px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   border-top: 0;
   border-radius: 0 0 var(--ui-radius-lg) var(--ui-radius-lg);
   box-shadow: var(--ui-shadow-card);
 }
 .ops-create-source-section .ops-panel-heading { min-height: 70px; }
-.ops-create-form-body { display: grid; gap: var(--ui-space-2); padding: 14px; }
+.ops-create-form-body {
+  display: grid;
+  align-content: start;
+  gap: var(--ui-space-2);
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
 .ops-field {
   display: grid;
   grid-template-rows: 21px minmax(0, var(--ui-control-height-field));
@@ -2000,9 +2030,32 @@ APP_CSS += """
 .ops-create-source-section .q-field--outlined .q-field__control::before {
   border-color: var(--ui-color-border);
 }
-.ops-create-source-section .article-body-input .q-field__control { height: auto; max-height: 132px; }
+.ops-source-text-field {
+  grid-template-rows: 21px minmax(0, 132px);
+  min-height: 160px;
+}
+.ops-create-source-section .article-body-input,
+.ops-create-source-section .article-body-input .q-field__inner,
+.ops-create-source-section .article-body-input .q-field__control,
+.ops-create-source-section .article-body-input .q-field__control-container {
+  min-height: 0 !important;
+  height: 132px !important;
+  max-height: 132px;
+  overflow: hidden;
+}
+.ops-create-source-section .article-body-input textarea.q-field__native {
+  min-height: 0 !important;
+  height: 100% !important;
+  max-height: 132px;
+  overflow-y: auto !important;
+  overflow-wrap: anywhere;
+}
 .ops-create-account-section .ops-account-step-line { margin-bottom: var(--ui-space-1); }
-.ops-create-account-section .ops-account-step-line { width: 100%; }
+.ops-create-account-section .ops-account-step-line {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  width: 100%;
+}
 .ops-create-account-pager {
   width: 24px !important;
   min-width: 24px !important;
@@ -2021,13 +2074,15 @@ APP_CSS += """
 }
 .ops-create-account-select { display: none !important; }
 .ops-create-account-list {
+  grid-column: 1 / -1;
+  grid-row: 2;
   display: grid !important;
-  flex: 1 1 auto;
   grid-auto-rows: max-content;
   align-content: start;
   gap: 6px !important;
   min-height: 0;
-  max-height: none;
+  height: 100%;
+  max-height: 100%;
   padding-right: var(--ui-space-1);
   overflow-x: hidden;
   overflow-y: auto;
@@ -2088,37 +2143,72 @@ APP_CSS += """
 }
 .ops-create-account-readiness-warning { color: var(--ui-color-warning); }
 .ops-create-account-section > .muted { display: none; }
-.ops-create-account-section::before {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 47px;
-  border-top: 1px solid var(--ui-color-border);
-  background: var(--ui-color-bg-subtle);
-  content: "";
-}
 .ops-create-status-row {
-  position: absolute;
-  z-index: 1;
-  bottom: 5px;
-  left: 14px;
+  position: static;
+  grid-column: 1;
+  grid-row: 5;
+  align-self: center;
   display: grid !important;
+  width: 100%;
+  min-width: 0;
+  margin-top: 0;
   gap: 2px !important;
 }
-.ops-create-submit-title { font-weight: var(--ui-font-weight-medium); }
+.ops-create-submit-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: var(--ui-font-weight-medium);
+}
 .ops-create-status-row .progress-elapsed {
   color: var(--ui-color-text-secondary);
   font-size: var(--ui-font-size-xs);
 }
 .ops-create-action-row {
-  position: absolute;
-  z-index: 1;
-  right: 14px;
-  bottom: 5px;
+  position: static;
+  grid-column: 2;
+  grid-row: 5;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 .ops-create-action-row .q-btn { min-height: var(--ui-control-height) !important; }
+.ops-create-account-section .rewrite-progress {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  min-width: 0;
+  margin: var(--ui-space-2) 0 0;
+  padding: 9px 10px;
+  overflow: hidden;
+}
+.ops-create-log-area {
+  grid-column: 1 / -1;
+  grid-row: 4;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: var(--ui-space-2);
+}
+.ops-create-account-section .progress-heading { min-width: 0; margin-bottom: var(--ui-space-1); }
+.ops-create-account-section .progress-track-wrap,
+.ops-create-account-section .progress-bar { height: 24px; }
+.ops-create-account-section .progress-stage {
+  min-width: 0;
+  padding: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ops-create-account-section .progress-hint {
+  min-width: 0;
+  margin-top: var(--ui-space-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ops-create-priority-panel {
   grid-area: priority;
   display: grid;
@@ -2836,8 +2926,9 @@ APP_CSS += """
       ". ."
       "metrics metrics"
       ". ."
-      "source priority";
-    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr);
+      "source priority"
+      "account priority";
+    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr) minmax(0, 1fr);
     gap: 0 9px !important;
   }
   .ops-metric-grid { height: 64px; max-height: 64px; }
@@ -2847,13 +2938,8 @@ APP_CSS += """
   .ops-panel-heading { min-height: 56px; padding: 10px 13px; }
   .ops-panel-subtitle { display: none; }
   .ops-create-form-body { padding: 10px 11px; }
-  .ops-create-account-section {
-    margin-top: 236px !important;
-    padding: 7px 11px 58px;
-  }
+  .ops-create-account-section { padding: 7px 11px 10px; }
   .ops-create-account-choice { min-height: 50px; padding: 6px 8px; }
-  .ops-create-status-row { left: 11px; }
-  .ops-create-action-row { right: 11px; }
   .ops-account-directory-item { min-height: 82px; height: auto; }
   .ops-config-body { padding: 9px; gap: 9px; }
   .ops-config-section { padding: 9px; }
@@ -2887,8 +2973,12 @@ APP_CSS += """
       "."
       "metrics"
       "."
-      "source";
+      "source"
+      "account"
+      "."
+      "recent";
     grid-template-columns: 1fr;
+    grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) minmax(0, 1fr) 12px 164px;
   }
   .ops-create-source-section,
   .ops-create-account-section { grid-column: 1; }
@@ -2897,6 +2987,29 @@ APP_CSS += """
   .ops-task-row-state,
   .ops-task-row-badge { display: none !important; }
   .ops-review-layout { grid-template-columns: minmax(0, 1.35fr) minmax(225px, .65fr); }
+}
+
+@media (max-width: 1100px) and (max-height: 820px) {
+  .wizard-layout {
+    grid-template-areas:
+      "heading"
+      "."
+      "metrics"
+      "."
+      "source"
+      "account";
+    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .ops-create-account-section {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr) auto auto auto auto;
+  }
+  .ops-create-status-row { grid-column: 1; grid-row: 5; }
+  .ops-create-action-row { grid-column: 1; grid-row: 6; justify-content: stretch; }
+  .ops-create-action-row .q-btn { width: 100%; }
 }
 
 @media (max-width: 860px) {

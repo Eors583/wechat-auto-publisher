@@ -210,6 +210,28 @@ def test_account_and_creation_directories_show_every_account_with_inner_scroll()
     assert "align-content: start" in APP_CSS
 
 
+def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> None:
+    assert '"source priority"\n    "account priority"' in APP_CSS
+    assert ".ops-create-account-section {\n  grid-area: account;" in APP_CSS
+    assert "margin: 295px 0 0 !important" not in APP_CSS
+    assert "margin-top: 236px !important" not in APP_CSS
+
+    textarea_css = APP_CSS[
+        APP_CSS.index(
+            ".ops-create-source-section .article-body-input textarea.q-field__native"
+        ) :
+    ]
+    assert "height: 100% !important" in textarea_css[:400]
+    assert "max-height: 132px" in textarea_css[:400]
+    assert "overflow-y: auto !important" in textarea_css[:400]
+
+    status_css = APP_CSS[APP_CSS.index(".ops-create-status-row {") :]
+    action_css = APP_CSS[APP_CSS.index(".ops-create-action-row {") :]
+    assert "position: static" in status_css[:300]
+    assert "position: static" in action_css[:400]
+    assert "flex-wrap: wrap" in action_css[:400]
+
+
 def test_custom_prompt_template_manager_is_available_from_account_configuration() -> None:
     source = inspect.getsource(desktop._render_account_config_workspace)
 

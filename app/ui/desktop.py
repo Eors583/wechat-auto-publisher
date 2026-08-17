@@ -1574,7 +1574,7 @@ def _build_wizard(
         progress_panel.set_visibility(False)
         log_area = (
             ui.textarea(value="等待开始…")
-            .classes("w-full q-mt-sm")
+            .classes("w-full ops-create-log-area")
             .props(
                 "readonly outlined rows=5 "
                 'input-style="font-family:Consolas,monospace;font-size:12px"'
