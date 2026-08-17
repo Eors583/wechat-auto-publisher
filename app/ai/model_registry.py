@@ -205,6 +205,12 @@ def save_model(
             raise ValueError(
                 "本地模型地址必须是带端口的 localhost/127.0.0.1/::1 地址"
             )
+        if str(api_key or "").strip().startswith("agt_codex_") and port == 11434:
+            raise ValueError(
+                "Cockpit Tools 密钥不能配合 Ollama 的 11434 地址使用；"
+                "请填写 Cockpit Tools“服务配置”中显示的 API 地址，"
+                "通常为 http://localhost:11797/v1"
+            )
     if provider_type == MANUS:
         api_base = api_base.strip() or "https://api.manus.ai"
     if provider_type == OPENAI_COMPATIBLE and not api_base.strip():

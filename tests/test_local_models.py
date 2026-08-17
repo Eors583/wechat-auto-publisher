@@ -172,6 +172,27 @@ def test_browser_bridge_posts_openai_payload_to_the_local_machine() -> None:
     )
 
     assert "http://localhost:11434/v1/chat/completions" in script
+    assert "window.isSecureContext" in script
+    assert "当前页面不是 HTTPS 安全页面" in script
     assert "targetAddressSpace: 'local'" in script
     assert "credentials: 'omit'" in script
     assert "AbortSignal.timeout(600000)" in script
+
+
+def test_cockpit_key_cannot_be_saved_with_the_ollama_address(tmp_path) -> None:
+    db = Database(tmp_path / "cockpit-address.db").for_user("user-a")
+
+    try:
+        save_model(
+            db,
+            name="Cockpit Tools",
+            provider_type=LOCAL_OPENAI_COMPATIBLE,
+            api_base="http://localhost:11434/v1",
+            model="gpt-5.6-sol",
+            api_key="agt_codex_example",
+        )
+    except ValueError as exc:
+        assert "Cockpit Tools" in str(exc)
+        assert "11797" in str(exc)
+    else:
+        raise AssertionError("Cockpit Tools key/address mismatch must fail")

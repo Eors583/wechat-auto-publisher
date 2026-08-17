@@ -217,6 +217,7 @@ def build_models_panel(
             ).classes("muted")
 
             connection_in = None
+            local_provider_in = None
             if not image_panel:
                 ui.label("模型类型").classes("ops-config-field-label")
                 connection_in = ui.toggle(
@@ -225,6 +226,22 @@ def build_models_panel(
                 ).classes("ops-model-kind-toggle w-full").props(
                     "spread no-caps unelevated"
                 )
+                local_provider_in = ui.select(
+                    options={
+                        "cockpit": "Cockpit Tools",
+                        "ollama": "Ollama",
+                        "lm_studio": "LM Studio",
+                        "custom": "其他本地 OpenAI 兼容服务",
+                    },
+                    value=(
+                        "cockpit"
+                        if ":11797" in str((record or {}).get("api_base") or "")
+                        else "lm_studio"
+                        if ":1234" in str((record or {}).get("api_base") or "")
+                        else "ollama"
+                    ),
+                    label="本地服务",
+                ).classes("w-full").props("outlined stack-label")
 
             name_in = ui.input(
                 "配置名称（可选）",
@@ -319,6 +336,7 @@ def build_models_panel(
 
                 if str(connection_in.value or "api") == "local":
                     type_in.set_visibility(False)
+                    local_provider_in.set_visibility(True)
                     base_in.set_visibility(True)
                     official_help.clear()
                     with official_help:
@@ -326,10 +344,13 @@ def build_models_panel(
                             "请求会由当前登录用户打开的网页转发到自己电脑上的本地模型。"
                         ).classes("text-weight-medium")
                         ui.label(
-                            "生成期间请保持本页面打开；Ollama 或 LM Studio 必须允许当前网页跨域访问。"
+                            "生成期间请保持 HTTPS 页面打开；本地服务必须允许当前网页跨域访问。"
                         ).classes("muted")
                         ui.label(
-                            "常用地址：Ollama 为 http://localhost:11434/v1，LM Studio 通常为 http://localhost:1234/v1。"
+                            "Cockpit Tools 请复制“服务配置”中的地址、密钥和模型 ID；默认端口为 11797。"
+                        ).classes("muted")
+                        ui.label(
+                            "Ollama 常用 11434，LM Studio 常用 1234；不同服务的地址和密钥不能混用。"
                         ).classes("muted")
                     endpoint_note.text = (
                         "这里只允许带端口的 localhost、127.0.0.1 或 ::1 地址；服务器不会直接访问该地址。"
@@ -340,13 +361,21 @@ def build_models_panel(
                         'placeholder="可选，仅在本地服务启用鉴权时填写"'
                     )
                     if reset_model:
-                        base_in.value = "http://localhost:11434/v1"
-                        model_in.value = "qwen2.5:7b"
+                        local_defaults = {
+                            "cockpit": ("http://localhost:11797/v1", ""),
+                            "ollama": ("http://localhost:11434/v1", "qwen2.5:7b"),
+                            "lm_studio": ("http://localhost:1234/v1", ""),
+                            "custom": ("", ""),
+                        }
+                        base_in.value, model_in.value = local_defaults[
+                            str(local_provider_in.value or "cockpit")
+                        ]
                         base_in.update()
                         model_in.update()
                     return
 
                 type_in.set_visibility(True)
+                local_provider_in.set_visibility(False)
                 key_in.props(
                     'label="第 2 步：粘贴 API Key" '
                     'placeholder="从上方官方页面复制，不要填写登录密码"'
@@ -406,6 +435,9 @@ def build_models_panel(
             type_in.on_value_change(lambda _: sync_type(reset_model=True))
             if connection_in is not None:
                 connection_in.on_value_change(
+                    lambda _: sync_type(reset_model=True)
+                )
+                local_provider_in.on_value_change(
                     lambda _: sync_type(reset_model=True)
                 )
             sync_type()
