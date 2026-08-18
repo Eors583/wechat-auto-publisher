@@ -454,8 +454,6 @@ def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> N
     action_css = APP_CSS[APP_CSS.index(".ops-create-action-row {") :]
     assert "position: static" in status_css[:300]
     assert "position: static" in action_css[:400]
-    assert "margin-top: var(--ui-space-2)" in status_css[:300]
-    assert "margin: var(--ui-space-2) 0 0" in action_css[:400]
     assert "flex-wrap: wrap" in action_css[:400]
 
 

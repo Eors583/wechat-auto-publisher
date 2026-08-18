@@ -2219,7 +2219,7 @@ APP_CSS += """
   display: grid !important;
   width: 100%;
   min-width: 0;
-  margin-top: var(--ui-space-2);
+  margin-top: 0;
   gap: 2px !important;
 }
 .ops-create-submit-title {
@@ -2240,7 +2240,7 @@ APP_CSS += """
   flex-wrap: wrap;
   width: auto;
   min-width: 0;
-  margin: var(--ui-space-2) 0 0;
+  margin: 0;
   padding: 0;
   border: 0;
 }
