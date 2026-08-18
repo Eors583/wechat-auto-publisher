@@ -103,6 +103,7 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
     batch_source = inspect.getsource(tasks._render_batch_card)
     assert "_render_batch_detail_content(" in batch_source
     assert "on_archive=archive_and_close" in batch_source
+    assert "on_open_review=open_review_and_close" in batch_source
     assert 'review_runtime["focus_batch_id"] = ""' in batch_source
     assert "dialog.close()" in batch_source
     assert 'classes("ops-task-row-card ops-batch-row-card")' in batch_source

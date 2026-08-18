@@ -4648,6 +4648,19 @@ def _render_batch_card(
                     "批次已归档",
                 )
 
+            def open_review_and_close(job_id: int) -> None:
+                if review_runtime is not None:
+                    review_runtime["focus_batch_id"] = ""
+                dialog.close()
+                open_review_workbench(
+                    state,
+                    service,
+                    str(batch["id"]),
+                    job_id,
+                    refresh,
+                    review_runtime=review_runtime,
+                )
+
             with ui.row().classes("w-full items-center justify-between"):
                 with ui.column().classes("gap-0 ops-flex-copy"):
                     ui.label(f'批次 #{batch["display_id"]}').classes(
@@ -4666,6 +4679,7 @@ def _render_batch_card(
                 focused=True,
                 auto_expand=True,
                 on_archive=archive_and_close,
+                on_open_review=open_review_and_close,
             )
         dialog.open()
 
@@ -4731,11 +4745,25 @@ def _render_batch_detail_content(
     focused: bool = False,
     auto_expand: bool = False,
     on_archive: Callable[[], None] | None = None,
+    on_open_review: Callable[[int], None] | None = None,
 ) -> Any:
     owner_client = ui.context.client
     progress = batch.get("progress") or {}
     jobs = list(batch.get("jobs") or [])
     topic = str(batch.get("topic") or "").strip() or _batch_topic(jobs)
+
+    def open_job_review(job_id: int) -> None:
+        if on_open_review is not None:
+            on_open_review(job_id)
+            return
+        open_review_workbench(
+            state,
+            service,
+            str(batch["id"]),
+            job_id,
+            refresh,
+            review_runtime=review_runtime,
+        )
 
     async def retry_failed_jobs_in_place(button: Any) -> None:
         failed_jobs = [
@@ -4831,13 +4859,8 @@ def _render_batch_detail_content(
                     )
                     ui.button(
                         "打开审核",
-                        on_click=lambda _=None, jid=int(job["id"]): open_review_workbench(
-                            state,
-                            service,
-                            str(batch["id"]),
-                            jid,
-                            refresh,
-                            review_runtime=review_runtime,
+                        on_click=lambda _=None, jid=int(job["id"]): open_job_review(
+                            jid
                         ),
                     ).props("outline dense color=teal-9 no-caps")
                 else:
@@ -4887,14 +4910,9 @@ def _render_batch_detail_content(
                 if unconfirmed and pending_job is not None:
                     ui.button(
                         f"审核下一篇（剩余 {unconfirmed} 篇）",
-                        on_click=lambda _=None, jid=int(pending_job["id"]): open_review_workbench(
-                            state,
-                            service,
-                            str(batch["id"]),
-                            jid,
-                            refresh,
-                            review_runtime=review_runtime,
-                        ),
+                        on_click=lambda _=None, jid=int(
+                            pending_job["id"]
+                        ): open_job_review(jid),
                     ).props("unelevated dense color=teal-9 no-caps icon=rate_review")
                 else:
                     write_btn = ui.button(
