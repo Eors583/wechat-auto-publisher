@@ -120,6 +120,10 @@ def test_task_queue_width_chain_and_breakpoints_cannot_push_sidebar_offscreen() 
     task_list_css = APP_CSS[APP_CSS.rindex(".ops-task-list {") :]
     for containment in ("width: 100%", "min-width: 0", "max-width: 100%"):
         assert containment in task_list_css[:700]
+    assert (
+        "grid-auto-rows: minmax(var(--ui-task-row-height), auto)"
+        in task_list_css[:700]
+    )
 
     narrow_css = APP_CSS[APP_CSS.rindex("@media (max-width: 860px)") :]
     assert (
@@ -450,6 +454,8 @@ def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> N
     action_css = APP_CSS[APP_CSS.index(".ops-create-action-row {") :]
     assert "position: static" in status_css[:300]
     assert "position: static" in action_css[:400]
+    assert "margin-top: var(--ui-space-2)" in status_css[:300]
+    assert "margin: var(--ui-space-2) 0 0" in action_css[:400]
     assert "flex-wrap: wrap" in action_css[:400]
 
 
