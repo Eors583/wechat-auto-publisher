@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from html import escape
 import re
 from typing import Any, Iterable
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from lxml import html as lxml_html
@@ -16,6 +16,7 @@ from app.layout_profiles import normalize_layout, validate_layout
 
 
 _WECHAT_HOST = "mp.weixin.qq.com"
+_PUBLIC_READER_URL = "https://api.readgzh.site/rd"
 _MAX_ARTICLE_HTML_CHARS = 5_000_000
 _DIMENSION = re.compile(r"^(?:0|\d+(?:\.\d+)?(?:px|em|rem|%))$")
 _LINE_HEIGHT = re.compile(r"^\d+(?:\.\d+)?(?:px|em|rem|%)?$")
@@ -109,7 +110,11 @@ def fetch_wechat_article_layout(
             continue
         break
     else:
-        raise last_error or ValueError("没有读取到微信文章正文")
+        fallback_page = _fetch_public_reader_page(clean_url, timeout=timeout)
+        if fallback_page:
+            page = fallback_page
+        else:
+            raise last_error or ValueError("没有读取到微信文章正文")
     return parse_wechat_article_layout(
         page,
         # 微信可能为短链接补充查询参数或 hash；结果仍归属用户输入的
@@ -210,6 +215,51 @@ def _validate_wechat_article_url(url: str) -> str:
     if not (parsed.path == "/s" or parsed.path.startswith("/s/")):
         raise ValueError("该链接不是微信公众号公开文章地址")
     return value
+
+
+def _fetch_public_reader_page(url: str, *, timeout: float) -> str:
+    """Fetch public article HTML when WeChat blocks the server's egress IP."""
+
+    target = f"{_PUBLIC_READER_URL}?{urlencode({'url': url})}"
+    try:
+        with httpx.Client(
+            headers={"Accept": "text/html,text/plain;q=0.9,*/*;q=0.8"},
+            timeout=timeout,
+            follow_redirects=True,
+        ) as client:
+            response = client.get(target)
+            if response.status_code >= 400:
+                return ""
+            document = lxml_html.fromstring(str(response.text or ""))
+    except (httpx.HTTPError, TypeError, ValueError):
+        return ""
+
+    nodes = document.xpath(
+        '//article/*[contains(concat(" ", normalize-space(@class), " "), '
+        '" content ")]'
+    )
+    if not nodes or len(_plain_text(nodes[0])) < 20:
+        return ""
+
+    content = deepcopy(nodes[0])
+    content.set("id", "js_content")
+    classes = str(content.get("class") or "").split()
+    if "rich_media_content" not in classes:
+        classes.append("rich_media_content")
+    content.set("class", " ".join(classes))
+
+    title = _metadata_content(document, "og:title") or _node_text(
+        document.xpath("//article/h1[1]")
+    )
+    meta_text = _node_text(document.xpath("//article/div[contains(@class, 'meta')][1]"))
+    return (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        f'<meta property="og:title" content="{escape(title, quote=True)}">'
+        "</head><body>"
+        f'<span id="js_name">{escape(meta_text)}</span>'
+        f'{lxml_html.tostring(content, encoding="unicode", method="html")}'
+        "</body></html>"
+    )
 
 
 def _raise_for_wechat_access_page(page: str, *, final_url: str) -> None:

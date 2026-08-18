@@ -269,6 +269,58 @@ def test_fetch_retries_public_article_with_mobile_browser_profile(
     assert all("Cookie" not in headers for headers in seen_headers)
 
 
+def test_fetch_uses_public_reader_when_wechat_blocks_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_urls: list[str] = []
+    reader_page = """
+    <html><head><meta property="og:title" content="后备读取文章"></head><body>
+      <article>
+        <h1>后备读取文章</h1>
+        <div class="meta"><p><strong>作者</strong> 示例公众号</p></div>
+        <div class="content">
+          <section style="color: #123456; font-size: 17px;">
+            这是通过公开读取后备出口获得的完整排版正文，保留内联样式用于提取。
+          </section>
+        </div>
+      </article>
+    </body></html>
+    """
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            requested_urls.append(url)
+            if url.startswith("https://api.readgzh.site/rd?"):
+                return httpx.Response(
+                    200,
+                    text=reader_page,
+                    request=httpx.Request("GET", url),
+                )
+            return httpx.Response(
+                200,
+                text="<html><body>captcha 环境异常</body></html>" * 40,
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr("app.services.wechat_layout_import.httpx.Client", FakeClient)
+
+    result = fetch_wechat_article_layout("https://mp.weixin.qq.com/s/example")
+
+    assert result.title == "后备读取文章"
+    assert "#123456" in result.content_html
+    assert result.diagnostics["inline_style_count"] == 1
+    assert any(url.startswith("https://api.readgzh.site/rd?") for url in requested_urls)
+
+
 def test_fetch_reports_http_200_shell_page_as_missing_article(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
