@@ -236,13 +236,26 @@ def test_background_rewrite_action_precedes_decisions_and_starts_progress() -> N
     source = inspect.getsource(tasks.build_review_page)
 
     rewrite = source.index('"按已选意见后台改写"')
-    needs_changes = source.index('"需要修改"', rewrite)
-    confirm = source.index('"确认此文章"', needs_changes)
+    needs_changes = source.index('"退回修改"', rewrite)
+    confirm = source.index('"确认通过"', needs_changes)
     assert rewrite < needs_changes < confirm
     assert 'classes("ops-review-rewrite-action")' in source
     assert "start_review_progress(\"正在根据已选意见生成改写候选稿\")" in source
     assert '"当前没有运行中的后台任务"' not in source
     assert ".ops-review-rewrite-action" in APP_CSS
+
+
+def test_completed_review_can_be_rerun_and_footer_actions_explain_results() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    assert 'elif current_review_status not in {' in source
+    assert '"重新评审"' in source
+    assert 'set_button_loading(button, True, "正在确认…")' in source
+    assert '"确认文章失败：' in source
+    assert '"文章已确认通过，可进入写入草稿流程"' in source
+    assert '"将文章标记为需要修改，并保留在待处理列表"' in source
+    assert '"ops-review-confirm-hint"' in source
+    assert ".ops-review-confirm-hint" in APP_CSS
 
 
 def test_feature_mapping_document_covers_every_confirmed_page() -> None:

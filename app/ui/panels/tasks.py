@@ -2631,44 +2631,87 @@ def build_review_page(
                                     )
 
                     async def mark_needs_changes() -> None:
-                        await run.io_bound(
-                            lambda: service.request_job_changes(batch_id, job_id)
-                        )
-                        if alive():
-                            ui.notify("已标记为需要修改", type="warning")
-                            reopen()
+                        button = footer_action_state.get("needs_changes")
+                        if button is not None:
+                            set_button_loading(button, True, "正在退回…")
+                        try:
+                            await run.io_bound(
+                                lambda: service.request_job_changes(batch_id, job_id)
+                            )
+                            if alive():
+                                ui.notify(
+                                    "文章已退回修改，并保留在待处理列表",
+                                    type="warning",
+                                )
+                                reopen()
+                        except Exception as exc:  # noqa: BLE001
+                            if alive():
+                                ui.notify(
+                                    f"退回修改失败：{sanitize_failure_text(exc)}",
+                                    type="negative",
+                                    timeout=10000,
+                                )
+                        finally:
+                            if alive() and button is not None:
+                                set_button_loading(button, False)
 
                     async def confirm_article() -> None:
-                        current_reviews = await run.io_bound(
-                            lambda: service.list_editorial_reviews(
-                                job_id=job_id, limit=1
+                        button = footer_action_state.get("confirm")
+                        if button is not None:
+                            set_button_loading(button, True, "正在确认…")
+                        try:
+                            current_reviews = await run.io_bound(
+                                lambda: service.list_editorial_reviews(
+                                    job_id=job_id, limit=1
+                                )
                             )
-                        )
-                        reason, _blocking_count = _review_confirmation_gate(
-                            dict(current_reviews[0]) if current_reviews else None
-                        )
-                        if reason:
-                            ui.notify(reason, type="warning", timeout=8000)
-                            return
-                        await run.io_bound(
-                            lambda: service.confirm_job(batch_id, job_id)
-                        )
-                        if alive():
-                            ui.notify("文章已确认", type="positive")
-                            following = next_review_job(
-                                service.get_batch(
-                                    batch_id, include_content=False
-                                ).get("jobs")
-                                or [],
-                                current_job_id=job_id,
+                            reason, _blocking_count = _review_confirmation_gate(
+                                dict(current_reviews[0])
+                                if current_reviews
+                                else None
                             )
-                            if following:
-                                on_open_review(batch_id, int(following["id"]))
-                            else:
-                                on_back()
+                            if reason:
+                                ui.notify(reason, type="warning", timeout=10000)
+                                return
+                            await run.io_bound(
+                                lambda: service.confirm_job(batch_id, job_id)
+                            )
+                            if alive():
+                                ui.notify(
+                                    "文章已确认通过，可进入写入草稿流程",
+                                    type="positive",
+                                )
+                                following = next_review_job(
+                                    service.get_batch(
+                                        batch_id, include_content=False
+                                    ).get("jobs")
+                                    or [],
+                                    current_job_id=job_id,
+                                )
+                                if following:
+                                    on_open_review(batch_id, int(following["id"]))
+                                else:
+                                    on_back()
+                        except Exception as exc:  # noqa: BLE001
+                            if alive():
+                                ui.notify(
+                                    f"确认文章失败：{sanitize_failure_text(exc)}",
+                                    type="negative",
+                                    timeout=10000,
+                                )
+                        finally:
+                            if alive() and button is not None:
+                                set_button_loading(button, False)
 
                     review_action_state: dict[str, Any] = {"button": None}
                     rewrite_action_state: dict[str, Any] = {"button": None}
+                    footer_action_state: dict[str, Any] = {
+                        "needs_changes": None,
+                        "confirm": None,
+                    }
+                    confirm_reason, confirm_blocking_count = (
+                        _review_confirmation_gate(latest_review)
+                    )
                     with ui.element("div").classes("ops-review-footer-actions"):
                         background_action_host = ui.column().classes(
                             "ops-review-background-actions"
@@ -2687,14 +2730,29 @@ def build_review_page(
                                 ).classes("ops-review-rewrite-action").props(
                                     "flat dense color=primary no-caps"
                                 )
-                        ui.button(
-                            "需要修改",
+                        footer_action_state["needs_changes"] = ui.button(
+                            "退回修改",
                             on_click=mark_needs_changes,
-                        ).props("outline dense color=primary no-caps")
-                        ui.button(
-                            "确认此文章",
+                        ).props("outline dense color=primary no-caps").tooltip(
+                            "将文章标记为需要修改，并保留在待处理列表"
+                        )
+                        confirm_button = ui.button(
+                            "确认通过",
                             on_click=confirm_article,
-                        ).props("unelevated dense color=primary no-caps")
+                        ).props("unelevated dense color=primary no-caps").tooltip(
+                            "确认当前文章；全部文章确认后即可写入草稿箱"
+                        )
+                        footer_action_state["confirm"] = confirm_button
+                        if confirm_reason:
+                            confirm_button.set_text(
+                                f"先处理 {confirm_blocking_count} 个阻断项"
+                                if confirm_blocking_count
+                                else "暂不可确认"
+                            )
+                            confirm_button.disable()
+                            ui.label(confirm_reason).classes(
+                                "ops-review-confirm-hint"
+                            )
 
                 review_body.set_visibility(not candidate_ready)
                 if candidate_ready:
@@ -2932,6 +2990,18 @@ def build_review_page(
                                 on_click=start_review_background,
                             ).classes("w-full").props(
                                 "flat color=primary no-caps"
+                            )
+                        elif current_review_status not in {
+                            "running",
+                            "rewriting",
+                            "candidate_ready",
+                        }:
+                            review_action_state["button"] = ui.button(
+                                "重新评审",
+                                icon="refresh",
+                                on_click=start_review_background,
+                            ).classes("w-full").props(
+                                "outline color=primary no-caps"
                             )
 def open_review_workbench(
     state: AppState,

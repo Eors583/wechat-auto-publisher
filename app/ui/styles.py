@@ -3171,6 +3171,7 @@ APP_CSS += """
 .ops-review-background-actions { grid-column: 1 / -1; width: 100%; gap: var(--ui-space-2); }
 .ops-review-background-actions > * { width: 100%; max-width: 100%; }
 .ops-review-rewrite-action { grid-column: 1 / -1; width: 100%; }
+.ops-review-confirm-hint { grid-column: 1 / -1; min-width: 0; color: var(--ui-color-warning); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .ops-version-choice-panel {
   display: grid;
   align-content: start;
