@@ -47,7 +47,6 @@ from app.services.wechat_layout_import import (
     fetch_wechat_article_layout,
     parse_wechat_article_layout,
 )
-from app.services.wechat_backend_settings import effective_backend_settings
 from app.ui import image_proxy as _image_proxy  # noqa: F401
 from app.ui.auth_persistence import auth_session_middleware_kwargs
 from app.ui.background_activity import build_global_activity_dock
@@ -3235,16 +3234,10 @@ def _build_accounts_panel(
                                     )
                                 )
                             else:
-                                backend_settings = effective_backend_settings(
-                                    state.db
-                                )
                                 result = await run.io_bound(
                                     lambda: fetch_wechat_article_layout(
                                         url,
                                         current_layout=before,
-                                        cookie=str(
-                                            backend_settings.get("cookie") or ""
-                                        ),
                                     )
                                 )
                         except Exception as exc:  # noqa: BLE001
@@ -3260,8 +3253,9 @@ def _build_accounts_panel(
                                         "text-negative"
                                     )
                                     ui.label(
-                                        "文章能在浏览器打开但服务器读取失败时，请复制上方说明中的"
-                                        " #js_content outerHTML 并粘贴解析；无需反复更新登录态。"
+                                        "有效公开链接会自动读取，无需公众号登录态。"
+                                        "如果微信临时拦截服务器请求，可复制上方说明中的"
+                                        " #js_content outerHTML 并粘贴解析。"
                                     ).classes("muted")
                             return
                         finally:

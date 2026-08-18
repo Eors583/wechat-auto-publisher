@@ -36,7 +36,7 @@ _BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Chrome/151.0.0.0 Safari/537.36"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -44,6 +44,14 @@ _BROWSER_HEADERS = {
     ),
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
     "Referer": "https://mp.weixin.qq.com/",
+}
+_MOBILE_BROWSER_HEADERS = {
+    **_BROWSER_HEADERS,
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/151.0.0.0 Mobile Safari/537.36"
+    ),
 }
 
 
@@ -69,10 +77,6 @@ def fetch_wechat_article_layout(
     """Fetch one public WeChat article and derive reusable account layout rules."""
 
     clean_url = _validate_wechat_article_url(url)
-    headers = dict(_BROWSER_HEADERS)
-    if str(cookie or "").strip():
-        headers["Cookie"] = str(cookie).strip()
-
     def fetch_page(request_headers: dict[str, str]) -> tuple[str, str]:
         with httpx.Client(
             headers=request_headers,
@@ -83,22 +87,29 @@ def fetch_wechat_article_layout(
             response.raise_for_status()
             return str(response.text or ""), str(response.url)
 
-    page, final_url = fetch_page(headers)
-    if len(page) < 500:
-        raise ValueError("微信返回了空页面，请确认文章链接可以公开访问")
-    try:
-        _raise_for_wechat_access_page(page, final_url=final_url)
-    except ValueError as exc:
-        if "Cookie" not in headers or not any(
-            marker in str(exc) for marker in ("安全验证页", "不含正文")
-        ):
-            raise
-        anonymous_headers = dict(headers)
-        anonymous_headers.pop("Cookie", None)
-        page, final_url = fetch_page(anonymous_headers)
+    attempts = [dict(_BROWSER_HEADERS), dict(_MOBILE_BROWSER_HEADERS)]
+    configured_cookie = str(cookie or "").strip()
+    if configured_cookie:
+        cookie_headers = dict(_BROWSER_HEADERS)
+        cookie_headers["Cookie"] = configured_cookie
+        attempts.append(cookie_headers)
+
+    last_error: ValueError | None = None
+    page = ""
+    final_url = clean_url
+    for request_headers in attempts:
+        page, final_url = fetch_page(request_headers)
         if len(page) < 500:
-            raise ValueError("微信返回了空页面，请确认文章链接可以公开访问") from exc
-        _raise_for_wechat_access_page(page, final_url=final_url)
+            last_error = ValueError("微信返回了空页面，请确认文章链接可以公开访问")
+            continue
+        try:
+            _raise_for_wechat_access_page(page, final_url=final_url)
+        except ValueError as exc:
+            last_error = exc
+            continue
+        break
+    else:
+        raise last_error or ValueError("没有读取到微信文章正文")
     return parse_wechat_article_layout(
         page,
         # 微信可能为短链接补充查询参数或 hash；结果仍归属用户输入的
@@ -132,12 +143,12 @@ def parse_wechat_article_layout(
             '" rich_media_content ")]'
         )
     if not matches:
-        raise ValueError("没有读取到微信正文 #js_content，可能被登录态或访问限制拦截")
+        raise ValueError("没有读取到微信正文 #js_content，请确认文章链接仍然有效")
 
     content = deepcopy(matches[0])
     plain_text = _plain_text(content)
     if len(plain_text) < 20:
-        raise ValueError("微信正文为空，请检查文章是否已删除、受限或需要重新登录")
+        raise ValueError("微信正文为空，请检查文章是否已删除、受限或链接已经失效")
     _sanitize_preserved_content(content)
 
     title = _metadata_content(document, "og:title") or _node_text(
@@ -223,7 +234,7 @@ def _raise_for_wechat_access_page(page: str, *, final_url: str) -> None:
     ):
         raise ValueError(
             "微信将服务器的自动读取请求转到了安全验证页。"
-            "这不代表文章本身需要登录；请稍后重试，或更新公众号后台登录态后再试"
+            "这不代表文章需要登录；系统已自动更换请求方式重试，请稍后再试"
         )
 
     if any(
@@ -237,9 +248,17 @@ def _raise_for_wechat_access_page(page: str, *, final_url: str) -> None:
     ):
         raise ValueError("这篇微信文章已删除、停用或不可公开访问，无法提取排版")
 
+    if "activity-detail" in lowered and re.search(
+        r"/assets/error[^\"']*\.js", lowered
+    ):
+        raise ValueError(
+            "这个微信短链接已经失效或无法解析，微信没有返回文章正文。"
+            "请在能正常打开的文章页面重新复制链接后再试；公开文章不需要配置登录态"
+        )
+
     raise ValueError(
-        "微信返回了不含正文的页面。请确认链接可在无痕窗口直接打开；"
-        "如果文章受限，请更新公众号后台登录态后重试"
+        "微信返回了不含正文的页面。请确认链接能在普通浏览器中直接打开，"
+        "并从正常显示的文章页面重新复制链接；公开文章不需要配置登录态"
     )
 
 

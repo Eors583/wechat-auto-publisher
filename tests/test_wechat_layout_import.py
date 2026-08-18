@@ -164,11 +164,11 @@ def test_layout_import_rejects_non_article_urls(url: str) -> None:
 
 
 def test_fetch_uses_browser_headers_and_referer(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: list[dict[str, object]] = []
 
     class FakeClient:
         def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
+            captured.append(dict(kwargs))
 
         def __enter__(self) -> FakeClient:
             return self
@@ -177,7 +177,7 @@ def test_fetch_uses_browser_headers_and_referer(monkeypatch: pytest.MonkeyPatch)
             return None
 
         def get(self, url: str) -> httpx.Response:
-            captured["url"] = url
+            captured[-1]["url"] = url
             return httpx.Response(
                 200,
                 text=WECHAT_PAGE,
@@ -191,15 +191,16 @@ def test_fetch_uses_browser_headers_and_referer(monkeypatch: pytest.MonkeyPatch)
         cookie="wxuin=test; pass_ticket=test-ticket",
     )
 
-    headers = dict(captured["headers"])
+    headers = dict(captured[0]["headers"])
     assert "Mozilla/5.0" in str(headers["User-Agent"])
     assert headers["Referer"] == "https://mp.weixin.qq.com/"
-    assert headers["Cookie"] == "wxuin=test; pass_ticket=test-ticket"
-    assert captured["follow_redirects"] is True
+    assert "Cookie" not in headers
+    assert captured[0]["follow_redirects"] is True
+    assert len(captured) == 1
     assert result.title == "成熟排版示例"
 
 
-def test_fetch_reports_wechat_captcha_as_login_state_problem(
+def test_fetch_reports_wechat_captcha_without_requesting_login_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeClient:
@@ -222,11 +223,12 @@ def test_fetch_reports_wechat_captcha_as_login_state_problem(
 
     monkeypatch.setattr("app.services.wechat_layout_import.httpx.Client", FakeClient)
 
-    with pytest.raises(ValueError, match="安全验证页|登录态"):
+    with pytest.raises(ValueError, match="安全验证页") as exc_info:
         fetch_wechat_article_layout("https://mp.weixin.qq.com/s/example")
+    assert "更新公众号后台登录态" not in str(exc_info.value)
 
 
-def test_fetch_retries_public_article_without_stale_cookie(
+def test_fetch_retries_public_article_with_mobile_browser_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen_headers: list[dict[str, str]] = []
@@ -259,14 +261,12 @@ def test_fetch_retries_public_article_without_stale_cookie(
 
     monkeypatch.setattr("app.services.wechat_layout_import.httpx.Client", FakeClient)
 
-    result = fetch_wechat_article_layout(
-        "https://mp.weixin.qq.com/s/example",
-        cookie="expired-cookie=1",
-    )
+    result = fetch_wechat_article_layout("https://mp.weixin.qq.com/s/example")
 
     assert result.title == "成熟排版示例"
-    assert seen_headers[0]["Cookie"] == "expired-cookie=1"
-    assert "Cookie" not in seen_headers[1]
+    assert "Mobile" not in seen_headers[0]["User-Agent"]
+    assert "Mobile" in seen_headers[1]["User-Agent"]
+    assert all("Cookie" not in headers for headers in seen_headers)
 
 
 def test_fetch_reports_http_200_shell_page_as_missing_article(
@@ -293,3 +293,36 @@ def test_fetch_reports_http_200_shell_page_as_missing_article(
 
     with pytest.raises(ValueError, match="不含正文|无痕窗口"):
         fetch_wechat_article_layout("https://mp.weixin.qq.com/s/example")
+
+
+def test_fetch_reports_wechat_error_app_as_expired_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error_page = (
+        '<html><body id="activity-detail"></body>'
+        '<script src="/mmbizappmsg/zh_CN/htmledition/js/assets/error.hash.js"></script>'
+        "</html>"
+    ) * 20
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                text=error_page,
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr("app.services.wechat_layout_import.httpx.Client", FakeClient)
+
+    with pytest.raises(ValueError, match="短链接已经失效") as exc_info:
+        fetch_wechat_article_layout("https://mp.weixin.qq.com/s/expired")
+    assert "更新公众号后台登录态" not in str(exc_info.value)
