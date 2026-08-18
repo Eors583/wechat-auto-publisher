@@ -3022,10 +3022,15 @@ APP_CSS += """
 .ops-assets-actions { gap: var(--ui-space-2); margin-top: var(--ui-space-3); }
 .ops-history-row { display: flex; align-items: center; gap: var(--ui-space-3); margin: var(--ui-space-3); padding: var(--ui-space-3); border: 1px solid var(--ui-color-border); border-radius: var(--ui-radius-md); background: var(--ui-color-bg-subtle); }
 .ops-empty-state { display: grid; min-height: 260px; place-items: center; color: var(--ui-color-text-secondary); }
-.ops-review-side { display: grid; grid-template-rows: minmax(0, 2.07fr) minmax(0, 1fr); gap: var(--ui-space-3); }
-.ops-review-ai-panel { min-height: 0; }
-.ops-review-ai-panel .ops-panel-heading { min-height: 70px; }
-.ops-review-ai-panel .ops-panel-body { max-height: calc(100% - 70px); overflow: auto; scrollbar-width: none; }
+.ops-review-side { display: grid; grid-template-rows: minmax(0, 1fr); gap: var(--ui-space-3); }
+.ops-review-ai-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; height: 100%; }
+.ops-review-ai-panel .ops-panel-heading { min-height: 70px; flex-wrap: wrap; align-items: flex-start; }
+.ops-review-ai-panel .ops-panel-body { min-height: 0; max-height: none; overflow: auto; scrollbar-width: none; }
+.ops-review-progress-runtime { display: contents; }
+.ops-review-progress-host { width: min(320px, 48%); min-width: 0; margin-left: auto; }
+.ops-review-progress-box { width: 100%; border: 1px solid var(--ui-color-border); border-radius: var(--ui-radius-sm); background: var(--ui-color-bg-subtle); }
+.ops-review-progress-box .q-item { min-height: 36px; padding: 5px 9px; }
+.ops-review-progress-box .q-expansion-item__content { padding: 0 9px 9px; }
 .ops-score-line { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: var(--ui-space-3); }
 .ops-score { display: grid; width: 58px; height: 58px; place-items: center; border: 6px solid var(--ui-color-brand-soft); border-top-color: var(--ui-color-brand); border-radius: 50%; color: var(--ui-color-brand-hover); font-weight: var(--ui-font-weight-medium); }
 .ops-review-conclusion { font-weight: var(--ui-font-weight-medium); }
@@ -3045,10 +3050,9 @@ APP_CSS += """
 .ops-issue-suggestion { color: var(--ui-color-text-primary); }
 .ops-issue-manual-note { font-size: var(--ui-font-size-xs); }
 .ops-review-footer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-2); margin-top: 14px; }
+.ops-review-background-actions { grid-column: 1 / -1; width: 100%; gap: var(--ui-space-2); }
+.ops-review-background-actions > * { width: 100%; max-width: 100%; }
 .ops-review-rewrite-action { grid-column: 1 / -1; width: 100%; }
-.ops-review-job-panel { display: grid; grid-template-rows: 70px minmax(0, 1fr); min-height: 0; }
-.ops-review-job-panel .ops-panel-heading { min-height: 70px; height: 70px; }
-.ops-review-job-panel .ops-panel-body { display: grid; align-content: start; gap: var(--ui-space-2); min-height: 0; overflow: hidden; }
 .ops-review-comparison-dialog { width: min(1000px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: hidden; }
 .ops-comparison-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-3); min-height: 0; }
 .ops-comparison-column { min-height: 0; padding: var(--ui-space-3); border: 1px solid var(--ui-color-border); border-radius: var(--ui-radius-md); background: var(--ui-color-bg-subtle); }
@@ -3141,6 +3145,7 @@ APP_CSS += """
   .ops-task-row-state,
   .ops-task-row-badge { display: none !important; }
   .ops-review-layout { grid-template-columns: minmax(0, 1.35fr) minmax(225px, .65fr); }
+  .ops-review-progress-host { width: 100%; flex-basis: 100%; }
 }
 
 @media (max-width: 1100px) and (max-height: 820px) {

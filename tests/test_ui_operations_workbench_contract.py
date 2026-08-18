@@ -167,6 +167,12 @@ def test_review_action_is_replaced_by_persisted_progress() -> None:
     assert "review_progress_stage.set_text(stage)" in source
     assert "review_action_button.set_visibility(False)" in source
     assert "review_progress_column.set_visibility(True)" in source
+    assert "ui.expansion(" in source
+    assert '"后台任务 · 运行中"' in source
+    assert "review_progress_box.set_visibility(True)" in source
+    assert "review_progress_host.set_visibility(True)" in source
+    assert "ops-review-background-actions" in source
+    assert 'classes("ops-panel ops-review-job-panel")' not in source
     assert "service.list_editorial_reviews" in source
     assert "editorial_review_progress(refreshed)" in source
     assert "review_progress_bar.set_value" in source
@@ -183,7 +189,7 @@ def test_background_rewrite_action_precedes_decisions_and_starts_progress() -> N
     assert rewrite < needs_changes < confirm
     assert 'classes("ops-review-rewrite-action")' in source
     assert "start_review_progress(\"正在根据已选意见生成改写候选稿\")" in source
-    assert '"当前没有运行中的后台任务"' in source
+    assert '"当前没有运行中的后台任务"' not in source
     assert ".ops-review-rewrite-action" in APP_CSS
 
 

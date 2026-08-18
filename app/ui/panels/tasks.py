@@ -2261,13 +2261,18 @@ def build_review_page(
                             ).props("outline dense color=primary no-caps")
 
         with ui.element("aside").classes("ops-review-side"):
-            with ui.element("section").classes("ops-panel ops-review-ai-panel"):
+            with ui.element("section").classes(
+                "ops-panel ops-review-ai-panel ops-review-merged-panel"
+            ) as review_panel:
                 with ui.element("div").classes("ops-panel-heading"):
                     with ui.column().classes("gap-0"):
                         ui.label("AI 评审结论").classes("ops-panel-title")
                         ui.label(
                             str(latest_review.get("profile_name") or "专业深度型")
                         ).classes("ops-panel-subtitle")
+                    review_progress_host = ui.element("div").classes(
+                        "ops-review-progress-host"
+                    )
                     review_status = str(latest_review.get("status") or "")
                     status_label = {
                         "completed": "评审完成",
@@ -2289,7 +2294,7 @@ def build_review_page(
                         ).classes(f"{status_classes} ops-review-failure-status").props(
                             "flat dense no-caps aria-label=查看AI评审失败原因"
                         ).tooltip("点击查看失败原因")
-                    else:
+                    elif review_status not in {"running", "rewriting"}:
                         ui.badge(status_label).classes(status_classes)
                 with ui.element("div").classes("ops-panel-body"):
                     score = int(
@@ -2420,19 +2425,23 @@ def build_review_page(
                     review_action_state: dict[str, Any] = {"button": None}
                     rewrite_action_state: dict[str, Any] = {"button": None}
                     with ui.element("div").classes("ops-review-footer-actions"):
-                        if latest_review and review_status not in {
-                            "running",
-                            "rewriting",
-                            "candidate_ready",
-                            "failed",
-                        }:
-                            rewrite_action_state["button"] = ui.button(
-                                "按已选意见后台改写",
-                                icon="auto_fix_high",
-                                on_click=lambda: start_rewrite_background(),
-                            ).classes("ops-review-rewrite-action").props(
-                                "flat dense color=primary no-caps"
-                            )
+                        background_action_host = ui.column().classes(
+                            "ops-review-background-actions"
+                        )
+                        with background_action_host:
+                            if latest_review and review_status not in {
+                                "running",
+                                "rewriting",
+                                "candidate_ready",
+                                "failed",
+                            }:
+                                rewrite_action_state["button"] = ui.button(
+                                    "按已选意见后台改写",
+                                    icon="auto_fix_high",
+                                    on_click=lambda: start_rewrite_background(),
+                                ).classes("ops-review-rewrite-action").props(
+                                    "flat dense color=primary no-caps"
+                                )
                         ui.button(
                             "需要修改",
                             on_click=mark_needs_changes,
@@ -2442,21 +2451,9 @@ def build_review_page(
                             on_click=confirm_article,
                         ).props("unelevated dense color=primary no-caps")
 
-            with ui.element("section").classes("ops-panel ops-review-job-panel"):
+            with review_panel:
                 progress = editorial_review_progress(latest_review)
-                with ui.element("div").classes("ops-panel-heading"):
-                    with ui.column().classes("gap-0"):
-                        ui.label("后台任务").classes("ops-panel-title")
-                        ui.label("评审和改写可离开页面继续运行").classes(
-                            "ops-panel-subtitle"
-                        )
-                    ui.badge(
-                        "1 运行中"
-                        if str(latest_review.get("status") or "")
-                        in {"running", "rewriting"}
-                        else "0 运行中"
-                    ).classes("ops-badge")
-                with ui.element("div").classes("ops-panel-body"):
+                with ui.element("div").classes("ops-review-progress-runtime"):
                     current_review_status = str(
                         latest_review.get("status") or ""
                     )
@@ -2468,32 +2465,36 @@ def build_review_page(
                         "active": review_is_active,
                         "timer": None,
                     }
-                    review_progress_column = ui.column().classes(
-                        "w-full gap-2 ops-review-live-progress"
-                    )
-                    with review_progress_column:
-                        review_progress_stage = ui.label(
-                            str(progress.get("stage") or "正在创建评审任务")
-                        ).classes(
-                            "ops-activity-stage"
+                    with review_progress_host:
+                        review_progress_box = ui.expansion(
+                            "后台任务 · 运行中",
+                            icon="sync",
+                            value=True,
+                        ).classes("ops-review-progress-box")
+                    with review_progress_box:
+                        review_progress_column = ui.column().classes(
+                            "w-full gap-2 ops-review-live-progress"
                         )
-                        with ui.linear_progress(
-                            value=float(progress.get("value") or 0.05),
-                            show_value=False,
-                            size="20px",
-                        ).props(
-                            "rounded color=primary track-color=blue-1"
-                        ).classes("background-activity-progress") as review_progress_bar:
-                            review_progress_percent = ui.label(
-                                f'{round(float(progress.get("value") or 0) * 100)}%'
+                        with review_progress_column:
+                            review_progress_stage = ui.label(
+                                str(progress.get("stage") or "正在创建评审任务")
                             ).classes(
-                                "absolute-center background-activity-progress-label"
+                                "ops-activity-stage"
                             )
-                    review_progress_column.set_visibility(review_is_active)
-                    review_idle_label = ui.label(
-                        "当前没有运行中的后台任务"
-                    ).classes("ops-activity-stage")
-                    review_idle_label.set_visibility(not review_is_active)
+                            with ui.linear_progress(
+                                value=float(progress.get("value") or 0.05),
+                                show_value=False,
+                                size="20px",
+                            ).props(
+                                "rounded color=primary track-color=blue-1"
+                            ).classes("background-activity-progress") as review_progress_bar:
+                                review_progress_percent = ui.label(
+                                    f'{round(float(progress.get("value") or 0) * 100)}%'
+                                ).classes(
+                                    "absolute-center background-activity-progress-label"
+                                )
+                    review_progress_box.set_visibility(review_is_active)
+                    review_progress_host.set_visibility(review_is_active)
 
                     async def refresh_review_progress() -> None:
                         if not alive():
@@ -2536,7 +2537,8 @@ def build_review_page(
                         review_progress_stage.set_text(stage)
                         review_progress_bar.set_value(0.05)
                         review_progress_percent.set_text("5%")
-                        review_idle_label.set_visibility(False)
+                        review_progress_host.set_visibility(True)
+                        review_progress_box.set_visibility(True)
                         review_progress_column.set_visibility(True)
                         if review_progress_state.get("timer") is None:
                             review_progress_state["timer"] = client_timer(
@@ -2631,22 +2633,23 @@ def build_review_page(
                         asyncio.create_task(run_rewrite_background())
                         ui.notify("已转入后台改写，可继续使用其他功能", type="info")
 
-                    if not latest_review:
-                        review_action_state["button"] = ui.button(
-                            "后台开始 AI 评审",
-                            icon="rate_review",
-                            on_click=start_review_background,
-                        ).classes("w-full").props(
-                            "flat color=primary no-caps"
-                        )
-                    elif current_review_status == "failed":
-                        review_action_state["button"] = ui.button(
-                            "重新评审",
-                            icon="refresh",
-                            on_click=start_review_background,
-                        ).classes("w-full").props(
-                            "flat color=primary no-caps"
-                        )
+                    with background_action_host:
+                        if not latest_review:
+                            review_action_state["button"] = ui.button(
+                                "后台开始 AI 评审",
+                                icon="rate_review",
+                                on_click=start_review_background,
+                            ).classes("w-full").props(
+                                "flat color=primary no-caps"
+                            )
+                        elif current_review_status == "failed":
+                            review_action_state["button"] = ui.button(
+                                "重新评审",
+                                icon="refresh",
+                                on_click=start_review_background,
+                            ).classes("w-full").props(
+                                "flat color=primary no-caps"
+                            )
                     if str(latest_review.get("status") or "") == "candidate_ready":
                         applications = service.list_editorial_review_applications(
                             str(latest_review["id"]), limit=1
@@ -2712,13 +2715,14 @@ def build_review_page(
                                     "使用改写后版本",
                                     on_click=lambda: choose_version(True),
                                 ).props("unelevated color=primary no-caps")
-                        ui.button(
-                            "查看改写前后对比并选择版本",
-                            icon="compare",
-                            on_click=comparison_dialog.open,
-                        ).classes("w-full").props(
-                            "outline color=primary no-caps"
-                        )
+                        with background_action_host:
+                            ui.button(
+                                "查看改写前后对比并选择版本",
+                                icon="compare",
+                                on_click=comparison_dialog.open,
+                            ).classes("w-full").props(
+                                "outline color=primary no-caps"
+                            )
 
 
 def open_review_workbench(
