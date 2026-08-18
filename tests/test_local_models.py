@@ -173,8 +173,8 @@ def test_browser_bridge_posts_openai_payload_to_the_local_machine() -> None:
     )
 
     assert "http://localhost:11434/v1/chat/completions" in script
-    assert "window.isSecureContext" in script
-    assert "当前页面不是 HTTPS 安全页面" in script
+    assert "window.isSecureContext" not in script
+    assert "当前页面不是 HTTPS 安全页面" not in script
     assert "targetAddressSpace: 'local'" in script
     assert "credentials: 'omit'" in script
     assert "AbortSignal.timeout(600000)" in script

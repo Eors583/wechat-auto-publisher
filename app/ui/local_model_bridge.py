@@ -32,12 +32,6 @@ def _browser_completion_script(
     )
     return f"""
 return await (async (config) => {{
-  if (!window.isSecureContext) {{
-    return {{
-      ok: false,
-      error: '当前页面不是 HTTPS 安全页面，Chrome/Edge 不允许公网 HTTP 页面访问本机模型。请从生产 HTTPS 地址打开后重试。',
-    }};
-  }}
   try {{
     const headers = {{'Content-Type': 'application/json'}};
     if (config.apiKey) headers.Authorization = `Bearer ${{config.apiKey}}`;
