@@ -399,6 +399,34 @@ def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> N
     assert "flex-wrap: wrap" in action_css[:400]
 
 
+def test_create_log_keeps_multiline_height_and_cannot_overlap_actions() -> None:
+    fixed_field_css = (
+        ".ops-create-account-section "
+        ".q-field:not(.ops-create-log-area) .q-field__control"
+    )
+    assert fixed_field_css in APP_CSS
+
+    log_css = APP_CSS[APP_CSS.index(".ops-create-log-area {") :]
+    assert ".ops-create-log-area .q-field__control" in log_css[:1200]
+    assert "height: auto !important" in log_css[:1200]
+    assert "min-height: calc(5 * 1.5em) !important" in log_css[:1600]
+    assert "overflow-y: auto !important" in log_css[:1600]
+    assert "overflow-wrap: anywhere" in log_css[:1600]
+    assert "white-space: pre-wrap" in log_css[:1600]
+
+    containment_css = APP_CSS[APP_CSS.index(".ops-workbench-shell :is(") :]
+    for generated_part in (
+        ".q-field__control-container",
+        ".q-field__native",
+        ".q-item__label",
+        ".q-btn__content",
+        ".q-chip__content",
+    ):
+        assert generated_part in containment_css[:800]
+    assert "min-width: 0" in containment_css[:800]
+    assert "max-width: 100%" in containment_css[:800]
+
+
 def test_authenticated_user_can_open_personal_model_settings() -> None:
     source = inspect.getsource(desktop.create_desktop_app)
 

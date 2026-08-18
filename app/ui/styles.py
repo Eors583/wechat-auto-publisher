@@ -2073,7 +2073,7 @@ APP_CSS += """
   gap: var(--ui-space-3);
 }
 .ops-create-source-section .q-field__control,
-.ops-create-account-section .q-field__control {
+.ops-create-account-section .q-field:not(.ops-create-log-area) .q-field__control {
   min-height: var(--ui-control-height-field) !important;
   height: var(--ui-control-height-field);
 }
@@ -2244,6 +2244,25 @@ APP_CSS += """
   min-width: 0;
   max-width: 100%;
   margin-top: var(--ui-space-2);
+}
+.ops-create-log-area .q-field__inner,
+.ops-create-log-area .q-field__control,
+.ops-create-log-area .q-field__control-container {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: auto !important;
+  box-sizing: border-box;
+}
+.ops-create-log-area textarea.q-field__native {
+  min-width: 0;
+  min-height: calc(5 * 1.5em) !important;
+  max-height: calc(10 * 1.5em);
+  overflow-x: hidden;
+  overflow-y: auto !important;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 .ops-create-account-section .progress-heading { min-width: 0; margin-bottom: var(--ui-space-1); }
 .ops-create-account-section .progress-track-wrap,
@@ -3278,6 +3297,31 @@ APP_CSS += """
   .ops-config-entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wechat-layout-change-table,
   .wechat-layout-import-previews { grid-template-columns: 1fr; }
+}
+
+/* Generated Quasar internals must participate in the workbench's width
+   constraints. Dynamic prose wraps; compact stages keep their explicit
+   ellipsis rules above. */
+.ops-workbench-shell :is(
+  .q-field,
+  .q-field__inner,
+  .q-field__control,
+  .q-field__control-container,
+  .q-field__native,
+  .q-field__input,
+  .q-item__section,
+  .q-item__label,
+  .q-btn__content,
+  .q-chip__content
+) {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.ops-workbench-shell textarea.q-field__native {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 
 /* Keep navigation and dialogs responsive. Quasar's default 300ms color and
