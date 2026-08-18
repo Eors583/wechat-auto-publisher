@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from app.ai.manus import (
     ManusAPIError,
     ManusClient,
     ManusTransportError,
+    _message_content,
     _next_request_at,
     _wait_for_request_slot,
     is_non_retryable_manus_error,
@@ -38,6 +40,22 @@ class ManusClientTests(unittest.TestCase):
         ]
         self.assertEqual(_latest_agent_status(events), "stopped")
         self.assertEqual(_latest_error(events), "failed")
+
+    def test_long_prompt_moves_to_attachment_without_losing_content(self) -> None:
+        prompt = "完整原稿与改写要求" * 1000
+
+        content = _message_content(prompt)
+
+        self.assertIsInstance(content, list)
+        parts = content if isinstance(content, list) else []
+        self.assertLess(len(parts[0]["text"]), 4000)
+        encoded = parts[1]["file_data"].split(",", 1)[1]
+        restored = base64.b64decode(encoded).decode()
+        self.assertEqual(restored, prompt)
+        self.assertEqual(parts[1]["filename"], "task-input.txt")
+
+    def test_short_prompt_keeps_plain_text_message(self) -> None:
+        self.assertEqual(_message_content("短请求"), "短请求")
 
     def test_task_not_found_is_recognized_case_insensitively(self) -> None:
         self.assertTrue(

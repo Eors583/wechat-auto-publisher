@@ -262,8 +262,6 @@ class EditorialReviewService:
                     review_config.get("account_article_instruction") or ""
                 ),
             )
-            if isinstance(client, ManusClient):
-                prompt = compact_manus_review_prompt(prompt)
             try:
                 self.db.create_editorial_review(
                     {
@@ -1297,30 +1295,6 @@ def build_review_prompt(
         "请输出严格 JSON 对象，不要使用 Markdown 代码块，不要附加解释。"
         f"结构示例：{json.dumps(contract, ensure_ascii=False)}"
     )
-
-
-def compact_manus_review_prompt(prompt: str, *, limit: int = 4500) -> str:
-    """Fit a representative review prompt after Manus rejects an oversized message."""
-
-    text = str(prompt or "")
-    if len(text) <= limit:
-        return text
-    head_size = min(2300, limit // 2)
-    tail_size = min(1200, limit // 3)
-    separator = "\n\n【超长内容已均匀抽取，保留开头、中段和结尾】\n"
-    middle_budget = limit - head_size - tail_size - len(separator)
-    middle = text[head_size:-tail_size]
-    if len(middle) > middle_budget:
-        part = max(1, middle_budget // 3)
-        center = len(middle) // 2
-        middle = (
-            middle[:part]
-            + "\n…\n"
-            + middle[center - part // 2 : center + part // 2]
-            + "\n…\n"
-            + middle[-part:]
-        )[:middle_budget]
-    return text[:head_size] + separator + middle + text[-tail_size:]
 
 
 def build_rewrite_prompt(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import hashlib
@@ -23,6 +24,32 @@ logger = logging.getLogger(__name__)
 
 _request_gate_lock = threading.Lock()
 _next_request_at: dict[tuple[str, str, str], float] = {}
+
+_INLINE_TEXT_LIMIT = 4000
+
+
+def _message_content(prompt: str) -> str | list[dict[str, str]]:
+    """Move long Manus prompts to an attachment without losing source text."""
+
+    text = str(prompt or "")
+    if len(text) <= _INLINE_TEXT_LIMIT:
+        return text
+    encoded = base64.b64encode(text.encode()).decode("ascii")
+    return [
+        {
+            "type": "text",
+            "text": (
+                "完整任务说明和全部原始材料位于附件 task-input.txt。请先完整读取附件，"
+                "严格按其中要求执行，并通过本任务的结构化输出返回结果。"
+            ),
+        },
+        {
+            "type": "file",
+            "file_data": f"data:text/plain;base64,{encoded}",
+            "filename": "task-input.txt",
+            "mime_type": "text/plain",
+        },
+    ]
 
 
 class ManusTransportError(RuntimeError):
@@ -266,7 +293,7 @@ class ManusClient:
             "Content-Type": "application/json",
         }
         payload: dict[str, Any] = {
-            "message": {"content": prompt},
+            "message": {"content": _message_content(prompt)},
             "agent_profile": self.model,
             "interactive_mode": False,
             "hide_in_task_list": True,
