@@ -137,7 +137,8 @@ def test_candidate_comparison_replaces_dialog_and_review_conclusion() -> None:
     assert '"使用原文"' in source
     assert '"使用改写后文章"' in source
     assert "_preview_editorial_review_application" in source
-    assert "prepare_preview_html(html_content)" in source
+    assert "prepare_preview_html(" in source
+    assert "html_content," in source
     assert "review_body.set_visibility(not candidate_ready)" in source
     assert "comparison_dialog" not in source
     assert "ops-review-comparison-dialog" not in source
@@ -145,6 +146,9 @@ def test_candidate_comparison_replaces_dialog_and_review_conclusion() -> None:
     assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in APP_CSS
     assert ".ops-inline-comparison-canvas iframe" in APP_CSS
     assert ".ops-version-choice-actions .q-btn" in APP_CSS
+    assert '"定位下一个改写区域"' in source
+    assert "build_rewrite_regions(" in source
+    assert "rewrite_region_navigation_script(index)" in source
 
 
 def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:

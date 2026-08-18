@@ -10,7 +10,11 @@ from nicegui import run, ui
 
 from app.ai import clean_candidate_text
 from app.config import load_config
-from app.render.preview import prepare_preview_html
+from app.render.preview import (
+    build_rewrite_regions,
+    prepare_preview_html,
+    rewrite_region_navigation_script,
+)
 from app.services.batches import BatchService
 from app.services.failures import sanitize_failure_text
 from app.time_utils import business_date, format_business_datetime
@@ -1992,6 +1996,7 @@ def build_review_page(
     candidate_snapshot: dict[str, Any] = {}
     candidate_preview_html = ""
     candidate_preview_error = ""
+    rewrite_regions: list[dict[str, str]] = []
     if candidate_ready:
         applications = service.list_editorial_review_applications(
             str(latest_review["id"]), limit=1
@@ -2013,6 +2018,10 @@ def build_review_page(
                 )
             except Exception as exc:  # noqa: BLE001
                 candidate_preview_error = sanitize_failure_text(exc)
+        rewrite_regions = build_rewrite_regions(
+            str(source_snapshot.get("body") or job.get("body") or ""),
+            str(candidate_snapshot.get("body") or ""),
+        )
 
     def alive() -> bool:
         return page_alive["value"] and not bool(
@@ -2038,6 +2047,19 @@ def build_review_page(
         on_open_review(batch_id, int(target_job["id"]))
 
     version_choice_running = {"value": False}
+    rewrite_region_cursor = {"value": -1}
+    rewrite_region_status: dict[str, Any] = {"element": None}
+
+    def show_next_rewrite_region() -> None:
+        if not rewrite_regions:
+            ui.notify("没有检测到正文改写区域", type="info")
+            return
+        index = (rewrite_region_cursor["value"] + 1) % len(rewrite_regions)
+        rewrite_region_cursor["value"] = index
+        status = rewrite_region_status.get("element")
+        if status is not None:
+            status.set_text(f"改写区域 {index + 1}/{len(rewrite_regions)}")
+        owner_client.run_javascript(rewrite_region_navigation_script(index))
 
     async def choose_version(
         use_rewrite: bool,
@@ -2150,9 +2172,20 @@ def build_review_page(
                         inline_count = len(
                             list(dict(job.get("meta") or {}).get("inline_images") or [])
                         )
-                        ui.badge(
-                            f"{paragraph_count} 段 · {inline_count} 张图"
-                        ).classes("ops-badge")
+                        with ui.row().classes("items-center gap-2 flex-wrap"):
+                            ui.badge(
+                                f"{paragraph_count} 段 · {inline_count} 张图"
+                            ).classes("ops-badge")
+                            if candidate_ready:
+                                rewrite_region_status["element"] = ui.badge(
+                                    f"改写区域 0/{len(rewrite_regions)}"
+                                ).classes("ops-badge")
+                                locate_rewrite_btn = ui.button(
+                                    "定位下一个改写区域",
+                                    icon="search",
+                                    on_click=show_next_rewrite_region,
+                                ).props("outline dense color=primary no-caps")
+                                locate_rewrite_btn.set_enabled(bool(rewrite_regions))
                     if candidate_ready:
                         with ui.element("div").classes(
                             "ops-inline-comparison"
@@ -2190,7 +2223,13 @@ def build_review_page(
                                         ).classes("ops-panel-subtitle")
                                     if html_content:
                                         ui.html(
-                                            prepare_preview_html(html_content),
+                                            prepare_preview_html(
+                                                html_content,
+                                                rewrite_regions=rewrite_regions,
+                                                rewrite_side=(
+                                                    "after" if candidate else "before"
+                                                ),
+                                            ),
                                             sanitize=False,
                                         ).classes(
                                             "ops-inline-comparison-canvas"

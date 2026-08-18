@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from html import unescape
 
-from app.render.preview import prepare_preview_document, prepare_preview_html
+from app.render.preview import (
+    build_rewrite_regions,
+    prepare_preview_document,
+    prepare_preview_html,
+    rewrite_region_navigation_script,
+)
 
 
 def test_wechat_data_src_is_loaded_only_for_browser_preview() -> None:
@@ -46,3 +51,38 @@ def test_preview_is_isolated_from_application_styles() -> None:
     assert "<style>" in unescape(preview)
     assert "img {" in unescape(preview)
     assert "max-width: 100%;" in unescape(preview)
+
+
+def test_rewrite_regions_mark_both_styled_previews() -> None:
+    source = "第一段保持原文。\n第二段保持原文。\n第三段保持原文。"
+    candidate = "第一段保持原文。\n第二段改写为经营韧性建议。\n第三段保持原文。"
+    source_html = "".join(f"<p>{line}</p>" for line in source.splitlines())
+    candidate_html = "".join(f"<p>{line}</p>" for line in candidate.splitlines())
+
+    regions = build_rewrite_regions(source, candidate)
+    before = prepare_preview_document(
+        source_html,
+        rewrite_regions=regions,
+        rewrite_side="before",
+    )
+    after = prepare_preview_document(
+        candidate_html,
+        rewrite_regions=regions,
+        rewrite_side="after",
+    )
+
+    assert len(regions) == 1
+    assert 'data-rewrite-regions="0"' in before
+    assert 'data-rewrite-regions="0"' in after
+    assert 'data-rewrite-side="before"' in before
+    assert 'data-rewrite-side="after"' in after
+    assert ".rewrite-diff-active" in before
+    assert (
+        '<p data-rewrite-regions="0" class="rewrite-diff-region">第二段保持原文。</p>'
+        in before
+    )
+
+    script = rewrite_region_navigation_script(0)
+    assert "data-rewrite-regions" in script
+    assert "rewrite-diff-active" in script
+    assert "wrap.scrollTo" in script
