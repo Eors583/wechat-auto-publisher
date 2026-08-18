@@ -20,6 +20,7 @@ from app.ui.ip_whitelist_guide import (
     show_ip_whitelist_guide,
 )
 from app.ui.lifecycle import client_timer
+from app.ui.navigation import ui_root_url
 from app.ui.interaction_feedback import (
     attach_interaction_feedback,
     hide_interaction_feedback,
@@ -490,7 +491,13 @@ def build_tasks_panel(
     def open_activity_detail(batch_id: str, job_id: int | None = None) -> None:
         if job_id:
             ui.navigate.to(
-                f"/?view=review&batch_id={batch_id}&job_id={int(job_id)}"
+                ui_root_url(
+                    {
+                        "view": "review",
+                        "batch_id": batch_id,
+                        "job_id": int(job_id),
+                    }
+                )
             )
             return
         show_batch(batch_id)
@@ -1331,17 +1338,14 @@ def _failure_action_retry_step(
     } else "auto")
 
 
-def _settings_action_message(action: str) -> str:
-    return {
-        "open_account_settings": (
-            "请关闭当前任务弹窗，前往“设置 → 公众号 → 管理 → 基础信息”"
-            "更新凭证并测试连接。"
-        ),
-        "open_template_settings": (
-            "请关闭当前任务弹窗，前往“设置 → 公众号 → 管理 → 草稿模板”"
-            "重新选择或同步模板。"
-        ),
-    }.get(action, "")
+def _settings_action_url(action: str, account_id: str) -> str:
+    repair = {
+        "open_account_settings": "account",
+        "open_template_settings": "template",
+    }.get(action, "account")
+    return ui_root_url(
+        {"view": "config", "repair": repair, "account_id": account_id}
+    )
 
 
 def _render_inbox_article_card(
@@ -1772,10 +1776,14 @@ def _render_inbox_article_card(
                     }[action]
                     ui.button(
                         setting_label,
-                        on_click=lambda _=None, value=action: ui.notify(
-                            _settings_action_message(value),
-                            type="info",
-                            timeout=12000,
+                        on_click=lambda _=None,
+                        value=action,
+                        aid=str(
+                            item.get("account_id")
+                            or nested_job.get("account_id")
+                            or ""
+                        ): ui.navigate.to(
+                            _settings_action_url(value, aid)
                         ),
                     ).props(
                         "flat dense color=teal-9 no-caps icon=settings"

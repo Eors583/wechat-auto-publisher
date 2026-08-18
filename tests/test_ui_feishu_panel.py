@@ -58,6 +58,7 @@ def _render(
     readiness: dict[str, Any] | None = None,
     runtime: dict[str, Any] | None = None,
     pairing: dict[str, Any] | None = None,
+    restart_available: bool = True,
     after_render: Callable[[], None] | None = None,
 ) -> tuple[_FakeState, str]:
     state = _FakeState(models)
@@ -89,6 +90,11 @@ def _render(
         feishu,
         "get_runtime",
         lambda _db: dict(runtime or {"status": "stopped"}),
+    )
+    monkeypatch.setattr(
+        feishu,
+        "api_service_restart_available",
+        lambda: restart_available,
     )
     try:
         feishu.build_feishu_panel(state)
@@ -433,3 +439,18 @@ def test_restart_button_calls_runtime_control_and_uses_io_bound(
 
     assert calls == ["io_bound", "restart"]
     assert "立即重启飞书服务" in snapshot
+
+
+def test_cloud_panel_hides_the_unavailable_process_restart_action(
+    monkeypatch: Any,
+) -> None:
+    _, snapshot = _render(monkeypatch, restart_available=False)
+    buttons = {
+        str(item.get("text") or "")
+        for item in json.loads(snapshot)
+        if item.get("type") == "Button"
+    }
+
+    assert "立即重启飞书服务" not in buttons
+    assert "当前为云端工作台，飞书服务由服务器自动管理" in snapshot
+    assert "刷新接入状态" in buttons

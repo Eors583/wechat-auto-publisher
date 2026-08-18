@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import urlencode
-
 from nicegui import run, ui
 
 from app.services.batches import BatchService
 from app.ui.lifecycle import client_timer
+from app.ui.navigation import ui_root_url
 from app.ui.panels.review_jury import editorial_review_progress
 from app.ui.state import AppState
 
@@ -49,11 +48,8 @@ def _generation_activity(batch: dict[str, Any]) -> dict[str, Any] | None:
         "stage": stage,
         "progress": value,
         "detail": f"已完成 {completed}/{total} 篇",
-        "url": "/?" + urlencode(
-            {
-                "view": "tasks",
-                "batch_id": str(batch.get("id") or ""),
-            }
+        "url": ui_root_url(
+            {"view": "tasks", "batch_id": str(batch.get("id") or "")}
         ),
     }
 
@@ -71,12 +67,8 @@ def _review_activity(review: dict[str, Any]) -> dict[str, Any] | None:
         "stage": str(progress.get("stage") or "AI 评审处理中"),
         "progress": float(progress.get("value") or 0.05),
         "detail": "候选稿待选择" if status == "candidate_ready" else "可继续使用其他功能",
-        "url": "/?" + urlencode(
-            {
-                "view": "review",
-                "batch_id": batch_id,
-                "job_id": job_id,
-            }
+        "url": ui_root_url(
+            {"view": "review", "batch_id": batch_id, "job_id": job_id}
         ),
     }
 

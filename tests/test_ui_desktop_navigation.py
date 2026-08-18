@@ -3,11 +3,15 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from pathlib import Path
 from typing import Any
 
 from nicegui import ui
 
 from app.ui import desktop
+from app.ui.background_activity import _generation_activity, _review_activity
+from app.ui.navigation import ui_root_url
+from app.ui.panels import tasks
 
 
 class _FakeDb:
@@ -81,6 +85,51 @@ def test_primary_navigation_exposes_the_five_confirmed_workbench_entries() -> No
     labels = _tab_labels(desktop.create_desktop_app)
 
     assert labels[:5] == ["创作台", "选题雷达", "任务队列", "公众号", "文章审核"]
+
+
+def test_internal_navigation_preserves_the_production_ui_root_path(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("WECHAT_PUBLISHER_UI_ROOT_PATH", "/publisher/")
+
+    assert ui_root_url() == "/publisher/"
+    assert ui_root_url({"view": "onboarding"}) == "/publisher/?view=onboarding"
+    assert desktop._preflight_repair_url("account-1", "template") == (
+        "/publisher/?view=config&repair=template&account_id=account-1"
+    )
+    assert tasks._settings_action_url("open_account_settings", "account-1") == (
+        "/publisher/?view=config&repair=account&account_id=account-1"
+    )
+    assert _generation_activity(
+        {
+            "id": "batch-1",
+            "jobs": [{"status": "processing"}],
+            "progress": {"total": 1, "completed": 0},
+        }
+    )["url"] == "/publisher/?view=tasks&batch_id=batch-1"
+    assert _review_activity(
+        {"status": "running", "batch_id": "batch-1", "job_id": 9}
+    )["url"] == "/publisher/?view=review&batch_id=batch-1&job_id=9"
+
+
+def test_internal_navigation_defaults_to_the_local_root(monkeypatch: Any) -> None:
+    monkeypatch.delenv("WECHAT_PUBLISHER_UI_ROOT_PATH", raising=False)
+
+    assert ui_root_url({"view": "tasks"}) == "/?view=tasks"
+
+
+def test_ui_navigation_callers_do_not_bypass_the_configured_root_path() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    for relative in (
+        "app/ui/background_activity.py",
+        "app/ui/desktop.py",
+        "app/ui/panels/onboarding_wizard.py",
+        "app/ui/panels/tasks.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert '"/?view=' not in source, relative
+        assert "ui.navigate.to(\"/\")" not in source, relative
 
 
 def test_generation_can_move_to_the_background_task_center() -> None:

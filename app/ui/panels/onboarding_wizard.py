@@ -17,6 +17,7 @@ from app.services.wechat_relay_settings import (
     save_wechat_relay_access_code,
     save_wechat_relay_settings,
 )
+from app.ui.navigation import ui_root_url
 from app.ui.state import AppState, set_button_loading
 
 WIZARD_STEPS = ("welcome", "ai", "account", "wechat", "complete")
@@ -287,7 +288,7 @@ def build_configuration_health_banner(status: dict[str, Any] | None) -> None:
     with ui.row().classes("w-full items-center justify-end q-mb-sm"):
         ui.link(
             label,
-            "/?view=config",
+            ui_root_url({"view": "config"}),
         ).props(f"color={color} no-caps").classes("text-weight-bold")
 
 
@@ -390,7 +391,7 @@ def build_onboarding_settings(
                     try:
                         await run.io_bound(lambda: service.restart(mode="full"))
                         if ui_alive():
-                            ui.navigate.to("/?view=onboarding")
+                            ui.navigate.to(ui_root_url({"view": "onboarding"}))
                     except Exception as exc:  # noqa: BLE001
                         if ui_alive():
                             ui.notify(

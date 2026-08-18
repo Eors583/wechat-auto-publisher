@@ -8,8 +8,6 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlencode
-
 from nicegui import run, ui
 
 from app.accounts import (
@@ -57,6 +55,7 @@ from app.ui.interaction_feedback import (
 )
 from app.ui.lifecycle import client_timer
 from app.ui.local_model_bridge import install_local_model_bridge
+from app.ui.navigation import ui_root_url
 from app.ui.panels.auth import (
     build_auth_screen,
     current_desktop_user,
@@ -129,7 +128,7 @@ def _preflight_repair_action(check_key: str) -> tuple[str, str]:
 
 def _preflight_repair_url(account_id: str, check_key: str) -> str:
     action, _ = _preflight_repair_action(check_key)
-    return "/?" + urlencode(
+    return ui_root_url(
         {
             "view": "config",
             "repair": action,
@@ -306,7 +305,7 @@ def create_desktop_app() -> None:
             page_state,
             service=onboarding_service,
             initial_status=onboarding_status,
-            on_completed=lambda _account_id: ui.navigate.to("/"),
+            on_completed=lambda _account_id: ui.navigate.to(ui_root_url()),
         )
         return
 
@@ -485,7 +484,7 @@ def create_desktop_app() -> None:
                     # real read-only refresh proves that the sole usable
                     # account can no longer write drafts, move directly to the
                     # focused WeChat repair step.
-                    ui.navigate.to("/?view=onboarding")
+                    ui.navigate.to(ui_root_url({"view": "onboarding"}))
                     return
 
             client_timer(

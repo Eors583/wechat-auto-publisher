@@ -171,6 +171,7 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `app/ui/loading.py` | `RequestLoading` and `get_request_loading`: request feedback and optional “move to background” behavior. |
 | `app/ui/interaction_feedback.py` | Installs lightweight immediate feedback on interactive controls so network work is not perceived as a frozen click. |
 | `app/ui/lifecycle.py` | Client-owned timers that stop safely when the NiceGUI client is deleted. |
+| `app/ui/navigation.py` | Builds internal UI URLs that preserve the configured reverse-proxy root path. |
 | `app/ui/auth_persistence.py` | Aligns signed NiceGUI cookie lifetime/security with 30-day database sessions. |
 | `app/ui/local_model_bridge.py` | Transitional browser fallback for user-local models: Chromium loopback permission probe, one active tab per user and DB request relay. Companion-bound models do not depend on an open tab. |
 | `app/ui/image_proxy.py` | Validated proxy route for WeChat image previews; prevents arbitrary URL proxying. |
@@ -881,6 +882,7 @@ unless noted.
 | `app/ui/ip_whitelist_guide.py` | WeChat whitelist repair dialog. |
 | `app/ui/lifecycle.py` | Client-safe timers. |
 | `app/ui/loading.py` | Request loading/background dialog. |
+| `app/ui/navigation.py` | Reverse-proxy-root-aware internal UI URLs. |
 | `app/ui/local_model_bridge.py` | Browser-to-user-local-model bridge. |
 | `app/ui/workflow.py` | UI stage/navigation helpers. |
 | `app/ui/panels/__init__.py` | Panel package boundary. |

@@ -8,7 +8,7 @@ from nicegui import run, ui
 from app.accounts import public_accounts
 from app.feishu.runtime import get_runtime
 from app.feishu.settings import public_feishu_settings, save_feishu_settings
-from app.runtime_control import restart_api_service
+from app.runtime_control import api_service_restart_available, restart_api_service
 from app.services.onboarding import OnboardingService
 from app.ui.lifecycle import client_timer
 from app.ui.state import AppState, set_button_loading
@@ -450,14 +450,23 @@ def build_feishu_panel(state: AppState) -> None:
         ).classes("text-positive q-mt-sm")
 
     with ui.element("div").classes("card w-full"):
+        can_restart_service = api_service_restart_available()
         _step_heading(
             3,
-            "重启飞书服务",
-            "不用退出桌面应用；点击下面按钮会重启本机 API 和飞书长连接服务。",
+            "重启飞书服务" if can_restart_service else "检查飞书服务状态",
+            (
+                "不用退出桌面应用；点击下面按钮会重启本机 API 和飞书长连接服务。"
+                if can_restart_service
+                else "当前为云端工作台，飞书服务由服务器自动管理，无需在网页内重启。"
+            ),
         )
         ui.label(
-            "重启后请保持本应用开启。状态显示“服务已启动，等待测试消息”即可继续第 4 步；"
-            "收到真实飞书消息前不会显示接入完成。"
+            (
+                "重启后请保持本应用开启。状态显示“服务已启动，等待测试消息”即可继续第 4 步；"
+                "收到真实飞书消息前不会显示接入完成。"
+                if can_restart_service
+                else "保存配置后可刷新接入状态；如持续异常，请检查服务日志或联系管理员。"
+            )
         ).classes("text-warning text-weight-bold")
 
         async def restart_feishu_service() -> None:
@@ -490,10 +499,11 @@ def build_feishu_panel(state: AppState) -> None:
                 set_button_loading(restart_service_btn, False)
 
         with ui.row().classes("items-center gap-3"):
-            restart_service_btn = ui.button(
-                "立即重启飞书服务",
-                on_click=restart_feishu_service,
-            ).props("unelevated color=teal-9 no-caps icon=restart_alt")
+            if can_restart_service:
+                restart_service_btn = ui.button(
+                    "立即重启飞书服务",
+                    on_click=restart_feishu_service,
+                ).props("unelevated color=teal-9 no-caps icon=restart_alt")
             ui.button(
                 "刷新接入状态",
                 on_click=lambda: (
