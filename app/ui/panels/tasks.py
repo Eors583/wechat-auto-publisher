@@ -2942,6 +2942,16 @@ def open_review_workbench(
     *,
     review_runtime: dict[str, bool] | None = None,
 ) -> None:
+    open_review_page = (
+        review_runtime.get("open_review_page")
+        if review_runtime is not None
+        else None
+    )
+    if callable(open_review_page):
+        review_runtime["review_open"] = True
+        open_review_page(batch_id, job_id)
+        return
+
     owner_client = ui.context.client
     workbench_state = {"open": True}
 

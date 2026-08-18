@@ -357,6 +357,17 @@ def test_inbox_review_action_opens_the_deep_workbench_directly() -> None:
     assert '"深度编辑"' not in source
 
 
+def test_legacy_review_entry_redirects_to_the_full_page_route() -> None:
+    source = inspect.getsource(tasks.open_review_workbench)
+
+    redirect = source.index('review_runtime.get("open_review_page")')
+    dialog = source.index("with ui.dialog() as dialog")
+    assert redirect < dialog
+    assert 'review_runtime["review_open"] = True' in source[redirect:dialog]
+    assert "open_review_page(batch_id, job_id)" in source[redirect:dialog]
+    assert "return" in source[redirect:dialog]
+
+
 def test_failed_inbox_card_exposes_quick_retry_recovery_options_and_batch() -> None:
     source = inspect.getsource(tasks._render_inbox_article_card)  # noqa: SLF001
 
