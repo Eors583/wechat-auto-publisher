@@ -86,6 +86,8 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
 
     for label in ("查看后台运行任务", "查看归档"):
         assert f'"{label}"' in source
+    assert '"退出归档" if archived_only else "查看归档"' in source
+    assert 'batches = [batch for batch in batches if batch.get("archived_at")]' in source
     assert 'ui.label("今日处理顺序")' in source
     assert "ops-queue-workspace" in APP_CSS
     assert "container-type: inline-size" in APP_CSS
@@ -96,7 +98,7 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
         assert f'"{label}"' in row_source
     assert '"active": "生成中"' in source
     assert 'status_in.value = "active"' in source
-    assert "archived_in.value = True" in source
+    assert "archived_in.value = show_archived" in source
     assert '"initial_view": "inbox"' in inspect.getsource(
         desktop.create_desktop_app
     )

@@ -417,7 +417,9 @@ def build_tasks_panel(
         with ui.element("section").classes("ops-panel ops-list-panel"):
             with ui.element("div").classes("ops-panel-heading"):
                 with ui.column().classes("gap-0"):
-                    ui.label("待我处理").classes("ops-panel-title")
+                    queue_title_label = ui.label("待我处理").classes(
+                        "ops-panel-title"
+                    )
                     ui.label("每条任务保持统一行高，按下一步动作排序").classes(
                         "ops-panel-subtitle"
                     )
@@ -697,6 +699,9 @@ def build_tasks_panel(
 
     def render() -> None:
         host.clear()
+        archived_only = bool(archived_in.value)
+        archive_tasks_btn.set_text("退出归档" if archived_only else "查看归档")
+        queue_title_label.set_text("已归档批次" if archived_only else "待我处理")
         completion_batch_id = str(runtime.get("completion_batch_id") or "")
         if completion_batch_id:
             for control in (view_in, search_in, account_in):
@@ -861,8 +866,10 @@ def build_tasks_panel(
 
         batches = service.list_batches(
             limit=300,
-            include_archived=bool(archived_in.value),
+            include_archived=archived_only,
         )
+        if archived_only:
+            batches = [batch for batch in batches if batch.get("archived_at")]
         runtime["has_active_batch"] = any(
             str(batch.get("status") or "") in {"pending", "processing", "injecting"}
             for batch in batches
@@ -1014,11 +1021,13 @@ def build_tasks_panel(
 
     def show_archived_tasks() -> None:
         runtime["completion_batch_id"] = ""
+        show_archived = not bool(archived_in.value)
         runtime["syncing_controls"] = True
         try:
             view_in.value = "batches"
+            queue_segment.value = "batches"
             status_in.value = ""
-            archived_in.value = True
+            archived_in.value = show_archived
             today_only.value = False
             status_in.set_visibility(True)
             batch_only_filters.set_visibility(True)
