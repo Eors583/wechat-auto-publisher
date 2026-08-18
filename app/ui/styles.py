@@ -3139,7 +3139,8 @@ APP_CSS += """
 .ops-review-progress-box .q-item { min-height: 36px; padding: 5px 9px; }
 .ops-review-progress-box .q-expansion-item__content { padding: 0 9px 9px; }
 .ops-score-line { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: var(--ui-space-3); }
-.ops-score { display: grid; width: 58px; height: 58px; place-items: center; border: 6px solid var(--ui-color-brand-soft); border-top-color: var(--ui-color-brand); border-radius: 50%; color: var(--ui-color-brand-hover); font-weight: var(--ui-font-weight-medium); }
+.ops-score { flex: 0 0 58px; color: var(--ui-color-brand-hover); }
+.ops-score-value { font-weight: var(--ui-font-weight-medium); font-variant-numeric: tabular-nums; }
 .ops-review-conclusion { font-weight: var(--ui-font-weight-medium); }
 .ops-review-summary { margin-top: var(--ui-space-1); color: var(--ui-color-text-secondary); font-size: var(--ui-font-size-xs); }
 .ops-issue-list { display: grid; gap: var(--ui-space-2); margin-top: var(--ui-space-3); }

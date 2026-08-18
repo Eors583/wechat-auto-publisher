@@ -2474,8 +2474,9 @@ def build_review_page(
                         if review_status in {"completed", "applied", "source_kept"}
                         else "ops-badge-warm"
                     )
+                    review_status_indicator = None
                     if review_status == "failed":
-                        ui.button(
+                        review_status_indicator = ui.button(
                             status_label,
                             icon="info_outline",
                             on_click=show_review_failure,
@@ -2483,15 +2484,29 @@ def build_review_page(
                             "flat dense no-caps aria-label=查看AI评审失败原因"
                         ).tooltip("点击查看失败原因")
                     elif review_status not in {"running", "rewriting"}:
-                        ui.badge(status_label).classes(status_classes)
+                        review_status_indicator = ui.badge(status_label).classes(
+                            status_classes
+                        )
                 with ui.element("div").classes("ops-panel-body") as review_body:
-                    score = int(
+                    raw_score = (
                         review_result.get("overall_score")
                         or latest_review.get("overall_score")
-                        or 0
                     )
+                    score = max(0, min(100, int(raw_score or 0)))
                     with ui.element("div").classes("ops-score-line"):
-                        ui.label(str(score or "—")).classes("ops-score")
+                        with ui.circular_progress(
+                            value=score,
+                            min=0,
+                            max=100,
+                            size="58px",
+                            show_value=False,
+                            color="primary",
+                        ).classes("ops-score").props(
+                            "track-color=blue-1 thickness=0.18"
+                        ):
+                            ui.label(
+                                str(score) if raw_score is not None else "—"
+                            ).classes("absolute-center ops-score-value")
                         with ui.column().classes("gap-0 ops-flex-copy"):
                             ui.label(
                                 str(
@@ -2922,6 +2937,9 @@ def build_review_page(
                         review_action_button = review_action_state.get("button")
                         if review_action_button is not None:
                             review_action_button.set_visibility(False)
+                        if review_status_indicator is not None:
+                            review_status_indicator.set_visibility(False)
+                        review_body.set_visibility(False)
                         start_review_progress()
                         asyncio.create_task(run_review_background())
                         ui.notify("AI 评审已转入后台，可继续使用其他功能", type="info")

@@ -258,6 +258,18 @@ def test_completed_review_can_be_rerun_and_footer_actions_explain_results() -> N
     assert ".ops-review-confirm-hint" in APP_CSS
 
 
+def test_rerun_hides_stale_result_and_score_ring_uses_real_percentage() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    assert "review_body.set_visibility(False)" in source
+    assert "review_status_indicator.set_visibility(False)" in source
+    assert "ui.circular_progress(" in source
+    assert "max=100" in source
+    assert 'size="58px"' in source
+    assert '"track-color=blue-1 thickness=0.18"' in source
+    assert "border-top-color" not in APP_CSS
+
+
 def test_feature_mapping_document_covers_every_confirmed_page() -> None:
     mapping = (ROOT / "docs" / "新版前端功能映射与验收清单.md").read_text(
         encoding="utf-8"
