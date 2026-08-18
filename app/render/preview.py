@@ -74,6 +74,27 @@ def _unit_range(
     return offset, finish
 
 
+def _trim_shared_edges(before: str, after: str) -> tuple[int, int, int, int]:
+    """Return slices containing only the changed envelope on each side."""
+
+    prefix = 0
+    prefix_limit = min(len(before), len(after))
+    while prefix < prefix_limit and before[prefix] == after[prefix]:
+        prefix += 1
+
+    suffix = 0
+    suffix_limit = min(len(before) - prefix, len(after) - prefix)
+    while suffix < suffix_limit and before[-suffix - 1] == after[-suffix - 1]:
+        suffix += 1
+
+    return (
+        prefix,
+        len(before) - suffix,
+        prefix,
+        len(after) - suffix,
+    )
+
+
 def build_rewrite_regions(source: str, candidate: str) -> list[dict[str, str]]:
     """Return nearby text edits as navigable before/after regions."""
 
@@ -95,14 +116,31 @@ def build_rewrite_regions(source: str, candidate: str) -> list[dict[str, str]]:
         after_start, after_end = _unit_range(after_units, j1, j2, len(after))
         before_text = before[before_start:before_end]
         after_text = after[after_start:after_end]
+        before_left, before_right, after_left, after_right = _trim_shared_edges(
+            before_text, after_text
+        )
+        before_start += before_left
+        before_end = before_start + (before_right - before_left)
+        after_start += after_left
+        after_end = after_start + (after_right - after_left)
+        before_text = before[before_start:before_end]
+        after_text = after[after_start:after_end]
         if _lookup_text(before_text) == _lookup_text(after_text):
             continue
         regions.append(
             {
                 "before": before_text,
                 "after": after_text,
-                "before_anchor": _diff_anchor(before, before_start, before_end),
-                "after_anchor": _diff_anchor(after, after_start, after_end),
+                "before_anchor": (
+                    _diff_anchor(before, before_start, before_end)
+                    if _lookup_text(before_text)
+                    else ""
+                ),
+                "after_anchor": (
+                    _diff_anchor(after, after_start, after_end)
+                    if _lookup_text(after_text)
+                    else ""
+                ),
             }
         )
     return regions
@@ -142,24 +180,32 @@ def _mark_rewrite_regions(
     side: str,
 ) -> None:
     anchor_key = f"{side}_anchor"
+    text_key = side
     elements = [
         element
         for element in root.iterdescendants()
         if str(getattr(element, "tag", "")).lower() not in {"script", "style", "svg"}
     ]
     for index, region in enumerate(regions):
+        changed_text = _lookup_text(str(region.get(text_key) or ""))
         anchor = str(region.get(anchor_key) or "")
-        if not anchor:
+        if not changed_text:
             continue
         matches = [
             element
             for element in elements
-            if anchor in _lookup_text(element.text_content())
+            if changed_text in _lookup_text(element.text_content())
         ]
         if not matches:
             continue
+        anchored_matches = [
+            element
+            for element in matches
+            if anchor and anchor in _lookup_text(element.text_content())
+        ]
         target = min(
-            matches, key=lambda element: len(_lookup_text(element.text_content()))
+            anchored_matches or matches,
+            key=lambda element: len(_lookup_text(element.text_content())),
         )
         existing = str(target.get("data-rewrite-regions") or "").strip()
         target.set(

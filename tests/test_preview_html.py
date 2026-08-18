@@ -72,6 +72,8 @@ def test_rewrite_regions_mark_both_styled_previews() -> None:
     )
 
     assert len(regions) == 1
+    assert regions[0]["before"] == "保持原文"
+    assert regions[0]["after"] == "改写为经营韧性建议"
     assert 'data-rewrite-regions="0"' in before
     assert 'data-rewrite-regions="0"' in after
     assert 'data-rewrite-side="before"' in before
@@ -86,3 +88,56 @@ def test_rewrite_regions_mark_both_styled_previews() -> None:
     assert "data-rewrite-regions" in script
     assert "rewrite-diff-active" in script
     assert "wrap.scrollTo" in script
+
+
+def test_inserted_text_is_highlighted_only_in_rewritten_preview() -> None:
+    source = "第一段保持原文。\n第三段保持原文。"
+    candidate = "第一段保持原文。\n新增经营建议。\n第三段保持原文。"
+    source_html = "<p>第一段保持原文。</p><p>第三段保持原文。</p>"
+    candidate_html = (
+        "<p>第一段保持原文。</p><p>新增经营建议。</p><p>第三段保持原文。</p>"
+    )
+
+    regions = build_rewrite_regions(source, candidate)
+    before = prepare_preview_document(
+        source_html, rewrite_regions=regions, rewrite_side="before"
+    )
+    after = prepare_preview_document(
+        candidate_html, rewrite_regions=regions, rewrite_side="after"
+    )
+
+    assert regions == [
+        {
+            "before": "",
+            "after": "\n新增经营建议。",
+            "before_anchor": "",
+            "after_anchor": "新增经营建议",
+        }
+    ]
+    assert 'data-rewrite-regions="0"' not in before
+    assert (
+        '<p data-rewrite-regions="0" class="rewrite-diff-region">新增经营建议。</p>'
+        in after
+    )
+
+
+def test_deleted_text_is_highlighted_only_in_original_preview() -> None:
+    source = "第一段保持原文。\n应删除的旧结论。\n第三段保持原文。"
+    candidate = "第一段保持原文。\n第三段保持原文。"
+    source_html = (
+        "<p>第一段保持原文。</p><p>应删除的旧结论。</p><p>第三段保持原文。</p>"
+    )
+    candidate_html = "<p>第一段保持原文。</p><p>第三段保持原文。</p>"
+
+    regions = build_rewrite_regions(source, candidate)
+    before = prepare_preview_document(
+        source_html, rewrite_regions=regions, rewrite_side="before"
+    )
+    after = prepare_preview_document(
+        candidate_html, rewrite_regions=regions, rewrite_side="after"
+    )
+
+    assert regions[0]["before"] == "\n应删除的旧结论。"
+    assert regions[0]["after"] == ""
+    assert 'data-rewrite-regions="0"' in before
+    assert 'data-rewrite-regions="0"' not in after
