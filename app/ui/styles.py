@@ -3049,6 +3049,14 @@ APP_CSS += """
   white-space: normal;
 }
 .ops-issue-suggestion { color: var(--ui-color-text-primary); }
+.ops-issue-verification { color: var(--ui-color-brand-hover); }
+.ops-issue-sources {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+}
+.ops-issue-source-link { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .ops-issue-manual-note { font-size: var(--ui-font-size-xs); }
 .ops-issue-actions { flex-wrap: wrap; gap: var(--ui-space-2); }
 .ops-issue-actions .q-btn { max-width: 100%; }
@@ -3150,6 +3158,23 @@ APP_CSS += """
   .ops-review-layout { grid-template-columns: minmax(0, 1.35fr) minmax(225px, .65fr); }
   .ops-review-progress-host { width: 100%; flex-basis: 100%; }
 }
+.review-issue-card--verified {
+  border-left: 4px solid var(--ui-color-brand) !important;
+  background: linear-gradient(90deg, var(--ui-color-brand-soft), #fff 20%) !important;
+}
+.review-verification-summary {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--accent-dark);
+  overflow-wrap: anywhere;
+}
+.review-evidence-sources {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.review-evidence-link { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 
 @media (max-width: 1100px) and (max-height: 820px) {
   .wizard-layout {

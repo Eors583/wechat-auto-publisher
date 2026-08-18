@@ -17,6 +17,17 @@ REVIEW_JURY_PANEL = ROOT / "app" / "ui" / "panels" / "review_jury.py"
 UI_STYLES = ROOT / "app" / "ui" / "styles.py"
 
 
+def test_online_fact_checks_show_sources_and_a_rewrite_choice() -> None:
+    source = REVIEW_JURY_PANEL.read_text(encoding="utf-8")
+    styles = UI_STYLES.read_text(encoding="utf-8")
+
+    assert "AI 联网核实建议（可选择）" in source
+    assert "按核实结果交给 AI 改写" in source
+    assert 'issue.get("evidence_sources")' in source
+    assert "review-evidence-sources" in source
+    assert ".review-issue-card--verified" in styles
+
+
 def test_review_progress_uses_persisted_state_and_never_finishes_early() -> None:
     started = datetime(2026, 8, 6, 4, 0, tzinfo=UTC)
     review = {"status": "running", "created_at": started.isoformat()}

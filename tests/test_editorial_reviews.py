@@ -11,6 +11,7 @@ from app.editorial_review import normalize_review_config, review_options
 from app.services.batches import BatchService
 from app.services.editorial_reviews import (
     EditorialReviewConflict,
+    _issue_can_auto_apply,
     build_review_prompt,
     build_rewrite_prompt,
     compact_manus_review_prompt,
@@ -45,6 +46,131 @@ def test_manus_review_prompt_leaves_short_messages_unchanged() -> None:
     prompt = "评审这篇短文章"
 
     assert compact_manus_review_prompt(prompt) == prompt
+
+
+def test_review_prompt_only_claims_online_verification_when_enabled() -> None:
+    config = normalize_review_config({})
+    job = {
+        "selected_title": "测试标题",
+        "selected_subtitle": "",
+        "digest": "测试摘要",
+        "body": "正文包含一项需要核实的公开事实。",
+        "raw_content": "原始资料",
+        "required_facts": "",
+    }
+
+    offline = build_review_prompt(
+        job=job,
+        config=config,
+        account_name="测试公众号",
+    )
+    config["online_fact_verification"] = True
+    online = build_review_prompt(
+        job=job,
+        config=config,
+        account_name="测试公众号",
+    )
+
+    assert "当前模型不具备受控联网核实能力" in offline
+    assert "不得声称查询了互联网" in offline
+    assert "事实问题必须先使用联网搜索核实" in online
+    assert "evidence_sources 只能填写本次实际打开核对过的网页" in online
+
+
+def test_online_fact_check_becomes_selectable_only_with_a_safe_action() -> None:
+    config = normalize_review_config({})
+    config["online_fact_verification"] = True
+    payload = _review_payload_with_issues(
+        [
+            {
+                "role_id": "fact_checker",
+                "category": "事实",
+                "severity": "high",
+                "location": "正文整体",
+                "excerpt": "项目于2025年完成",
+                "problem": "公开资料显示年份可能不准确",
+                "suggestion": "按官方公告改为2026年",
+                "evidence_status": "conflict",
+                "verification_summary": "官方公告与原文年份冲突。",
+                "recommended_action": "correct_from_sources",
+                "evidence_sources": [
+                    {
+                        "title": "项目官方公告",
+                        "url": "https://example.gov.cn/notice",
+                        "publisher": "主管部门",
+                        "published_at": "2026-01-02",
+                        "summary": "公告确认项目于2026年完成。",
+                    },
+                    {
+                        "title": "行业主管机构公告",
+                        "url": "https://authority.example.org/project",
+                        "publisher": "行业主管机构",
+                        "published_at": "2026-01-03",
+                        "summary": "公告同样确认项目于2026年完成。",
+                    },
+                    {
+                        "title": "无效来源",
+                        "url": "javascript:alert(1)",
+                        "publisher": "",
+                        "published_at": "",
+                        "summary": "",
+                    },
+                    {
+                        "title": "内网来源",
+                        "url": "http://127.0.0.1/private",
+                        "publisher": "",
+                        "published_at": "",
+                        "summary": "",
+                    },
+                ],
+                "can_auto_apply": False,
+                "blocks_draft": True,
+            }
+        ]
+    )
+
+    issue = normalize_review_result(payload, config=config)["issues"][0]
+
+    assert issue["verification_mode"] == "online"
+    assert issue["recommended_action"] == "correct_from_sources"
+    assert issue["can_auto_apply"] is True
+    assert issue["blocks_draft"] is False
+    assert [source["url"] for source in issue["evidence_sources"]] == [
+        "https://example.gov.cn/notice",
+        "https://authority.example.org/project",
+    ]
+    assert _issue_can_auto_apply(issue) is True
+
+
+def test_online_correction_without_sources_falls_back_to_safe_rewrite() -> None:
+    config = normalize_review_config({})
+    config["online_fact_verification"] = True
+    payload = _review_payload_with_issues(
+        [
+            {
+                "role_id": "fact_checker",
+                "category": "事实",
+                "severity": "high",
+                "location": "正文整体",
+                "problem": "年份可能错误",
+                "suggestion": "改成另一个年份",
+                "evidence_status": "unverifiable",
+                "verification_summary": "没有找到可靠来源。",
+                "recommended_action": "correct_from_sources",
+                "evidence_sources": [],
+                "can_auto_apply": True,
+                "blocks_draft": False,
+            }
+        ]
+    )
+
+    issue = normalize_review_result(payload, config=config)["issues"][0]
+
+    assert issue["recommended_action"] == "soften_claim"
+    assert issue["can_auto_apply"] is True
+    assert issue["blocks_draft"] is False
+    assert "删除无法由公开可靠来源支持的具体事实" in issue["suggestion"]
+    assert _issue_can_auto_apply(issue) is True
 
 
 class _QueuedClient:

@@ -1983,12 +1983,7 @@ def build_review_page(
         for issue in list(review_result.get("issues") or [])
         if isinstance(issue, dict)
     ]
-    selected_issue_ids: set[str] = {
-        str(issue.get("id") or "")
-        for issue in issues
-        if str(issue.get("id") or "")
-        and not bool(issue.get("blocks_draft"))
-    }
+    selected_issue_ids: set[str] = set()
 
     def alive() -> bool:
         return page_alive["value"] and not bool(
@@ -2325,6 +2320,10 @@ def build_review_page(
                             location = str(issue.get("location") or "全文")
                             problem = str(issue.get("problem") or "").strip()
                             suggestion = str(issue.get("suggestion") or "").strip()
+                            online_verified = (
+                                str(issue.get("verification_mode") or "")
+                                == "online"
+                            )
                             manual_review = issue_id and not can_auto_apply
                             with ui.element("div").classes(
                                 "ops-issue ops-issue-risk"
@@ -2338,6 +2337,8 @@ def build_review_page(
                                         (
                                             "阻断项"
                                             if blocking
+                                            else "AI 联网核实项"
+                                            if online_verified
                                             else "人工核实项"
                                             if manual_review
                                             else "可优化",
@@ -2356,6 +2357,32 @@ def build_review_page(
                                     if suggestion
                                     else "建议：请重新运行 AI 评审后再作选择"
                                 ).classes("ops-issue-content ops-issue-suggestion")
+                                if online_verified:
+                                    verification_summary = str(
+                                        issue.get("verification_summary")
+                                        or "已完成公开信息检索；未找到足够证据时仅采用删除或弱化表达。"
+                                    )
+                                    ui.label(
+                                        f"联网核实：{verification_summary}"
+                                    ).classes(
+                                        "ops-issue-content ops-issue-verification"
+                                    )
+                                    sources = list(
+                                        issue.get("evidence_sources") or []
+                                    )
+                                    if sources:
+                                        with ui.row().classes("ops-issue-sources"):
+                                            for source in sources[:3]:
+                                                if not isinstance(source, dict):
+                                                    continue
+                                                ui.link(
+                                                    str(
+                                                        source.get("title")
+                                                        or "查看核实来源"
+                                                    ),
+                                                    str(source.get("url") or ""),
+                                                    new_tab=True,
+                                                ).classes("ops-issue-source-link")
                                 if manual_review:
                                     async def resolve_issue(
                                         resolution_value: str = "resolved",
@@ -2397,7 +2424,9 @@ def build_review_page(
                                         ).props("flat dense color=negative no-caps")
                                 elif issue_id and can_auto_apply:
                                     checkbox = ui.checkbox(
-                                        "纳入后台改写",
+                                        "按核实结果纳入后台改写"
+                                        if online_verified
+                                        else "纳入后台改写",
                                         value=issue_id in selected_issue_ids,
                                     ).props("dense")
                                     checkbox.on_value_change(

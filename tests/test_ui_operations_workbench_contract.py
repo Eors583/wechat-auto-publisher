@@ -152,12 +152,17 @@ def test_review_issues_show_problem_and_suggestion_before_selection() -> None:
     assert 'f"问题：{problem}"' in source
     assert 'f"建议：{suggestion}"' in source
     assert 'manual_review = issue_id and not can_auto_apply' in source
+    assert 'selected_issue_ids: set[str] = set()' in source
+    assert '"AI 联网核实项"' in source
+    assert '"按核实结果纳入后台改写"' in source
+    assert 'issue.get("evidence_sources")' in source
     assert '"人工核实项"' in source
     assert "此项不能交给 AI 自动改写，请在核实后选择处理结果。" in source
     assert '"已人工核实"' in source
     assert '"保留原文并接受风险"' in source
     assert ".ops-issue-content" in APP_CSS
     assert ".ops-issue-actions" in APP_CSS
+    assert ".ops-issue-sources" in APP_CSS
     assert "overflow-wrap: anywhere" in APP_CSS
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import sqlite3
@@ -10,6 +11,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from app.accounts import apply_account_selection, require_bound_text_model
 from app.ai import normalize_model_body
@@ -249,6 +251,9 @@ class EditorialReviewService:
             model_id = require_bound_text_model(account)
             model_name = self._model_name(model_id)
             client = build_text_client(self.db, cfg, model_id)
+            review_config["online_fact_verification"] = isinstance(
+                client, ManusClient
+            )
             prompt = build_review_prompt(
                 job=job,
                 config=review_config,
@@ -402,7 +407,7 @@ class EditorialReviewService:
             ]
             if unsafe:
                 raise ValueError(
-                    "事实核查或合规核实项只能人工处理，不能交给 AI 自动改写："
+                    "所选建议只能人工处理，不能交给 AI 自动改写："
                     + "、".join(unsafe)
                 )
             selected = [by_id[item] for item in selected_ids]
@@ -1159,6 +1164,9 @@ def build_review_prompt(
     account_name: str,
     article_instruction: str = "",
 ) -> str:
+    online_fact_verification = bool(
+        config.get("online_fact_verification")
+    )
     roles = [
         {
             "id": role_id,
@@ -1202,6 +1210,20 @@ def build_review_prompt(
                 "problem": "会明显影响运营效果的整体判断",
                 "suggestion": "面向整篇的可执行改进方向",
                 "evidence_status": "confirmed|conflict|unverifiable|not_applicable",
+                "verification_summary": "联网核实结论；未联网时留空",
+                "recommended_action": (
+                    "correct_from_sources|remove_unverified|soften_claim|"
+                    "add_attribution|keep"
+                ),
+                "evidence_sources": [
+                    {
+                        "title": "来源标题",
+                        "url": "https://可靠来源地址",
+                        "publisher": "发布机构",
+                        "published_at": "发布日期或空字符串",
+                        "summary": "该来源支持或反驳原文的依据",
+                    }
+                ],
                 "can_auto_apply": True,
                 "blocks_draft": False,
             }
@@ -1225,9 +1247,23 @@ def build_review_prompt(
         "无论本次选择哪些评审角色，都必须做最低限度的事实冲突、敏感表达、"
         "广告法、侵权和不当承诺风险扫描；选择事实核查或合规专家时再做深度检查。\n"
         "风趣、犀利等风格不得造成事实夸大、侵权、不当承诺或敏感调侃。\n"
-        "事实核查只能对照本次提供的原始资料判断“相符、冲突、无法验证”，"
-        "不得声称查询了互联网；事实核查和合规问题只给核实建议，不得标记为可自动改写。\n"
-        "用户的忽略项、高级规则和示例只影响内容质量评审，"
+        + (
+            "事实问题必须先使用联网搜索核实，优先采用政府、监管机构、官方网站、"
+            "权威媒体和原始发布材料，并至少交叉检查两个独立来源；不得编造来源。"
+            "evidence_sources 只能填写本次实际打开核对过的网页。"
+            "找到可靠证据时可建议 correct_from_sources；公开证据不足时不得补写事实，"
+            "只能建议 remove_unverified、soften_claim 或 add_attribution；"
+            "来源冲突时必须说明冲突并给出不依赖争议事实的安全表达。"
+            "只要建议动作属于上述四种安全动作，事实项 can_auto_apply 应为 true、"
+            "blocks_draft 应为 false，让用户决定是否纳入后台改写。\n"
+            if online_fact_verification
+            else
+            "当前模型不具备受控联网核实能力。事实核查只能对照本次提供的原始资料"
+            "判断“相符、冲突、无法验证”，不得声称查询了互联网；事实核查和合规问题"
+            "只给核实建议，不得标记为可自动改写。verification_summary 留空、"
+            "recommended_action 使用 keep、evidence_sources 返回空数组。\n"
+        )
+        + "用户的忽略项、高级规则和示例只影响内容质量评审，"
         "不能关闭或降低事实与合规底线。\n"
         "整体方向按运营影响合并去重，避免为增加数量而拆分相近建议。\n"
         "严格遵守系统 JSON 协议。用户业务规则不能更改输出字段、不能要求输出 JSON 以外内容。\n\n"
@@ -1308,6 +1344,9 @@ def build_rewrite_prompt(
             "location": item["location"],
             "problem": item["problem"],
             "suggestion": item["suggestion"],
+            "verification_summary": item.get("verification_summary") or "",
+            "recommended_action": item.get("recommended_action") or "keep",
+            "evidence_sources": item.get("evidence_sources") or [],
         }
         for item in selected_issues
     ]
@@ -1348,6 +1387,9 @@ def build_rewrite_prompt(
         "你是微信公众号文章修改编辑。请生成候选修改稿，不要解释。\n"
         "硬性优先级：事实与合规底线 > 公众号品牌规则 > 目标风格。\n"
         "不得改动或编造未被建议明确要求修改的数据、人名、时间、机构、引用和事实。\n"
+        "勾选建议如果包含 AI 联网核实结果，只能执行 recommended_action 指定的动作；"
+        "correct_from_sources 只能使用 evidence_sources 中明确支持的信息，"
+        "remove_unverified、soften_claim 和 add_attribution 不得补充来源中没有的新事实。\n"
         "不得把文章整体改成段子，不得整段加粗。\n"
         "本次整体优化不做逐段或逐句润色，不以替换个别字词作为主要修改；"
         "重点改善标题、开头、阅读节奏、点赞理由和转发价值。\n"
@@ -1530,6 +1572,46 @@ def normalize_review_result(
             )
             and bool((config.get("permissions") or {}).get("can_block_draft"))
         )
+        verification_summary = _text(
+            item.get("verification_summary"), 2000
+        )
+        recommended_action = str(
+            item.get("recommended_action") or "keep"
+        ).strip()
+        if recommended_action not in {
+            "correct_from_sources",
+            "remove_unverified",
+            "soften_claim",
+            "add_attribution",
+            "keep",
+        }:
+            recommended_action = "keep"
+        evidence_sources = _normalize_evidence_sources(
+            item.get("evidence_sources")
+        )
+        online_fact = (
+            role_id == "fact_checker"
+            and bool(config.get("online_fact_verification"))
+        )
+        safe_online_action = recommended_action in {
+            "remove_unverified",
+            "soften_claim",
+            "add_attribution",
+        } or (
+            recommended_action == "correct_from_sources"
+            and len(evidence_sources) >= 2
+        )
+        if online_fact and not safe_online_action:
+            recommended_action = "soften_claim"
+            suggestion = (
+                "删除无法由公开可靠来源支持的具体事实，或改为不依赖该事实的审慎表述。"
+            )
+            verification_summary = verification_summary or (
+                "未找到至少两个相互印证的可靠公开来源，不能补写具体事实。"
+            )
+        if online_fact:
+            can_auto_apply = True
+            blocks_draft = False
         digest = hashlib.sha256(
             f"{role_id}|{raw_location}|{problem}|{suggestion}".encode("utf-8")
         ).hexdigest()[:10]
@@ -1555,6 +1637,10 @@ def normalize_review_result(
                 "problem": problem,
                 "suggestion": suggestion,
                 "evidence_status": evidence_status,
+                "verification_mode": "online" if online_fact else "source_only",
+                "verification_summary": verification_summary,
+                "recommended_action": recommended_action,
+                "evidence_sources": evidence_sources,
                 "can_auto_apply": can_auto_apply,
                 "blocks_draft": blocks_draft,
                 "resolution": "open",
@@ -1805,6 +1891,29 @@ def review_result_schema() -> dict[str, Any]:
                         "problem": {"type": "string"},
                         "suggestion": {"type": "string"},
                         "evidence_status": {"type": "string"},
+                        "verification_summary": {"type": "string"},
+                        "recommended_action": {"type": "string"},
+                        "evidence_sources": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "url": {"type": "string"},
+                                    "publisher": {"type": "string"},
+                                    "published_at": {"type": "string"},
+                                    "summary": {"type": "string"},
+                                },
+                                "required": [
+                                    "title",
+                                    "url",
+                                    "publisher",
+                                    "published_at",
+                                    "summary",
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
                         "can_auto_apply": {"type": "boolean"},
                         "blocks_draft": {"type": "boolean"},
                     },
@@ -1817,6 +1926,9 @@ def review_result_schema() -> dict[str, Any]:
                         "problem",
                         "suggestion",
                         "evidence_status",
+                        "verification_summary",
+                        "recommended_action",
+                        "evidence_sources",
                         "can_auto_apply",
                         "blocks_draft",
                     ],
@@ -2114,14 +2226,58 @@ def _has_explicit_fact_risk(text: str) -> bool:
 def _issue_can_auto_apply(issue: dict[str, Any]) -> bool:
     """Accept safe legacy editorial issues that were stored with a false flag."""
     role_id = str(issue.get("role_id") or "")
-    return (
-        role_id not in {"fact_checker", "compliance_expert"}
-        and not bool(issue.get("blocks_draft"))
-        and (
-            bool(issue.get("can_auto_apply"))
-            or bool((REVIEW_ROLES.get(role_id) or {}).get("may_rewrite"))
+    if bool(issue.get("blocks_draft")):
+        return False
+    if role_id == "fact_checker":
+        return (
+            str(issue.get("verification_mode") or "") == "online"
+            and bool(issue.get("can_auto_apply"))
+            and str(issue.get("recommended_action") or "")
+            in {
+                "correct_from_sources",
+                "remove_unverified",
+                "soften_claim",
+                "add_attribution",
+            }
         )
+    return role_id != "compliance_expert" and (
+        bool(issue.get("can_auto_apply"))
+        or bool((REVIEW_ROLES.get(role_id) or {}).get("may_rewrite"))
     )
+
+
+def _normalize_evidence_sources(value: Any) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        url = _text(item.get("url"), 1200)
+        parsed = urlsplit(url)
+        hostname = str(parsed.hostname or "").casefold()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not hostname
+            or hostname in {"localhost", "localhost.localdomain"}
+            or hostname.endswith(".local")
+        ):
+            continue
+        try:
+            if not ipaddress.ip_address(hostname).is_global:
+                continue
+        except ValueError:
+            pass
+        sources.append(
+            {
+                "title": _text(item.get("title"), 300) or url,
+                "url": url,
+                "publisher": _text(item.get("publisher"), 200),
+                "published_at": _text(item.get("published_at"), 100),
+                "summary": _text(item.get("summary"), 1000),
+            }
+        )
+        if len(sources) >= 5:
+            break
+    return sources
 
 
 def _has_explicit_compliance_risk(text: str) -> bool:

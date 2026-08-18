@@ -222,13 +222,23 @@ def editorial_review_progress(
 def _issue_can_auto_apply(issue: dict[str, Any]) -> bool:
     """Keep old reviews usable after auto-edit permission became role-owned."""
     role_id = str(issue.get("role_id") or "")
-    return (
-        role_id not in {"fact_checker", "compliance_expert"}
-        and not bool(issue.get("blocks_draft"))
-        and (
-            bool(issue.get("can_auto_apply"))
-            or bool((REVIEW_ROLES.get(role_id) or {}).get("may_rewrite"))
+    if bool(issue.get("blocks_draft")):
+        return False
+    if role_id == "fact_checker":
+        return (
+            str(issue.get("verification_mode") or "") == "online"
+            and bool(issue.get("can_auto_apply"))
+            and str(issue.get("recommended_action") or "")
+            in {
+                "correct_from_sources",
+                "remove_unverified",
+                "soften_claim",
+                "add_attribution",
+            }
         )
+    return role_id != "compliance_expert" and (
+        bool(issue.get("can_auto_apply"))
+        or bool((REVIEW_ROLES.get(role_id) or {}).get("may_rewrite"))
     )
 
 
@@ -1347,13 +1357,25 @@ def build_review_jury_panel(
                 for issue in issues:
                     issue_id = str(issue.get("id") or "")
                     can_auto_apply = _issue_can_auto_apply(issue)
+                    online_verified = (
+                        str(issue.get("verification_mode") or "")
+                        == "online"
+                    )
                     resolution = str(issue.get("resolution") or "open")
-                    next_group = "editorial" if can_auto_apply else "safety"
+                    next_group = (
+                        "verified"
+                        if online_verified and can_auto_apply
+                        else "editorial"
+                        if can_auto_apply
+                        else "safety"
+                    )
                     if next_group != issue_group:
                         ui.label(
-                            "整体改进方向（可选择）"
+                            "AI 联网核实建议（可选择）"
+                            if next_group == "verified"
+                            else "整体改进方向（可选择）"
                             if next_group == "editorial"
-                            else "发布风险（需人工核实）"
+                            else "发布风险（需人工处理）"
                         ).classes("text-subtitle1 text-weight-bold q-mt-sm")
                         issue_group = next_group
                     with ui.card().classes(
@@ -1379,11 +1401,18 @@ def build_review_jury_panel(
                                         RESOLUTION_LABELS.get(resolution, resolution)
                                     ).props("color=green-7")
                             if can_auto_apply:
-                                selected = ui.checkbox(
-                                    "勾选并交给 AI 改写",
-                                    value=issue_id
-                                    in runtime["selected_issue_ids"],
-                                )
+                                if online_verified:
+                                    selected = ui.checkbox(
+                                        "按核实结果交给 AI 改写",
+                                        value=issue_id
+                                        in runtime["selected_issue_ids"],
+                                    )
+                                else:
+                                    selected = ui.checkbox(
+                                        "勾选并交给 AI 改写",
+                                        value=issue_id
+                                        in runtime["selected_issue_ids"],
+                                    )
                                 selected.on_value_change(
                                     lambda event, iid=issue_id: _update_selection(
                                         runtime["selected_issue_ids"],
@@ -1419,6 +1448,25 @@ def build_review_jury_panel(
                         ui.label(
                             f'整体改进方向：{issue.get("suggestion") or "请人工判断"}'
                         )
+                        if online_verified:
+                            ui.label(
+                                "联网核实："
+                                + str(
+                                    issue.get("verification_summary")
+                                    or "已检索公开信息；证据不足时只允许安全降级表达。"
+                                )
+                            ).classes("review-verification-summary")
+                            sources = list(issue.get("evidence_sources") or [])
+                            if sources:
+                                with ui.row().classes("review-evidence-sources"):
+                                    for source in sources[:3]:
+                                        if not isinstance(source, dict):
+                                            continue
+                                        ui.link(
+                                            str(source.get("title") or "查看核实来源"),
+                                            str(source.get("url") or ""),
+                                            new_tab=True,
+                                        ).classes("review-evidence-link")
                         if not can_auto_apply:
                             ui.label(
                                 "这类提醒不会交给 AI 猜测或改写。您无需填写意见，"
