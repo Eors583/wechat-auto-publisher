@@ -21,7 +21,7 @@ from app.ui.interaction_feedback import (
 from app.ui.state import AppState, set_button_loading
 
 
-TOPIC_CENTER_TABS = ("选题内容", "我的关注", "来源管理")
+TOPIC_CENTER_TABS = ("我的关注", "选题内容", "来源管理")
 
 
 def build_topic_center(
@@ -41,17 +41,19 @@ def build_topic_center(
         "dense align=left indicator-color=teal-9 active-color=teal-10"
     )
     with inner_tabs:
-        hot_tab = ui.tab(TOPIC_CENTER_TABS[0])
-        accounts_tab = ui.tab(TOPIC_CENTER_TABS[1])
+        accounts_tab = ui.tab(TOPIC_CENTER_TABS[0]).classes(
+            "ops-topic-primary-tab"
+        )
+        hot_tab = ui.tab(TOPIC_CENTER_TABS[1])
         sources_tab = ui.tab(TOPIC_CENTER_TABS[2])
-    initial_tab = accounts_tab if initial_action == "wechat_backend" else hot_tab
+    initial_tab = accounts_tab
     with ui.tab_panels(inner_tabs, value=initial_tab).classes(
         "w-full bg-transparent ops-topic-secondary-panels"
     ):
-        with ui.tab_panel(hot_tab):
-            hot_host = ui.column().classes("w-full ops-topic-primary-view")
         with ui.tab_panel(accounts_tab):
             accounts_host = ui.column().classes("w-full ops-topic-detail-view")
+        with ui.tab_panel(hot_tab):
+            hot_host = ui.column().classes("w-full ops-topic-primary-view")
         with ui.tab_panel(sources_tab):
             sources_host = ui.column().classes("w-full ops-topic-detail-view")
 

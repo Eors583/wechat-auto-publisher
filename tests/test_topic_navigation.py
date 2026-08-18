@@ -32,8 +32,16 @@ class _FakeTabs:
 
 
 def test_topic_center_merges_articles_into_followed_accounts() -> None:
-    assert TOPIC_CENTER_TABS == ("选题内容", "我的关注", "来源管理")
+    assert TOPIC_CENTER_TABS == ("我的关注", "选题内容", "来源管理")
     assert "关注文章" not in TOPIC_CENTER_TABS
+
+
+def test_followed_accounts_is_the_default_primary_topic_view() -> None:
+    source = inspect.getsource(build_topic_center)
+
+    assert "accounts_tab = ui.tab(TOPIC_CENTER_TABS[0])" in source
+    assert '"ops-topic-primary-tab"' in source
+    assert "initial_tab = accounts_tab" in source
 
 
 def test_topic_center_primary_sections_are_visible_tabs_not_an_overflow_menu() -> None:

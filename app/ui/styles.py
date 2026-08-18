@@ -2394,6 +2394,16 @@ APP_CSS += """
   background: var(--ui-color-surface);
   box-shadow: var(--ui-shadow-sm);
 }
+.ops-topic-secondary-tabs .ops-topic-primary-tab {
+  color: var(--ui-color-brand);
+  background: var(--ui-color-brand-soft);
+  font-weight: var(--ui-font-weight-bold);
+}
+.ops-topic-secondary-tabs .ops-topic-primary-tab.q-tab--active {
+  color: var(--ui-color-surface) !important;
+  background: var(--ui-color-brand) !important;
+  box-shadow: var(--ui-shadow-sm);
+}
 .ops-topic-secondary-tabs .q-tab__indicator { display: none; }
 .ops-topic-heading-action {
   position: absolute !important;
