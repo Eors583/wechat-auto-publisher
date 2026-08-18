@@ -661,21 +661,12 @@ def build_models_panel(
 
             with ui.row().classes("w-full justify-end q-mt-md"):
                 ui.button("取消", on_click=dialog.close).props("flat no-caps")
-                save_btn = ui.button("仅保存").props(
-                    "outline color=teal-9 no-caps"
-                )
-                verify_btn = ui.button(
-                    "保存并生成测试图"
-                    if image_panel
-                    else "保存并测试连接",
-                    icon="verified",
-                ).props("unelevated color=teal-9 no-caps")
-                save_btn.on_click(
-                    lambda _=None, btn=save_btn: submit(
+                async def save_from_click() -> None:
+                    await submit(
                         test_after_save=False,
-                        button=btn,
+                        button=save_btn,
                     )
-                )
+
                 async def verify_from_click(event: Any) -> None:
                     result = event.args if hasattr(event, "args") else {}
                     if not isinstance(result, dict) or not bool(result.get("ok")):
@@ -706,13 +697,24 @@ def build_models_panel(
                         local_status.update()
                     await submit(test_after_save=True, button=verify_btn)
 
-                verify_btn.on(
+                save_btn = ui.button(
+                    "仅保存",
+                    on_click=save_from_click,
+                ).props("outline color=teal-9 no-caps")
+                verify_btn = ui.button(
+                    "保存并生成测试图"
+                    if image_panel
+                    else "保存并测试连接",
+                    icon="verified",
+                ).on(
                     "click",
                     verify_from_click,
                     js_handler=_browser_health_click_handler(
                         base_element_id=int(base_in.id),
                         probe_mode_element_id=int(probe_mode_in.id),
                     ),
+                ).props(
+                    "unelevated color=teal-9 no-caps"
                 )
         dialog.open()
 

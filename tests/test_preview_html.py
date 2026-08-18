@@ -30,6 +30,18 @@ def test_preview_upgrades_wechat_image_to_https() -> None:
     assert 'src="https://mmbiz.qpic.cn/example/0?from=appmsg"' in document
 
 
+def test_preview_removes_scripts_without_relaxing_the_iframe_sandbox() -> None:
+    preview = prepare_preview_html(
+        '<p>正文</p><script>window.top.alert("unsafe")</script><p>结尾</p>'
+    )
+    document = unescape(preview)
+
+    assert "<script" not in document
+    assert "正文" in document
+    assert "结尾" in document
+    assert "allow-scripts" not in preview
+
+
 def test_template_alignment_is_preserved_without_manual_image_positioning() -> None:
     document = prepare_preview_document(
         '<p style="text-align: center"><span><img '

@@ -245,6 +245,33 @@ def test_model_editor_uses_free_text_model_name_instead_of_select(
     )
 
 
+def test_model_editor_defines_local_probe_listener_with_string_icon(
+    tmp_path,
+) -> None:
+    state = _PanelState(tmp_path)
+
+    try:
+        build_models_panel(state, purpose="text")
+        _click_button("添加自定义模型")
+        verify = next(
+            element
+            for element in ui.context.client.elements.values()
+            if type(element).__name__ == "Button"
+            and getattr(element, "text", None) == "保存并测试连接"
+        )
+        definition = verify._to_dict()
+    finally:
+        ui.context.client.remove_all_elements()
+
+    assert definition["props"]["icon"] == "verified"
+    assert isinstance(definition["props"]["icon"], str)
+    click_events = [
+        event for event in definition["events"] if event["type"] == "click"
+    ]
+    assert len(click_events) == 1
+    assert "loopback-network" in click_events[0]["js_handler"]
+
+
 def test_user_model_panel_marks_platform_models_read_only(
     tmp_path,
     monkeypatch,

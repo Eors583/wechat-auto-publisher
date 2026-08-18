@@ -234,6 +234,12 @@ def prepare_preview_document(
         return ""
 
     root = lxml_html.fragment_fromstring(value, create_parent="div")
+    # Preview documents intentionally run without ``allow-scripts``. Remove
+    # active script nodes as well, so imported/generated markup cannot fill the
+    # top-level console with predictable sandbox violations. ``drop_tree``
+    # preserves each node's tail text.
+    for script in list(root.xpath(".//script | .//noscript")):
+        script.drop_tree()
     if rewrite_regions and rewrite_side in {"before", "after"}:
         _mark_rewrite_regions(root, rewrite_regions, rewrite_side)
     for image in root.iter("img"):
