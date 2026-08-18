@@ -169,9 +169,9 @@ def test_candidate_comparison_replaces_dialog_and_review_conclusion() -> None:
     assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in APP_CSS
     assert ".ops-inline-comparison-canvas iframe" in APP_CSS
     assert ".ops-version-choice-actions .q-btn" in APP_CSS
-    assert '"定位下一个改写区域"' in source
-    assert "build_rewrite_regions(" in source
-    assert "rewrite_region_navigation_script(index)" in source
+    assert '"定位下一个改写区域"' not in source
+    assert "build_rewrite_regions(" not in source
+    assert "rewrite_region_navigation_script(" not in source
 
 
 def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:
