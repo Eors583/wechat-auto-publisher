@@ -16,6 +16,7 @@ from app.layout_profiles import normalize_layout, validate_layout
 
 
 _WECHAT_HOST = "mp.weixin.qq.com"
+_MAX_ARTICLE_HTML_CHARS = 5_000_000
 _DIMENSION = re.compile(r"^(?:0|\d+(?:\.\d+)?(?:px|em|rem|%))$")
 _LINE_HEIGHT = re.compile(r"^\d+(?:\.\d+)?(?:px|em|rem|%)?$")
 _COLOR = re.compile(
@@ -116,8 +117,11 @@ def parse_wechat_article_layout(
     """Parse a downloaded WeChat page while preserving its inline layout."""
 
     _validate_wechat_article_url(source_url)
+    page_text = str(page or "")
+    if len(page_text) > _MAX_ARTICLE_HTML_CHARS:
+        raise ValueError("微信文章 HTML 超过 500 万字符，请只粘贴 #js_content 节点")
     try:
-        document = lxml_html.fromstring(page or "")
+        document = lxml_html.fromstring(page_text)
     except (TypeError, ValueError) as exc:
         raise ValueError("微信文章 HTML 无法解析") from exc
 

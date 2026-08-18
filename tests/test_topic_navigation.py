@@ -70,8 +70,8 @@ def test_backend_configuration_deep_link_opens_existing_dialog() -> None:
 
     desktop_source = inspect.getsource(desktop.create_desktop_app)
     account_source = inspect.getsource(desktop._build_accounts_panel)
-    assert '"配置 / 更新微信登录态"' in account_source
-    assert '"/?view=topics&configure=wechat_backend"' in account_source
+    assert '"配置 / 更新微信登录态"' not in account_source
+    assert "无需反复更新登录态" in account_source
     assert "open_requested_topics" in desktop_source
 
 

@@ -2959,6 +2959,23 @@ APP_CSS += """
 /* Import reusable layout rules from a public WeChat article. */
 .wechat-layout-import-dialog { gap: var(--ui-space-3); }
 .wechat-layout-import-result { gap: var(--ui-space-3); }
+.wechat-layout-paste-expansion,
+.wechat-layout-html-input,
+.wechat-layout-html-input :is(.q-field__inner, .q-field__control, .q-field__control-container) {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.wechat-layout-html-input textarea.q-field__native {
+  width: 100%;
+  min-width: 0;
+  height: 150px;
+  max-height: 150px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  box-sizing: border-box;
+}
 .wechat-layout-import-summary { display: grid; gap: var(--ui-space-2); padding: var(--ui-space-3); }
 .wechat-layout-change-table {
   display: grid;

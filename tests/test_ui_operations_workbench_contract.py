@@ -355,6 +355,9 @@ def test_account_layout_editor_can_import_a_public_wechat_article() -> None:
 
     assert '"从微信文章获取排版"' in source
     assert "fetch_wechat_article_layout(" in source
+    assert "parse_wechat_article_layout(" in source
+    assert '"文章 HTML（可选）"' in source
+    assert "登录态不是公开文章解析的必填项。" in source
     assert '"原文排版还原"' in source
     assert '"应用后的生成效果"' in source
     assert '"导入微信排版前备份"' in source
@@ -365,6 +368,7 @@ def test_account_layout_editor_can_import_a_public_wechat_article() -> None:
     assert '"quote.spacing_after": "引用后间距"' in source
     assert '"list.marker_color": "列表标记颜色"' in source
     assert ".wechat-layout-import-previews" in APP_CSS
+    assert ".wechat-layout-html-input textarea.q-field__native" in APP_CSS
 
 
 def test_account_actions_menu_belongs_to_each_directory_item() -> None:

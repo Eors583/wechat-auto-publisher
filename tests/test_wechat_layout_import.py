@@ -76,6 +76,36 @@ def test_public_wechat_layout_preserves_inline_structure_and_extracts_rules() ->
     assert "sandbox=" in result.preview_html
 
 
+def test_pasted_js_content_outer_html_can_be_parsed_without_page_shell() -> None:
+    fragment = """
+    <div id="js_content" class="rich_media_content"
+         style="font-size:17px;line-height:1.75;color:#333">
+      <section style="padding:12px">
+        <p>这是从浏览器开发者工具复制的正文节点，长度足够用于排版提取。</p>
+        <img data-src="https://mmbiz.qpic.cn/example/pasted.jpg">
+      </section>
+    </div>
+    """
+
+    result = parse_wechat_article_layout(
+        fragment,
+        source_url="https://mp.weixin.qq.com/s/pasted-example",
+    )
+
+    assert result.title == "未读取到文章标题"
+    assert 'style="padding:12px"' in result.content_html
+    assert 'src="https://mmbiz.qpic.cn/example/pasted.jpg"' in result.content_html
+    assert result.layout["body"]["font_size"] == "17px"
+
+
+def test_pasted_article_html_has_a_safe_size_limit() -> None:
+    with pytest.raises(ValueError, match="500 万字符"):
+        parse_wechat_article_layout(
+            '<div id="js_content">' + ("字" * 5_000_001) + "</div>",
+            source_url="https://mp.weixin.qq.com/s/too-large",
+        )
+
+
 @pytest.mark.parametrize(
     ("heading_markup", "expected_color"),
     (

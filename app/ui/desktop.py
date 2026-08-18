@@ -43,7 +43,10 @@ from app.services.followed_content import FollowedContentService
 from app.services.onboarding import OnboardingService
 from app.services.preflight import preflight_accounts
 from app.services.topic_sources import TopicSourceService
-from app.services.wechat_layout_import import fetch_wechat_article_layout
+from app.services.wechat_layout_import import (
+    fetch_wechat_article_layout,
+    parse_wechat_article_layout,
+)
 from app.services.wechat_backend_settings import effective_backend_settings
 from app.ui import image_proxy as _image_proxy  # noqa: F401
 from app.ui.auth_persistence import auth_session_middleware_kwargs
@@ -3014,6 +3017,21 @@ def _build_accounts_panel(
                             "只读取公开文章的排版，不复制原文内容；应用前会自动备份当前排版。"
                         )
 
+                    with ui.expansion(
+                        "服务器读取失败？粘贴浏览器中的文章 HTML",
+                        icon="content_paste",
+                    ).classes("w-full wechat-layout-paste-expansion"):
+                        ui.label(
+                            "在浏览器开发者工具中选中 #js_content，右键复制 outerHTML 后粘贴。"
+                            "也可以粘贴完整页面 HTML；登录态不是公开文章解析的必填项。"
+                        ).classes("muted ops-wrap-anywhere")
+                        pasted_html = ui.textarea(
+                            "文章 HTML（可选）",
+                            placeholder='<div id="js_content" class="rich_media_content">…</div>',
+                        ).classes("w-full wechat-layout-html-input").props(
+                            "outlined rows=7 no-resize autocomplete=off"
+                        )
+
                     result_host = ui.column().classes(
                         "w-full wechat-layout-import-result"
                     )
@@ -3207,16 +3225,28 @@ def _build_accounts_panel(
                                 ui.spinner("dots", size="md", color="primary")
                                 ui.label("正在读取文章并分析排版…").classes("muted")
                         try:
-                            backend_settings = effective_backend_settings(state.db)
-                            result = await run.io_bound(
-                                lambda: fetch_wechat_article_layout(
-                                    url,
-                                    current_layout=before,
-                                    cookie=str(
-                                        backend_settings.get("cookie") or ""
-                                    ),
+                            pasted_page = str(pasted_html.value or "").strip()
+                            if pasted_page:
+                                result = await run.io_bound(
+                                    lambda: parse_wechat_article_layout(
+                                        pasted_page,
+                                        source_url=url,
+                                        current_layout=before,
+                                    )
                                 )
-                            )
+                            else:
+                                backend_settings = effective_backend_settings(
+                                    state.db
+                                )
+                                result = await run.io_bound(
+                                    lambda: fetch_wechat_article_layout(
+                                        url,
+                                        current_layout=before,
+                                        cookie=str(
+                                            backend_settings.get("cookie") or ""
+                                        ),
+                                    )
+                                )
                         except Exception as exc:  # noqa: BLE001
                             result_host.clear()
                             with result_host:
@@ -3230,18 +3260,9 @@ def _build_accounts_panel(
                                         "text-negative"
                                     )
                                     ui.label(
-                                        "文章可以公开打开时，通常是微信拦截了服务器的自动读取请求；"
-                                        "系统已尝试匿名重试。你可以稍后再试，或更新后台登录态。"
+                                        "文章能在浏览器打开但服务器读取失败时，请复制上方说明中的"
+                                        " #js_content outerHTML 并粘贴解析；无需反复更新登录态。"
                                     ).classes("muted")
-                                    ui.button(
-                                        "配置 / 更新微信登录态",
-                                        icon="settings",
-                                        on_click=lambda: ui.navigate.to(
-                                            "/?view=topics&configure=wechat_backend"
-                                        ),
-                                    ).props(
-                                        "outline color=primary no-caps"
-                                    )
                             return
                         finally:
                             analyze_button.props(remove="loading")
