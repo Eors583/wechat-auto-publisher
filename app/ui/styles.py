@@ -2629,12 +2629,22 @@ APP_CSS += """
   display: grid;
   grid-template-columns: minmax(0, 1fr) 290px;
   gap: var(--ui-space-3);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   height: 100%;
   overflow: hidden;
 }
 .ops-list-panel,
-.ops-flow-panel { display: grid; min-height: 0; overflow: hidden; }
+.ops-flow-panel {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
 .ops-list-panel {
   container-type: inline-size;
   grid-template-rows: auto minmax(0, 1fr);
@@ -2649,6 +2659,9 @@ APP_CSS += """
   align-items: stretch !important;
   justify-items: stretch !important;
   gap: var(--ui-space-2) !important;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   padding: var(--ui-space-3);
   overflow: hidden !important;
@@ -3293,7 +3306,8 @@ APP_CSS += """
 @media (max-width: 860px) {
   .ops-account-workspace { grid-template-columns: 1fr; }
   .ops-account-directory { display: none; }
-  .ops-queue-workspace { grid-template-columns: minmax(0, 1fr) 230px; }
+  .ops-queue-workspace { grid-template-columns: minmax(0, 1fr); }
+  .ops-flow-panel { display: none; }
   .ops-config-entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wechat-layout-change-table,
   .wechat-layout-import-previews { grid-template-columns: 1fr; }

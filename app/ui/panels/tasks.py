@@ -4596,7 +4596,7 @@ def _render_batch_card(
             ).classes("ops-task-row-meta")
         ui.badge(_batch_status_text(batch)).props(
             f'color={_batch_color(batch_status)}'
-        )
+        ).classes("ops-task-row-badge")
         ui.label(
             f'已审核 {progress.get("reviewed", 0)}/{progress.get("review_total", 0)}'
             f' · 草稿 {progress.get("drafted", 0)} · 失败 {progress.get("failed", 0)}'

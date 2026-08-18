@@ -103,6 +103,25 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
     batch_source = inspect.getsource(tasks._render_batch_card)
     assert "_render_batch_detail_content(" in batch_source
     assert 'classes("ops-task-row-card ops-batch-row-card")' in batch_source
+    assert ').classes("ops-task-row-badge")' in batch_source
+
+
+def test_task_queue_width_chain_and_breakpoints_cannot_push_sidebar_offscreen() -> None:
+    workspace_css = APP_CSS[APP_CSS.index(".ops-queue-workspace {") :]
+    for containment in ("width: 100%", "min-width: 0", "max-width: 100%"):
+        assert containment in workspace_css[:500]
+
+    task_list_css = APP_CSS[APP_CSS.rindex(".ops-task-list {") :]
+    for containment in ("width: 100%", "min-width: 0", "max-width: 100%"):
+        assert containment in task_list_css[:700]
+
+    narrow_css = APP_CSS[APP_CSS.rindex("@media (max-width: 860px)") :]
+    assert (
+        ".ops-queue-workspace { grid-template-columns: minmax(0, 1fr); }"
+        in narrow_css[:700]
+    )
+    assert ".ops-flow-panel { display: none; }" in narrow_css[:700]
+    assert "minmax(0, 1fr) 230px" not in narrow_css[:700]
 
 
 def test_review_workbench_supports_article_navigation_and_background_rewrite() -> None:
