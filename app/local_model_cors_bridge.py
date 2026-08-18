@@ -92,9 +92,9 @@ def create_handler(
             self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Vary", "Origin")
 
-        def _security_headers(self) -> None:
+        def _security_headers(self, *, referrer_policy: str = "no-referrer") -> None:
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", referrer_policy)
             self.send_header("Cache-Control", "no-store")
 
         def _send_json(
@@ -195,7 +195,7 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
 {agent_section}
 </main></body></html>""".encode("utf-8")
             self.send_response(status)
-            self._security_headers()
+            self._security_headers(referrer_policy="same-origin")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header(
                 "Content-Security-Policy",

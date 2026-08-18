@@ -230,6 +230,7 @@ def test_setup_page_uses_csrf_security_headers_and_never_echoes_key() -> None:
                 "Content-Security-Policy"
             ]
             assert response.headers["Cache-Control"] == "no-store"
+            assert response.headers["Referrer-Policy"] == "same-origin"
         token = re.search(r'name="csrf_token" value="([^"]+)"', page)
         assert token is not None
 
@@ -251,6 +252,20 @@ def test_setup_page_uses_csrf_security_headers_and_never_echoes_key() -> None:
         assert store.key == api_key
         assert api_key not in saved_page
         assert "验证成功" in saved_page
+
+        for origin in (None, "null", "https://evil.example"):
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            if origin is not None:
+                headers["Origin"] = origin
+            rejected = Request(
+                f"{base}/setup",
+                data=body,
+                method="POST",
+                headers=headers,
+            )
+            with pytest.raises(HTTPError) as error:
+                urlopen(rejected)  # noqa: S310
+            assert error.value.code == 403
 
         invalid = Request(
             f"{base}/setup",
