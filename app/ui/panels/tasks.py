@@ -4635,6 +4635,19 @@ def _render_batch_card(
         with ui.dialog() as dialog, ui.card().classes(
             "w-full ops-dialog-xl ops-dialog-scroll ops-task-detail-dialog"
         ):
+            def archive_and_close() -> None:
+                def finish_archive() -> None:
+                    if review_runtime is not None:
+                        review_runtime["focus_batch_id"] = ""
+                    dialog.close()
+                    refresh()
+
+                _run_action(
+                    lambda: service.archive_batch(str(batch["id"])),
+                    finish_archive,
+                    "批次已归档",
+                )
+
             with ui.row().classes("w-full items-center justify-between"):
                 with ui.column().classes("gap-0 ops-flex-copy"):
                     ui.label(f'批次 #{batch["display_id"]}').classes(
@@ -4652,6 +4665,7 @@ def _render_batch_card(
                 review_runtime=review_runtime,
                 focused=True,
                 auto_expand=True,
+                on_archive=archive_and_close,
             )
         dialog.open()
 
@@ -4716,6 +4730,7 @@ def _render_batch_detail_content(
     review_runtime: dict[str, bool] | None = None,
     focused: bool = False,
     auto_expand: bool = False,
+    on_archive: Callable[[], None] | None = None,
 ) -> Any:
     owner_client = ui.context.client
     progress = batch.get("progress") or {}
@@ -4888,9 +4903,15 @@ def _render_batch_detail_content(
                     ).props("unelevated dense color=teal-9 no-caps")
                     if not ready_count:
                         write_btn.disable()
-                ui.button("归档", on_click=lambda: _run_action(
-                    lambda: service.archive_batch(str(batch["id"])), refresh, "批次已归档"
-                )).props("flat dense color=grey-7 no-caps")
+                ui.button(
+                    "归档",
+                    on_click=on_archive
+                    or (lambda: _run_action(
+                        lambda: service.archive_batch(str(batch["id"])),
+                        refresh,
+                        "批次已归档",
+                    )),
+                ).props("flat dense color=grey-7 no-caps")
     return expansion
 
 

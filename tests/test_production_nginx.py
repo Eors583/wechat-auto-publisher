@@ -30,3 +30,9 @@ def test_https_publisher_reuses_the_existing_api_certificate_host() -> None:
     assert "location /publisher/" in nginx
     assert "proxy_pass http://127.0.0.1:18778/;" in nginx
     assert "http://127.0.0.1:18778/publisher/" in deploy
+
+
+def test_production_processes_share_one_release_lease_owner() -> None:
+    compose = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
+
+    assert "WECHAT_PUBLISHER_LAUNCH_SESSION_ID: ${APP_VERSION:-production}" in compose

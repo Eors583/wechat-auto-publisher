@@ -37,6 +37,7 @@ services:
       CREDENTIAL_ENCRYPTION_KEY: local-docker-credential-key-change-before-production
       FEISHU_ENABLED: "false"
       WECHAT_RELAY_ENABLED: "false"
+      WECHAT_PUBLISHER_LAUNCH_SESSION_ID: local-compose
       PYTHONUNBUFFERED: "1"
     depends_on:
       postgres:
