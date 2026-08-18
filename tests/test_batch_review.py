@@ -81,6 +81,17 @@ def test_unviewed_job_cannot_be_confirmed(tmp_path) -> None:
     assert service.confirm_job(batch_id, job_id)["review_status"] == "confirmed"
 
 
+def test_needs_changes_job_can_be_confirmed_without_fake_save(tmp_path) -> None:
+    service, batch_id, job_id = _service_with_ready_job(tmp_path)
+    service.mark_job_viewed(batch_id, job_id)
+    service.request_job_changes(batch_id, job_id)
+
+    confirmed = service.confirm_job(batch_id, job_id)
+
+    assert confirmed["review_status"] == "confirmed"
+    assert service.get_batch(batch_id)["progress"]["ready_for_draft"] == 1
+
+
 def test_cancel_preserves_terminal_review_jobs(tmp_path) -> None:
     service, batch_id, ready_job_id = _service_with_ready_job(tmp_path)
     active_job_id = service.db.create_job(

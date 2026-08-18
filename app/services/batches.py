@@ -908,7 +908,7 @@ class BatchService:
             review_status = str(job.get("review_status") or "unviewed")
             if review_status == "confirmed":
                 return self._public_job(job, include_content=True)
-            if review_status != "viewed":
+            if review_status not in {"viewed", "needs_changes"}:
                 raise ValueError("请先打开并查看文章，确认内容无误后再确认")
             if not str(job.get("selected_title") or "").strip():
                 raise ValueError("请先选择或填写文章标题")
