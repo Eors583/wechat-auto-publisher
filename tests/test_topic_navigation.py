@@ -4,6 +4,7 @@ import inspect
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+from app.ui import desktop
 from app.ui.panels.followed_articles import (
     ARTICLE_LOAD_MAX,
     followed_article_cover_preview_url,
@@ -13,6 +14,7 @@ from app.ui.panels.followed_articles import (
 )
 from app.ui.panels.topics import (
     TOPIC_CENTER_TABS,
+    _build_followed_accounts,
     _build_hot_topics,
     _queue_for_wizard,
     build_topic_center,
@@ -51,9 +53,26 @@ def test_topic_center_mounts_each_inner_page_only_when_selected() -> None:
     assert "mount_inner_tab(tab)" in source
     schedule_source = source[
         source.index("def schedule_inner_tab(tab: Any) -> None:") :
-        source.index("schedule_inner_tab(hot_tab)")
+        source.index("schedule_inner_tab(initial_tab)")
     ]
     assert "client_timer(" not in schedule_source
+
+
+def test_backend_configuration_deep_link_opens_existing_dialog() -> None:
+    topic_source = inspect.getsource(build_topic_center)
+    followed_source = inspect.getsource(_build_followed_accounts)
+
+    assert 'initial_action == "wechat_backend"' in topic_source
+    assert "schedule_inner_tab(initial_tab)" in topic_source
+    assert "open_backend_config=initial_action" in topic_source
+    assert "if open_backend_config:" in followed_source
+    assert "backend_config_dialog()" in followed_source
+
+    desktop_source = inspect.getsource(desktop.create_desktop_app)
+    account_source = inspect.getsource(desktop._build_accounts_panel)
+    assert '"配置 / 更新微信登录态"' in account_source
+    assert '"/?view=topics&configure=wechat_backend"' in account_source
+    assert "open_requested_topics" in desktop_source
 
 
 def test_hot_topic_cards_reuse_one_account_options_query_per_render() -> None:

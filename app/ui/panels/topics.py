@@ -28,6 +28,8 @@ def build_topic_center(
     state: AppState,
     workspace_tabs: Any,
     tab_wizard: Any,
+    *,
+    initial_action: str = "",
 ) -> None:
     """Topic discovery UI; all mutations go through independent services."""
 
@@ -42,7 +44,8 @@ def build_topic_center(
         hot_tab = ui.tab(TOPIC_CENTER_TABS[0])
         accounts_tab = ui.tab(TOPIC_CENTER_TABS[1])
         sources_tab = ui.tab(TOPIC_CENTER_TABS[2])
-    with ui.tab_panels(inner_tabs, value=hot_tab).classes(
+    initial_tab = accounts_tab if initial_action == "wechat_backend" else hot_tab
+    with ui.tab_panels(inner_tabs, value=initial_tab).classes(
         "w-full bg-transparent ops-topic-secondary-panels"
     ):
         with ui.tab_panel(hot_tab):
@@ -69,6 +72,7 @@ def build_topic_center(
                 follow_service,
                 workspace_tabs,
                 tab_wizard,
+                open_backend_config=initial_action == "wechat_backend",
             ),
         ),
         str(sources_tab.props["name"]): (
@@ -99,7 +103,7 @@ def build_topic_center(
         scheduled_inner_tabs.add(tab_name)
         mount_inner_tab(tab)
 
-    schedule_inner_tab(hot_tab)
+    schedule_inner_tab(initial_tab)
     attach_interaction_feedback(
         inner_tabs,
         "正在切换选题页面",
@@ -526,6 +530,8 @@ def _build_followed_accounts(
     service: FollowedContentService,
     workspace_tabs: Any,
     tab_wizard: Any,
+    *,
+    open_backend_config: bool = False,
 ) -> None:
     official_options = {
         str(item["id"]): str(item["name"])
@@ -981,6 +987,8 @@ def _build_followed_accounts(
     backend_test_btn.on_click(test_saved_backend)
     backend_clear_btn.on_click(clear_backend)
     refresh_backend_status()
+    if open_backend_config:
+        backend_config_dialog()
     jizhile_config_btn.on_click(jizhile_config_dialog)
     jizhile_test_btn.on_click(test_saved_jizhile)
     jizhile_clear_btn.on_click(clear_jizhile)

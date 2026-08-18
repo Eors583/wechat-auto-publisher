@@ -160,6 +160,12 @@ def create_desktop_app() -> None:
     open_requested_tasks = (
         str(query_params.get("view") or "").strip().lower() == "tasks"
     )
+    open_requested_topics = (
+        str(query_params.get("view") or "").strip().lower() == "topics"
+    )
+    requested_topic_action = str(
+        query_params.get("configure") or ""
+    ).strip().lower()
     open_requested_config = (
         str(query_params.get("view") or "").strip().lower() == "config"
     )
@@ -474,6 +480,8 @@ def create_desktop_app() -> None:
             if open_requested_review
             else tab_jobs
             if open_requested_tasks
+            else tab_topics
+            if open_requested_topics
             else tab_accounts
             if open_requested_config or open_requested_admin
             else tab_wizard
@@ -550,7 +558,12 @@ def create_desktop_app() -> None:
                     "选题雷达",
                     "热点、收藏、手动选题和关注文章放在同一个可搜索内容池。",
                 )
-                build_topic_center(page_state, tabs, tab_wizard)
+                build_topic_center(
+                    page_state,
+                    tabs,
+                    tab_wizard,
+                    initial_action=requested_topic_action,
+                )
 
         def mount_jobs() -> None:
             task_panel_kwargs: dict[str, Any] = {
@@ -3152,8 +3165,18 @@ def _build_accounts_panel(
                                         "text-negative"
                                     )
                                     ui.label(
-                                        "请确认链接是公开的 mp.weixin.qq.com/s/... 文章；受限文章需要先恢复微信登录态。"
+                                        "文章可以公开打开时，通常是微信拦截了服务器的自动读取请求；"
+                                        "系统已尝试匿名重试。你可以稍后再试，或更新后台登录态。"
                                     ).classes("muted")
+                                    ui.button(
+                                        "配置 / 更新微信登录态",
+                                        icon="settings",
+                                        on_click=lambda: ui.navigate.to(
+                                            "/?view=topics&configure=wechat_backend"
+                                        ),
+                                    ).props(
+                                        "outline color=primary no-caps"
+                                    )
                             return
                         finally:
                             analyze_button.props(remove="loading")

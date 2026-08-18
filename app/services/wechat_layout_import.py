@@ -71,18 +71,33 @@ def fetch_wechat_article_layout(
     headers = dict(_BROWSER_HEADERS)
     if str(cookie or "").strip():
         headers["Cookie"] = str(cookie).strip()
-    with httpx.Client(
-        headers=headers,
-        timeout=timeout,
-        follow_redirects=True,
-    ) as client:
-        response = client.get(clean_url)
-        response.raise_for_status()
-        final_url = str(response.url)
-        page = str(response.text or "")
+
+    def fetch_page(request_headers: dict[str, str]) -> tuple[str, str]:
+        with httpx.Client(
+            headers=request_headers,
+            timeout=timeout,
+            follow_redirects=True,
+        ) as client:
+            response = client.get(clean_url)
+            response.raise_for_status()
+            return str(response.text or ""), str(response.url)
+
+    page, final_url = fetch_page(headers)
     if len(page) < 500:
         raise ValueError("微信返回了空页面，请确认文章链接可以公开访问")
-    _raise_for_wechat_access_page(page, final_url=final_url)
+    try:
+        _raise_for_wechat_access_page(page, final_url=final_url)
+    except ValueError as exc:
+        if "Cookie" not in headers or not any(
+            marker in str(exc) for marker in ("安全验证页", "不含正文")
+        ):
+            raise
+        anonymous_headers = dict(headers)
+        anonymous_headers.pop("Cookie", None)
+        page, final_url = fetch_page(anonymous_headers)
+        if len(page) < 500:
+            raise ValueError("微信返回了空页面，请确认文章链接可以公开访问") from exc
+        _raise_for_wechat_access_page(page, final_url=final_url)
     return parse_wechat_article_layout(
         page,
         # 微信可能为短链接补充查询参数或 hash；结果仍归属用户输入的
@@ -203,8 +218,8 @@ def _raise_for_wechat_access_page(page: str, *, final_url: str) -> None:
         )
     ):
         raise ValueError(
-            "微信将请求转到了安全验证页。请更新公众号后台登录态后重试，"
-            "也可以换一篇能够在无痕窗口直接打开的公开文章"
+            "微信将服务器的自动读取请求转到了安全验证页。"
+            "这不代表文章本身需要登录；请稍后重试，或更新公众号后台登录态后再试"
         )
 
     if any(

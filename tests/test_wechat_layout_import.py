@@ -196,6 +196,49 @@ def test_fetch_reports_wechat_captcha_as_login_state_problem(
         fetch_wechat_article_layout("https://mp.weixin.qq.com/s/example")
 
 
+def test_fetch_retries_public_article_without_stale_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_headers: list[dict[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            seen_headers.append(dict(kwargs.get("headers") or {}))
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            if len(seen_headers) == 1:
+                return httpx.Response(
+                    200,
+                    text="<html><body>captcha 环境异常</body></html>" * 40,
+                    request=httpx.Request("GET", url),
+                    extensions={
+                        "url": "https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha"
+                    },
+                )
+            return httpx.Response(
+                200,
+                text=WECHAT_PAGE,
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr("app.services.wechat_layout_import.httpx.Client", FakeClient)
+
+    result = fetch_wechat_article_layout(
+        "https://mp.weixin.qq.com/s/example",
+        cookie="expired-cookie=1",
+    )
+
+    assert result.title == "成熟排版示例"
+    assert seen_headers[0]["Cookie"] == "expired-cookie=1"
+    assert "Cookie" not in seen_headers[1]
+
+
 def test_fetch_reports_http_200_shell_page_as_missing_article(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
