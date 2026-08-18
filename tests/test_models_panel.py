@@ -171,6 +171,15 @@ def test_model_errors_are_chinese_and_possible_keys_are_redacted() -> None:
     assert "••••••••" in unknown
 
 
+def test_friendly_model_error_keeps_local_browser_repair_details() -> None:
+    detail = (
+        "无法从当前浏览器访问本地模型：Failed to fetch。"
+        "请允许当前网页访问本地网络。"
+    )
+
+    assert friendly_model_error(RuntimeError(detail)) == detail
+
+
 def test_text_model_panel_renders_three_steps_inside_existing_page(tmp_path) -> None:
     state = _PanelState(tmp_path)
 

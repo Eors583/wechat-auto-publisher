@@ -66,6 +66,11 @@ def friendly_model_error(
         )
     ):
         return f"{subject}名称不可用，请按照厂商文档填写准确的模型名称。"
+    if "本地模型" in normalized and any(
+        marker in normalized
+        for marker in ("当前浏览器", "本地网络", "浏览器桥接")
+    ):
+        return safe_detail[:500]
     if (
         "429" in normalized
         or "rate limit" in normalized

@@ -208,5 +208,6 @@ def test_model_panel_routes_cockpit_through_the_local_browser_bridge() -> None:
         / "models.py"
     ).read_text(encoding="utf-8")
 
-    assert '"cockpit": ("http://localhost:11798/v1", "")' in source
-    assert 'selected_base.replace(\n                            ":11797", ":11798", 1' in source
+    assert '"cockpit": ("http://127.0.0.1:11798/v1", "")' in source
+    assert '"://localhost:", "://127.0.0.1:", 1' in source
+    assert '.replace(":11797", ":11798", 1)' in source

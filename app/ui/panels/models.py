@@ -365,7 +365,7 @@ def build_models_panel(
                     )
                     if reset_model:
                         local_defaults = {
-                            "cockpit": ("http://localhost:11798/v1", ""),
+                            "cockpit": ("http://127.0.0.1:11798/v1", ""),
                             "ollama": ("http://localhost:11434/v1", "qwen2.5:7b"),
                             "lm_studio": ("http://localhost:1234/v1", ""),
                             "custom": ("", ""),
@@ -462,13 +462,10 @@ def build_models_panel(
                 elif str(connection_in.value or "api") == "local":
                     provider_type = LOCAL_OPENAI_COMPATIBLE
                     selected_base = str(base_in.value or "")
-                    if (
-                        str(local_provider_in.value or "") == "cockpit"
-                        and ":11797" in selected_base
-                    ):
+                    if str(local_provider_in.value or "") == "cockpit":
                         selected_base = selected_base.replace(
-                            ":11797", ":11798", 1
-                        )
+                            "://localhost:", "://127.0.0.1:", 1
+                        ).replace(":11797", ":11798", 1)
                     selected_model = str(model_in.value or "")
                     provider_label = "本地模型"
                 else:
