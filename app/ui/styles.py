@@ -3038,6 +3038,7 @@ APP_CSS += """
 .ops-issue-list { display: grid; gap: var(--ui-space-2); margin-top: var(--ui-space-3); }
 .ops-issue { display: grid; gap: var(--ui-space-1); padding: 10px; border-left: 3px solid var(--ui-color-warning); color: var(--ui-color-warning); background: var(--ui-color-warning-soft); }
 .ops-issue-risk { border-left-color: var(--ui-color-danger); color: var(--ui-color-danger); background: var(--ui-color-danger-soft); }
+.ops-issue-manual { border-left-color: var(--ui-color-orange); }
 .ops-issue-label { font-weight: var(--ui-font-weight-medium); }
 .ops-issue-content,
 .ops-issue-manual-note {
@@ -3049,6 +3050,8 @@ APP_CSS += """
 }
 .ops-issue-suggestion { color: var(--ui-color-text-primary); }
 .ops-issue-manual-note { font-size: var(--ui-font-size-xs); }
+.ops-issue-actions { flex-wrap: wrap; gap: var(--ui-space-2); }
+.ops-issue-actions .q-btn { max-width: 100%; }
 .ops-review-footer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-2); margin-top: 14px; }
 .ops-review-background-actions { grid-column: 1 / -1; width: 100%; gap: var(--ui-space-2); }
 .ops-review-background-actions > * { width: 100%; max-width: 100%; }

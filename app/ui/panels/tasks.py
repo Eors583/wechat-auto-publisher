@@ -2325,13 +2325,22 @@ def build_review_page(
                             location = str(issue.get("location") or "全文")
                             problem = str(issue.get("problem") or "").strip()
                             suggestion = str(issue.get("suggestion") or "").strip()
+                            manual_review = issue_id and not can_auto_apply
                             with ui.element("div").classes(
-                                "ops-issue ops-issue-risk" if blocking else "ops-issue"
+                                "ops-issue ops-issue-risk"
+                                if blocking
+                                else "ops-issue ops-issue-manual"
+                                if manual_review
+                                else "ops-issue"
                             ):
                                 ui.label(
                                     " · ".join(
                                         (
-                                            "阻断项" if blocking else "可优化",
+                                            "阻断项"
+                                            if blocking
+                                            else "人工核实项"
+                                            if manual_review
+                                            else "可优化",
                                             location,
                                             category,
                                         )
@@ -2347,27 +2356,45 @@ def build_review_page(
                                     if suggestion
                                     else "建议：请重新运行 AI 评审后再作选择"
                                 ).classes("ops-issue-content ops-issue-suggestion")
-                                if blocking and issue_id:
+                                if manual_review:
                                     async def resolve_issue(
+                                        resolution_value: str = "resolved",
                                         issue_value: str = issue_id,
                                     ) -> None:
                                         await run.io_bound(
                                             lambda: service.resolve_editorial_review_issue(
                                                 str(latest_review["id"]),
                                                 issue_value,
-                                                resolution="resolved",
-                                                note="运营人员已在审核页人工核实",
+                                                resolution=resolution_value,
+                                                note=(
+                                                    "运营人员已在审核页人工核实"
+                                                    if resolution_value == "resolved"
+                                                    else "运营人员已确认保留原文并接受风险"
+                                                ),
                                                 resolved_by="桌面端运营人员",
                                             )
                                         )
                                         if alive():
-                                            ui.notify("人工核实结果已保存", type="positive")
+                                            ui.notify(
+                                                "人工核实结果已保存"
+                                                if resolution_value == "resolved"
+                                                else "已记录保留原文并接受风险",
+                                                type="positive",
+                                            )
                                             reopen()
 
-                                    ui.button(
-                                        "已人工核实",
-                                        on_click=resolve_issue,
-                                    ).props("flat dense color=negative no-caps")
+                                    ui.label(
+                                        "此项不能交给 AI 自动改写，请在核实后选择处理结果。"
+                                    ).classes("ops-issue-manual-note")
+                                    with ui.row().classes("ops-issue-actions"):
+                                        ui.button(
+                                            "已人工核实",
+                                            on_click=resolve_issue,
+                                        ).props("outline dense color=primary no-caps")
+                                        ui.button(
+                                            "保留原文并接受风险",
+                                            on_click=lambda: resolve_issue("waived"),
+                                        ).props("flat dense color=negative no-caps")
                                 elif issue_id and can_auto_apply:
                                     checkbox = ui.checkbox(
                                         "纳入后台改写",
@@ -2379,10 +2406,6 @@ def build_review_page(
                                             if bool(event.value)
                                             else selected_issue_ids.discard(value)
                                         )
-                                    )
-                                elif issue_id:
-                                    ui.label("此项需人工处理，不会自动改写").classes(
-                                        "ops-issue-manual-note"
                                     )
 
                     async def mark_needs_changes() -> None:
