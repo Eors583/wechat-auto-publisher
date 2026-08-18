@@ -3002,6 +3002,66 @@ APP_CSS += """
 .ops-document-canvas::-webkit-scrollbar,
 .ops-review-body-editor textarea::-webkit-scrollbar { display: none; }
 .ops-document-canvas iframe { width: 100%; min-height: 100%; border: 0; }
+.ops-inline-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--ui-space-3);
+  width: 100%;
+  height: calc(100% - 54px);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--ui-space-3);
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--ui-color-bg-subtle);
+}
+.ops-inline-comparison-version {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--ui-color-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-color-surface);
+}
+.ops-inline-comparison-version--candidate {
+  border-color: var(--ui-color-brand);
+}
+.ops-inline-comparison-heading {
+  display: grid;
+  gap: var(--ui-space-1);
+  min-width: 0;
+  padding: var(--ui-space-3);
+  border-bottom: 1px solid var(--ui-color-border);
+  background: var(--ui-color-surface);
+}
+.ops-inline-comparison-heading .ops-panel-title,
+.ops-inline-comparison-heading .ops-panel-subtitle {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.ops-inline-comparison-canvas {
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--ui-space-3);
+  overflow: hidden;
+}
+.ops-inline-comparison-canvas iframe {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+}
+.ops-inline-comparison-error {
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--ui-space-4);
+  color: var(--ui-color-danger);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
 .ops-review-editor-grid { display: grid; flex: 1 1 auto; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto auto minmax(280px, 1fr) auto; gap: var(--ui-space-3); width: 100%; height: 100%; min-width: 0; min-height: 0; padding: var(--ui-space-4); overflow: hidden; }
 .ops-review-editor-grid > * { width: 100%; min-width: 0; box-sizing: border-box; }
 .ops-review-digest-editor,
@@ -3064,10 +3124,22 @@ APP_CSS += """
 .ops-review-background-actions { grid-column: 1 / -1; width: 100%; gap: var(--ui-space-2); }
 .ops-review-background-actions > * { width: 100%; max-width: 100%; }
 .ops-review-rewrite-action { grid-column: 1 / -1; width: 100%; }
-.ops-review-comparison-dialog { width: min(1000px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: hidden; }
-.ops-comparison-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-3); min-height: 0; }
-.ops-comparison-column { min-height: 0; padding: var(--ui-space-3); border: 1px solid var(--ui-color-border); border-radius: var(--ui-radius-md); background: var(--ui-color-bg-subtle); }
-.ops-comparison-body { max-height: 56vh; margin-top: var(--ui-space-2); overflow: auto; white-space: pre-wrap; }
+.ops-version-choice-panel {
+  display: grid;
+  align-content: start;
+  gap: var(--ui-space-3);
+}
+.ops-version-choice-actions {
+  display: grid;
+  gap: var(--ui-space-2);
+  width: 100%;
+  min-width: 0;
+}
+.ops-version-choice-actions .q-btn {
+  width: 100%;
+  max-width: 100%;
+  white-space: normal;
+}
 
 .ops-global-activity-dock { top: 58px; right: 18px; width: min(360px, calc(100% - 36px)); max-height: calc(100vh - 76px); border-radius: 15px; box-shadow: var(--ui-shadow-dialog); }
 .ops-activity-dock-heading { justify-content: space-between; }
@@ -3079,6 +3151,7 @@ APP_CSS += """
     grid-template-columns: 42px minmax(0, 1fr) minmax(110px, auto) auto !important;
   }
   .ops-task-row-state { display: none !important; }
+  .ops-inline-comparison { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-height: 820px) {

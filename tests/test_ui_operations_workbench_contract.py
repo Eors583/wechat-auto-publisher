@@ -128,6 +128,25 @@ def test_review_page_contains_long_content_and_exposes_failure_reason() -> None:
     assert "overflow-y: auto" in APP_CSS
 
 
+def test_candidate_comparison_replaces_dialog_and_review_conclusion() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    assert '"改写前 · 原文"' in source
+    assert '"改写后 · AI 候选稿"' in source
+    assert '"选择文章版本"' in source
+    assert '"使用原文"' in source
+    assert '"使用改写后文章"' in source
+    assert "_preview_editorial_review_application" in source
+    assert "prepare_preview_html(html_content)" in source
+    assert "review_body.set_visibility(not candidate_ready)" in source
+    assert "comparison_dialog" not in source
+    assert "ops-review-comparison-dialog" not in source
+    assert ".ops-inline-comparison" in APP_CSS
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in APP_CSS
+    assert ".ops-inline-comparison-canvas iframe" in APP_CSS
+    assert ".ops-version-choice-actions .q-btn" in APP_CSS
+
+
 def test_failed_ai_review_offers_rerun_instead_of_rewrite() -> None:
     source = inspect.getsource(tasks.build_review_page)
 

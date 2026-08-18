@@ -29,6 +29,7 @@ from app.inline_images import (
     remove_inline_image,
 )
 from app.pipeline import Pipeline
+from app.render import TemplateRenderer, finalize_article_html
 from app.services.article_revisions import (
     append_revision_event,
     preserve_inline_images_after_paragraph_revision,
@@ -53,6 +54,7 @@ from app.services.model_readiness import record_model_auth_failure_for_error
 from app.services.preflight import preflight_accounts
 from app.services.url_validation import validate_external_url
 from app.wechat.material import batch_get_material
+from app.wechat.template_snapshot import load_template_snapshot
 
 _injection_guards: dict[tuple[str, str], threading.Lock] = {}
 _injection_guards_lock = threading.Lock()
@@ -381,6 +383,52 @@ class BatchService:
             )
             self.db.update_batch_job_review(batch_id, job_id, "viewed")
             return self._public_job(job, include_content=True)
+
+    def _preview_editorial_review_application(
+        self,
+        batch_id: str,
+        job_id: int,
+        application_id: str,
+    ) -> str:
+        """Render a candidate with the account's text styles without applying it."""
+
+        job = self._batch_job(batch_id, job_id)
+        application = self.editorial_reviews.get_application(application_id)
+        review = self.editorial_reviews.get_review(
+            str(application["review_id"])
+        )
+        if int(review["job_id"]) != int(job_id):
+            raise ValueError("AI 修改稿不属于当前文章")
+        candidate = dict(application.get("candidate_snapshot") or {})
+        if not str(candidate.get("body") or "").strip():
+            raise ValueError("AI 修改稿正文为空")
+        account_id = str(
+            job.get("account_id")
+            or (job.get("meta") or {}).get("official_account_id")
+            or ""
+        )
+        selected_cfg, _ = apply_account_selection(
+            deepcopy(self.config), self.db, account_id
+        )
+        cfg = selected_cfg or deepcopy(self.config)
+        editor_cfg = dict(cfg.get("editor_template") or {})
+        editor_cfg["_root"] = cfg.get("_root")
+        snapshot = (
+            load_template_snapshot(editor_cfg)
+            if editor_cfg.get("enabled", False)
+            else None
+        )
+        generated = TemplateRenderer(cfg).render(
+            body=str(candidate.get("body") or ""),
+            subtitle=str(candidate.get("subtitle") or "") or None,
+            show_byline=False if snapshot else None,
+        )
+        return finalize_article_html(
+            generated,
+            editor_cfg,
+            snapshot=snapshot,
+            load_local_snapshot=False,
+        ).html
 
     def _rerender_claimed_editorial_job(
         self,

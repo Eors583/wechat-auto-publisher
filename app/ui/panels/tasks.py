@@ -1984,6 +1984,35 @@ def build_review_page(
         if isinstance(issue, dict)
     ]
     selected_issue_ids: set[str] = set()
+    review_status = str(latest_review.get("status") or "")
+    candidate_ready = review_status == "candidate_ready"
+    application: dict[str, Any] = {}
+    application_id = ""
+    source_snapshot: dict[str, Any] = {}
+    candidate_snapshot: dict[str, Any] = {}
+    candidate_preview_html = ""
+    candidate_preview_error = ""
+    if candidate_ready:
+        applications = service.list_editorial_review_applications(
+            str(latest_review["id"]), limit=1
+        )
+        application = dict(applications[0]) if applications else {}
+        application_id = str(application.get("id") or "")
+        source_snapshot = dict(latest_review.get("source_snapshot") or {})
+        candidate_snapshot = dict(
+            latest_review.get("rewritten_snapshot")
+            or application.get("candidate_snapshot")
+            or {}
+        )
+        if application_id:
+            try:
+                candidate_preview_html = (
+                    service._preview_editorial_review_application(
+                        batch_id, job_id, application_id
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                candidate_preview_error = sanitize_failure_text(exc)
 
     def alive() -> bool:
         return page_alive["value"] and not bool(
@@ -2007,6 +2036,60 @@ def build_review_page(
         target_job = target or job
         page_alive["value"] = False
         on_open_review(batch_id, int(target_job["id"]))
+
+    version_choice_running = {"value": False}
+
+    async def choose_version(
+        use_rewrite: bool,
+        button: Any,
+        other_button: Any,
+    ) -> None:
+        if version_choice_running["value"]:
+            ui.notify("正在保存版本选择，请勿重复提交", type="warning")
+            return
+        if not application_id:
+            ui.notify("未找到可选择的 AI 修改稿，请重新生成", type="negative")
+            return
+        version_choice_running["value"] = True
+        other_button.disable()
+        set_button_loading(
+            button,
+            True,
+            "正在应用改写稿并重新排版…"
+            if use_rewrite
+            else "正在保留原文…",
+        )
+        try:
+            if use_rewrite:
+                await run.io_bound(
+                    lambda: service.apply_editorial_review_application(
+                        batch_id, job_id, application_id
+                    )
+                )
+            else:
+                await run.io_bound(
+                    lambda: service.keep_editorial_review_source(
+                        batch_id, job_id, application_id
+                    )
+                )
+            if alive():
+                ui.notify(
+                    "已使用改写后文章" if use_rewrite else "已使用原文",
+                    type="positive",
+                )
+                reopen()
+        except Exception as exc:  # noqa: BLE001
+            if alive():
+                ui.notify(
+                    f"保存版本选择失败：{sanitize_failure_text(exc)}",
+                    type="negative",
+                    timeout=10000,
+                )
+        finally:
+            version_choice_running["value"] = False
+            if alive():
+                set_button_loading(button, False)
+                other_button.enable()
 
     with ui.element("div").classes("ops-review-bar"):
         with ui.row().classes("ops-review-title"):
@@ -2058,7 +2141,11 @@ def build_review_page(
                             ui.icon("smartphone", size="15px").classes(
                                 "ops-semantic-icon"
                             )
-                            ui.label("微信公众号最终效果")
+                            ui.label(
+                                "改写前后排版对比"
+                                if candidate_ready
+                                else "微信公众号最终效果"
+                            )
                         paragraph_count = max(0, str(job.get("body") or "").count("\n") + 1)
                         inline_count = len(
                             list(dict(job.get("meta") or {}).get("inline_images") or [])
@@ -2066,10 +2153,69 @@ def build_review_page(
                         ui.badge(
                             f"{paragraph_count} 段 · {inline_count} 张图"
                         ).classes("ops-badge")
-                    ui.html(
-                        prepare_preview_html(str(job.get("html_content") or "")),
-                        sanitize=False,
-                    ).classes("ops-document-canvas")
+                    if candidate_ready:
+                        with ui.element("div").classes(
+                            "ops-inline-comparison"
+                        ):
+                            for label, snapshot, html_content, candidate in (
+                                (
+                                    "改写前 · 原文",
+                                    source_snapshot,
+                                    str(job.get("html_content") or ""),
+                                    False,
+                                ),
+                                (
+                                    "改写后 · AI 候选稿",
+                                    candidate_snapshot,
+                                    candidate_preview_html,
+                                    True,
+                                ),
+                            ):
+                                with ui.element("section").classes(
+                                    "ops-inline-comparison-version "
+                                    + (
+                                        "ops-inline-comparison-version--candidate"
+                                        if candidate
+                                        else ""
+                                    )
+                                ):
+                                    with ui.element("div").classes(
+                                        "ops-inline-comparison-heading"
+                                    ):
+                                        ui.label(label).classes(
+                                            "ops-panel-title"
+                                        )
+                                        ui.label(
+                                            str(snapshot.get("title") or "未设置标题")
+                                        ).classes("ops-panel-subtitle")
+                                    if html_content:
+                                        ui.html(
+                                            prepare_preview_html(html_content),
+                                            sanitize=False,
+                                        ).classes(
+                                            "ops-inline-comparison-canvas"
+                                        )
+                                    else:
+                                        ui.label(
+                                            (
+                                                "候选稿排版预览生成失败："
+                                                + (
+                                                    candidate_preview_error
+                                                    or "没有可预览的排版内容"
+                                                )
+                                                if candidate
+                                                else "原文没有可预览的排版内容"
+                                            )
+                                        ).classes(
+                                            "ops-inline-comparison-error"
+                                        )
+                    else:
+                        ui.html(
+                            prepare_preview_html(
+                                str(job.get("html_content") or "")
+                            ),
+                            sanitize=False,
+                        ).classes("ops-document-canvas")
 
                 with ui.tab_panel(edit_tab).classes("ops-review-mode-panel"):
                     with ui.element("div").classes("ops-review-editor-grid"):
@@ -2261,14 +2407,22 @@ def build_review_page(
             ) as review_panel:
                 with ui.element("div").classes("ops-panel-heading"):
                     with ui.column().classes("gap-0"):
-                        ui.label("AI 评审结论").classes("ops-panel-title")
                         ui.label(
-                            str(latest_review.get("profile_name") or "专业深度型")
+                            "选择文章版本"
+                            if candidate_ready
+                            else "AI 评审结论"
+                        ).classes("ops-panel-title")
+                        ui.label(
+                            "改写候选稿已经生成"
+                            if candidate_ready
+                            else str(
+                                latest_review.get("profile_name")
+                                or "专业深度型"
+                            )
                         ).classes("ops-panel-subtitle")
                     review_progress_host = ui.element("div").classes(
                         "ops-review-progress-host"
                     )
-                    review_status = str(latest_review.get("status") or "")
                     status_label = {
                         "completed": "评审完成",
                         "candidate_ready": "候选稿待选择",
@@ -2291,7 +2445,7 @@ def build_review_page(
                         ).tooltip("点击查看失败原因")
                     elif review_status not in {"running", "rewriting"}:
                         ui.badge(status_label).classes(status_classes)
-                with ui.element("div").classes("ops-panel-body"):
+                with ui.element("div").classes("ops-panel-body") as review_body:
                     score = int(
                         review_result.get("overall_score")
                         or latest_review.get("overall_score")
@@ -2503,6 +2657,44 @@ def build_review_page(
                             on_click=confirm_article,
                         ).props("unelevated dense color=primary no-caps")
 
+                review_body.set_visibility(not candidate_ready)
+                if candidate_ready:
+                    with ui.element("div").classes(
+                        "ops-panel-body ops-version-choice-panel"
+                    ):
+                        ui.label("请选择最终使用的文章").classes(
+                            "ops-panel-title"
+                        )
+                        ui.label(
+                            "中间区域已经按原有排版展示改写前后文章。"
+                            "选择前不会覆盖当前正文。"
+                        ).classes("ops-panel-subtitle")
+                        with ui.element("div").classes(
+                            "ops-version-choice-actions"
+                        ):
+                            use_source_btn = ui.button(
+                                "使用原文",
+                                icon="history",
+                            ).props("outline color=primary no-caps")
+                            use_candidate_btn = ui.button(
+                                "使用改写后文章",
+                                icon="auto_fix_high",
+                            ).props("unelevated color=primary no-caps")
+                            use_source_btn.on_click(
+                                lambda event: choose_version(
+                                    False,
+                                    event.sender,
+                                    use_candidate_btn,
+                                )
+                            )
+                            use_candidate_btn.on_click(
+                                lambda event: choose_version(
+                                    True,
+                                    event.sender,
+                                    use_source_btn,
+                                )
+                            )
+
             with review_panel:
                 progress = editorial_review_progress(latest_review)
                 with ui.element("div").classes("ops-review-progress-runtime"):
@@ -2702,81 +2894,6 @@ def build_review_page(
                             ).classes("w-full").props(
                                 "flat color=primary no-caps"
                             )
-                    if str(latest_review.get("status") or "") == "candidate_ready":
-                        applications = service.list_editorial_review_applications(
-                            str(latest_review["id"]), limit=1
-                        )
-                        application = dict(applications[0]) if applications else {}
-                        application_id = str(application.get("id") or "")
-                        source_snapshot = dict(latest_review.get("source_snapshot") or {})
-                        candidate_snapshot = dict(
-                            latest_review.get("rewritten_snapshot")
-                            or application.get("candidate_snapshot")
-                            or {}
-                        )
-
-                        with ui.dialog() as comparison_dialog, ui.card().classes(
-                            "ops-review-comparison-dialog"
-                        ):
-                            with ui.row().classes("w-full items-center justify-between"):
-                                ui.label("改写前后对比").classes("ops-review-page-title")
-                                ui.button(
-                                    icon="close",
-                                    on_click=comparison_dialog.close,
-                                ).props("flat round dense aria-label=关闭对比")
-                            with ui.element("div").classes("ops-comparison-grid"):
-                                for label, snapshot in (
-                                    ("改写前", source_snapshot),
-                                    ("改写后", candidate_snapshot),
-                                ):
-                                    with ui.element("section").classes(
-                                        "ops-comparison-column"
-                                    ):
-                                        ui.label(label).classes("ops-panel-title")
-                                        ui.label(
-                                            str(snapshot.get("title") or "")
-                                        ).classes("ops-review-conclusion")
-                                        ui.label(
-                                            str(snapshot.get("body") or "")
-                                        ).classes("ops-comparison-body")
-
-                            async def choose_version(use_rewrite: bool) -> None:
-                                comparison_dialog.close()
-                                if use_rewrite:
-                                    await run.io_bound(
-                                        lambda: service.apply_editorial_review_application(
-                                            batch_id, job_id, application_id
-                                        )
-                                    )
-                                else:
-                                    await run.io_bound(
-                                        lambda: service.keep_editorial_review_source(
-                                            batch_id, job_id, application_id
-                                        )
-                                    )
-                                if alive():
-                                    ui.notify("版本选择已保存", type="positive")
-                                    reopen()
-
-                            with ui.row().classes("w-full justify-end"):
-                                ui.button(
-                                    "使用改写前版本",
-                                    on_click=lambda: choose_version(False),
-                                ).props("outline color=primary no-caps")
-                                ui.button(
-                                    "使用改写后版本",
-                                    on_click=lambda: choose_version(True),
-                                ).props("unelevated color=primary no-caps")
-                        with background_action_host:
-                            ui.button(
-                                "查看改写前后对比并选择版本",
-                                icon="compare",
-                                on_click=comparison_dialog.open,
-                            ).classes("w-full").props(
-                                "outline color=primary no-caps"
-                            )
-
-
 def open_review_workbench(
     state: AppState,
     service: BatchService,

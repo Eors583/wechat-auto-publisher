@@ -366,6 +366,13 @@ def test_candidate_only_uses_selected_safe_issue_and_keeps_original(
     application = result["application"]
     assert application["status"] == "candidate_ready"
     assert application["candidate_snapshot"]["body"].startswith("第一段直接给出结论")
+    candidate_preview = service._preview_editorial_review_application(
+        batch_id,
+        job_id,
+        application["id"],
+    )
+    assert "第一段直接给出结论" in candidate_preview
+    assert "font-size:" in candidate_preview
     assert service.get_batch(batch_id, include_content=True)["jobs"][0][
         "body"
     ].startswith("第一段介绍背景")
