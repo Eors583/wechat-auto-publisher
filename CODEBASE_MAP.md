@@ -1,6 +1,6 @@
 # WeChat Auto Publisher — AI development handoff and code map
 
-Last verified against the repository on **2026-08-17**. This document describes
+Last verified against the repository on **2026-08-18**. This document describes
 the current source tree; code is the final authority. When a symbol moves, update
 this file in the same change.
 
@@ -15,6 +15,7 @@ PostgreSQL database and the same service layer:
 | HTTP API | `python -m app.api` / `wechat-auto-api` | 18766 (`compose.yaml`: host 18776) | Authenticated `/api/v1` endpoints and health check |
 | Merchant admin UI | `python -m app.admin.server` | 18767 (`compose.yaml`: host 18777) | Users and platform-managed model administration |
 | Desktop launcher | `python -m app.launcher` | starts/opens the UI and API | Native/remote desktop lifecycle and owned child process control |
+| Windows local-model Companion | `python -m app.launcher --local-agent` | loopback 11798 + outbound HTTPS | DPAPI-backed Cockpit setup, device pairing and leased background model jobs |
 | CLI | `python -m app ...` / `wechat-auto` | n/a | Direct run, retry, review, publish, list and desktop commands |
 
 The primary business flow is:
@@ -138,6 +139,9 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `app/__main__.py` | Package execution bridge to the Typer CLI. |
 | `app/cli.py` | CLI commands `run`, `retry`, `list_jobs`, `review`, `publish`, `show`, `desktop`. Keep it a caller of shared services/pipeline. |
 | `app/launcher.py` | Desktop startup, remote URL mode, owned API child process and native/browser fallback. Use this for application lifecycle changes, not UI navigation. |
+| `app/local_agent.py` | Windows Companion lifecycle: single-instance lock, pairing, HTTPS long polling, lease renewal, result replay and fixed Cockpit 11797 calls. |
+| `app/local_credentials.py` | Windows CurrentUser DPAPI-only storage for the Cockpit key, Agent token and pending result state. Never replace with the production credential encryption key. |
+| `app/local_model_cors_bridge.py` | Loopback-only 11798 compatibility bridge and `/setup`; exact Origin/Host/routes, no system proxy, local key injection and sanitized responses. |
 | `app/config.py` | Loads YAML + environment substitutions; computes `_root`, `_data_dir`, `_db_target`; `database_target` enforces PostgreSQL runtime. |
 | `app/db.py` | Schema initialization/migrations, user scoping and every CRUD method. Add persistence here before writing service logic. Large hotspot: do not issue raw customer-table SQL elsewhere. |
 | `app/db_backend.py` | PostgreSQL compatibility layer, schema SQL conversion, cursor/connection wrappers and integrity-error mapping. |
@@ -168,7 +172,7 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `app/ui/interaction_feedback.py` | Installs lightweight immediate feedback on interactive controls so network work is not perceived as a frozen click. |
 | `app/ui/lifecycle.py` | Client-owned timers that stop safely when the NiceGUI client is deleted. |
 | `app/ui/auth_persistence.py` | Aligns signed NiceGUI cookie lifetime/security with 30-day database sessions. |
-| `app/ui/local_model_bridge.py` | Browser-side bridge for calling a model running on the user's own `localhost`; required because production server cannot reach the user's PC loopback. |
+| `app/ui/local_model_bridge.py` | Transitional browser fallback for user-local models: Chromium loopback permission probe, one active tab per user and DB request relay. Companion-bound models do not depend on an open tab. |
 | `app/ui/image_proxy.py` | Validated proxy route for WeChat image previews; prevents arbitrary URL proxying. |
 | `app/ui/ip_whitelist_guide.py` | Detects WeChat IP-whitelist errors and opens the guided repair dialog. |
 | `app/ui/workflow.py` | UI workflow-step normalization and next-review-job navigation helpers. |
@@ -212,6 +216,7 @@ Primary tab ownership inside `desktop.py`:
 | `editorial_reviews.py` | AI review/rewrite state machine, guards, snapshots, prompt/schema building, incomplete-output recovery, issue resolution, numeric/fact safeguards and source-vs-candidate application. |
 | `article_revisions.py` | Paragraph-level AI revision with structural cleanup, inline-image preservation and version events. |
 | `configuration.py` | Safe public CRUD facade for accounts, models, prompts and layouts; recursively strips credentials. Prefer this over direct DB use from new management APIs. |
+| `local_agents.py` | One-time device pairing, Agent Token authentication, device management, fixed `chat.completions` claims, 60-second leases and idempotent result submission. |
 | `creation_plans.py` | Reusable plans combining prompts, layout, image/cover and review settings; account defaults and account-specific template bindings. |
 | `followed_content.py` | Followed-account CRUD and article discovery. Chooses available acquisition paths (Jizhile, WeChat backend state, RSS/manual) and persists articles per user. |
 | `topic_sources.py` | Source CRUD, default sources, refresh/search/pagination and manual topics; adapters for RSS, Bing/Google, 36Kr and hot APIs. |
@@ -379,7 +384,9 @@ is permitted solely when tests explicitly opt in.
 | `user_settings` | user | Cross-device UI/config preferences and private service settings |
 | `app_settings` | mixed via key/scope helpers | Platform and legacy settings; prefer scoped helpers |
 | `ai_models` | platform when owner empty; otherwise user | Official and custom text/image/local model definitions |
-| `local_model_requests` | user | Server↔browser bridge request lifecycle for user's localhost models |
+| `local_model_requests` | user/device | Browser-fallback or Companion model jobs, attempt/nonce, lease, deadline and idempotent terminal result |
+| `local_model_agents` | user | Paired Companion identity, Agent Token hash, heartbeat/Cockpit status and revocation |
+| `local_agent_pairings` | temporary→user | Hashed one-time device/user codes, expiry, lockout, approval and single consumption |
 | `official_accounts` | user | WeChat AppID/encrypted AppSecret, model, layout and creation-plan bindings |
 | `prompt_templates` | user | Article/image prompt templates |
 | `creation_plans` | user | Combined writing/layout/image/review presets |
@@ -424,7 +431,7 @@ Use this table before searching the whole repository.
 | Article before/after rewrite choice | `services/editorial_reviews.py` application methods | review page candidate UI, DB applications, API apply/keep-source | same AI review tests plus `test_ui_review_inbox.py` |
 | Account list/switch/add/config | `ui/desktop.py:_build_accounts_panel` | `accounts.py`, `services/configuration.py`, `Database.official_accounts` | `test_accounts_panel.py`, `test_customer_data_isolation.py`, `test_optional_account_model.py` |
 | Default model selector/custom edit-delete | `_render_account_config_workspace`, `ui/panels/models.py` | `ui/state.py`, `ai/model_registry.py`, `services/configuration.py`, DB `ai_models` | `test_models_panel.py`, `test_auth_and_managed_models.py`, `test_ui_model_selector_refresh.py`, UI operations contract |
-| User's local model | `ui/panels/models.py` | `ui/local_model_bridge.py`, `ai/local_browser.py`, DB local requests | `test_local_models.py` |
+| User's local model | `ui/panels/models.py` | `ui/local_model_bridge.py`, `local_model_cors_bridge.py`, `local_agent.py`, `services/local_agents.py`, `api/local_agents.py`, DB local jobs/devices | `test_local_models.py`, `test_local_model_cors_bridge.py`, `test_local_agents.py`, `test_api_local_agents.py`, `test_local_agent.py` |
 | Prompt templates | `ui/panels/prompts.py` / account prompt button in `desktop.py` | `prompt_templates.py`, `services/configuration.py` | `test_prompt_templates.py`, `test_longform_prompts.py` |
 | Creation plans | `ui/panels/settings_hub.py` | `services/creation_plans.py`, `accounts.py`, DB plan tables | `test_creation_plans.py`, `test_feishu_creation_plans.py` |
 | Layout tokens/styles/overflow | `ui/style_tokens.py`, `ui/styles.py` | affected component DOM in browser | `test_ui_style_tokens.py`, `test_ui_review_design_system.py`, `test_ui_performance_contract.py` |
@@ -596,6 +603,9 @@ Run the smallest affected group first. The suite is organized as follows.
   fail-closed artifact cleanup.
 - `test_packaging_smoke.py`, `test_remote_desktop.py`, `test_runtime_control.py`:
   packaged desktop, remote mode and safe child-process control.
+- `test_local_model_cors_bridge.py`, `test_local_agent.py`,
+  `test_local_agents.py`, `test_api_local_agents.py`: loopback bridge security,
+  DPAPI Companion lifecycle, pairing/auth domains, leases and multi-tenant jobs.
 - `test_benchmark.py`, `test_analytics_service.py`, `test_second_phase.py`:
   specialized product behavior and historical regression coverage.
 

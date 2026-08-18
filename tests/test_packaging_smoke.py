@@ -55,8 +55,12 @@ def test_packaging_remote_url_accepts_installer_argument(monkeypatch) -> None:
     monkeypatch.setenv("WECHAT_PUBLISHER_REMOTE_URL", "https://ignored.example")
 
     assert _packaging_remote_url(
-        ["--self-test", "--remote-url", "http://47.99.126.8/"]
-    ) == "http://47.99.126.8"
+        [
+            "--self-test",
+            "--remote-url",
+            "https://api.bluebloodlab.cn/publisher/",
+        ]
+    ) == "https://api.bluebloodlab.cn/publisher"
 
 
 def test_packaging_remote_url_rejects_invalid_address() -> None:

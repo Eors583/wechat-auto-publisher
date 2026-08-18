@@ -262,6 +262,7 @@ class Database:
                     api_base TEXT,
                     model TEXT NOT NULL,
                     api_key_encrypted TEXT NOT NULL,
+                    local_agent_id TEXT,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -275,7 +276,15 @@ class Database:
                     request_json TEXT NOT NULL,
                     response_text TEXT,
                     error TEXT,
+                    result_error_code TEXT NOT NULL DEFAULT '',
                     claimed_by TEXT,
+                    agent_id TEXT,
+                    operation TEXT NOT NULL DEFAULT 'chat.completions',
+                    attempt_id TEXT,
+                    nonce TEXT,
+                    deadline_at TEXT,
+                    lease_until TEXT,
+                    completed_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (model_id) REFERENCES ai_models(id) ON DELETE CASCADE
@@ -376,6 +385,39 @@ class Database:
                     created_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS local_model_agents (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    last_seen_at TEXT,
+                    cockpit_status TEXT,
+                    last_error_code TEXT,
+                    revoked_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS local_agent_pairings (
+                    id TEXT PRIMARY KEY,
+                    device_code_hash TEXT NOT NULL UNIQUE,
+                    user_code_salt TEXT NOT NULL,
+                    user_code_hash TEXT NOT NULL,
+                    hash_iterations INTEGER NOT NULL,
+                    device_name TEXT NOT NULL,
+                    owner_user_id TEXT,
+                    agent_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    expires_at TEXT NOT NULL,
+                    approved_at TEXT,
+                    consumed_at TEXT,
+                    last_polled_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS user_settings (
@@ -671,6 +713,12 @@ class Database:
                     ON user_sessions(user_id, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_local_model_requests_owner_status
                     ON local_model_requests(owner_user_id, status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_local_model_agents_owner
+                    ON local_model_agents(owner_user_id, revoked_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_local_agent_pairings_status
+                    ON local_agent_pairings(status, expires_at);
+                CREATE INDEX IF NOT EXISTS idx_local_agent_pairings_owner
+                    ON local_agent_pairings(owner_user_id, created_at);
                 """
             )
             # Customer-owned records are scoped to the login account. Existing
@@ -703,6 +751,61 @@ class Database:
                     f"CREATE INDEX IF NOT EXISTS idx_{table_name}_owner "
                     f"ON {table_name}(owner_user_id)"
                 )
+            ai_model_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(ai_models)").fetchall()
+            }
+            pairing_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(local_agent_pairings)"
+                ).fetchall()
+            }
+            if "last_polled_at" not in pairing_columns:
+                conn.execute(
+                    "ALTER TABLE local_agent_pairings ADD COLUMN last_polled_at TEXT"
+                )
+            if "local_agent_id" not in ai_model_columns:
+                conn.execute("ALTER TABLE ai_models ADD COLUMN local_agent_id TEXT")
+            local_request_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(local_model_requests)"
+                ).fetchall()
+            }
+            for name, declaration in {
+                "agent_id": "TEXT",
+                "operation": "TEXT NOT NULL DEFAULT 'chat.completions'",
+                "attempt_id": "TEXT",
+                "nonce": "TEXT",
+                "deadline_at": "TEXT",
+                "lease_until": "TEXT",
+                "completed_at": "TEXT",
+                "result_error_code": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if name not in local_request_columns:
+                    conn.execute(
+                        f"ALTER TABLE local_model_requests "
+                        f"ADD COLUMN {name} {declaration}"
+                    )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ai_models_local_agent
+                ON ai_models(local_agent_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_local_model_requests_agent_status
+                ON local_model_requests(agent_id, status, created_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_local_model_requests_agent_lease
+                ON local_model_requests(agent_id, lease_until)
+                """
+            )
             if self.backend == "postgresql":
                 conn.execute(
                     """
@@ -2919,26 +3022,44 @@ class Database:
 
     def upsert_ai_model(self, model: dict[str, Any]) -> None:
         now = _utc_now()
+        provider_type = str(
+            model.get("provider_type") or "openai_compatible"
+        )
         with self.connect() as conn:
             owner_user_id = self.owner_user_id
             existing = conn.execute(
-                "SELECT owner_user_id FROM ai_models WHERE id = ?",
+                "SELECT owner_user_id "
+                "FROM ai_models WHERE id = ?",
                 (str(model["id"]),),
             ).fetchone()
             if existing and str(existing["owner_user_id"] or "") != owner_user_id:
                 raise ValueError("该模型不属于当前登录账号")
+            # New local credentials are never accepted from a caller. The
+            # conflict clause below atomically preserves only the database's
+            # current local-to-local legacy value until verified cleanup.
+            api_key_encrypted = (
+                ""
+                if provider_type == "local_openai_compatible"
+                else str(model.get("api_key_encrypted") or "")
+            )
             conn.execute(
                 """
                 INSERT INTO ai_models (
                     id, owner_user_id, name, provider_type, api_base, model,
-                    api_key_encrypted, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    api_key_encrypted, local_agent_id, enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     provider_type=excluded.provider_type,
                     api_base=excluded.api_base,
                     model=excluded.model,
-                    api_key_encrypted=excluded.api_key_encrypted,
+                    api_key_encrypted=CASE
+                        WHEN excluded.provider_type = 'local_openai_compatible'
+                         AND ai_models.provider_type = 'local_openai_compatible'
+                        THEN ai_models.api_key_encrypted
+                        ELSE excluded.api_key_encrypted
+                    END,
+                    local_agent_id=excluded.local_agent_id,
                     enabled=excluded.enabled,
                     updated_at=excluded.updated_at
                 """,
@@ -2946,10 +3067,11 @@ class Database:
                     model["id"],
                     owner_user_id,
                     model["name"],
-                    model.get("provider_type", "openai_compatible"),
+                    provider_type,
                     model.get("api_base"),
                     model["model"],
-                    model["api_key_encrypted"],
+                    api_key_encrypted,
+                    str(model.get("local_agent_id") or "") or None,
                     1 if model.get("enabled", True) else 0,
                     model.get("created_at") or now,
                     now,
@@ -2982,10 +3104,375 @@ class Database:
                 (model_id, owner_user_id),
             )
 
+    def clear_local_model_credential(self, model_id: str) -> bool:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return False
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE ai_models
+                SET api_key_encrypted = '', updated_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                  AND provider_type = 'local_openai_compatible'
+                """,
+                (_utc_now(), str(model_id), owner_user_id),
+            )
+        return updated.rowcount == 1
+
+    def clear_local_model_credentials_for_agent(self, agent_id: str) -> int:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return 0
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE ai_models
+                SET api_key_encrypted = '', updated_at = ?
+                WHERE owner_user_id = ? AND local_agent_id = ?
+                  AND provider_type = 'local_openai_compatible'
+                """,
+                (_utc_now(), owner_user_id, str(agent_id)),
+            )
+        return int(updated.rowcount)
+
+    # ------------------------------------------------------------------
+    # Local model companions and one-time pairing
+    # ------------------------------------------------------------------
+    def create_local_agent_pairing(self, pairing: dict[str, Any]) -> bool:
+        now = _utc_now()
+        retention_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).isoformat(timespec="microseconds")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM local_agent_pairings
+                WHERE updated_at < ?
+                  AND (status IN ('consumed', 'locked', 'expired') OR expires_at < ?)
+                """,
+                (retention_cutoff, retention_cutoff),
+            )
+            active = conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM local_agent_pairings
+                WHERE status IN ('pending', 'approved') AND expires_at > ?
+                """,
+                (now,),
+            ).fetchone()
+            if int((active or {"count": 0})["count"]) >= 100:
+                return False
+            conn.execute(
+                """
+                INSERT INTO local_agent_pairings (
+                    id, device_code_hash, user_code_salt, user_code_hash,
+                    hash_iterations, device_name, owner_user_id, agent_id,
+                    status, failed_attempts, expires_at, approved_at,
+                    consumed_at, last_polled_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pending', 0, ?, NULL, NULL, NULL, ?, ?)
+                """,
+                (
+                    str(pairing["id"]),
+                    str(pairing["device_code_hash"]),
+                    str(pairing["user_code_salt"]),
+                    str(pairing["user_code_hash"]),
+                    int(pairing["hash_iterations"]),
+                    str(pairing["device_name"]),
+                    str(pairing["expires_at"]),
+                    now,
+                    now,
+                ),
+            )
+        return True
+
+    def get_local_agent_pairing(
+        self,
+        pairing_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM local_agent_pairings WHERE id = ?",
+                (str(pairing_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_local_agent_pairing_by_device_hash(
+        self,
+        device_code_hash: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM local_agent_pairings WHERE device_code_hash = ?",
+                (str(device_code_hash),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_local_agent_pairing_failure(
+        self,
+        pairing_id: str,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE local_agent_pairings
+                SET failed_attempts = failed_attempts + 1,
+                    status = CASE
+                        WHEN failed_attempts + 1 >= 5 THEN 'locked'
+                        ELSE status
+                    END,
+                    updated_at = ?
+                WHERE id = ? AND status = 'pending' AND expires_at > ?
+                """,
+                (now, str(pairing_id), now),
+            )
+            row = conn.execute(
+                "SELECT * FROM local_agent_pairings WHERE id = ?",
+                (str(pairing_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def approve_local_agent_pairing(
+        self,
+        pairing_id: str,
+    ) -> dict[str, Any] | None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            raise ValueError("批准本机设备必须绑定登录用户")
+        now = _utc_now()
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE local_agent_pairings
+                SET status = 'approved', owner_user_id = ?, approved_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                  AND failed_attempts < 5 AND expires_at > ?
+                """,
+                (owner_user_id, now, now, str(pairing_id), now),
+            )
+            if updated.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM local_agent_pairings WHERE id = ?",
+                (str(pairing_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def exchange_local_agent_pairing(
+        self,
+        *,
+        device_code_hash: str,
+        agent_id: str,
+        token_hash: str,
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM local_agent_pairings WHERE device_code_hash = ?",
+                (str(device_code_hash),),
+            ).fetchone()
+            if row is None:
+                return {"state": "invalid"}
+            pairing = dict(row)
+            if str(pairing.get("expires_at") or "") <= now:
+                conn.execute(
+                    """
+                    UPDATE local_agent_pairings
+                    SET status = 'expired', updated_at = ?
+                    WHERE id = ? AND status IN ('pending', 'approved')
+                    """,
+                    (now, str(pairing["id"])),
+                )
+                return {"state": "expired"}
+            state = str(pairing.get("status") or "")
+            if state == "pending":
+                last_polled_at = str(pairing.get("last_polled_at") or "")
+                min_poll_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=3)
+                ).isoformat(timespec="microseconds")
+                if last_polled_at and last_polled_at > min_poll_at:
+                    return {"state": "rate_limited"}
+                conn.execute(
+                    """
+                    UPDATE local_agent_pairings
+                    SET last_polled_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (now, now, str(pairing["id"])),
+                )
+            if state != "approved":
+                return {"state": state or "invalid"}
+            owner_user_id = str(pairing.get("owner_user_id") or "")
+            if not owner_user_id:
+                return {"state": "invalid"}
+            consumed = conn.execute(
+                """
+                UPDATE local_agent_pairings
+                SET status = 'consumed', agent_id = ?, consumed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'approved' AND consumed_at IS NULL
+                """,
+                (str(agent_id), now, now, str(pairing["id"])),
+            )
+            if consumed.rowcount != 1:
+                return {"state": "consumed"}
+            conn.execute(
+                """
+                INSERT INTO local_model_agents (
+                    id, owner_user_id, name, token_hash, last_seen_at,
+                    cockpit_status, last_error_code, revoked_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, NULL, 'unknown', '', NULL, ?, ?)
+                """,
+                (
+                    str(agent_id),
+                    owner_user_id,
+                    str(pairing.get("device_name") or "Windows 本机助手"),
+                    str(token_hash),
+                    now,
+                    now,
+                ),
+            )
+            agent = conn.execute(
+                "SELECT * FROM local_model_agents WHERE id = ?",
+                (str(agent_id),),
+            ).fetchone()
+        return {"state": "consumed", "agent": dict(agent) if agent else {}}
+
+    def find_local_model_agent_by_token_hash(
+        self,
+        value: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT a.*
+                FROM local_model_agents a
+                JOIN users u ON u.id = a.owner_user_id
+                WHERE a.token_hash = ? AND a.revoked_at IS NULL AND u.enabled = 1
+                """,
+                (str(value),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_local_model_agents(self) -> list[dict[str, Any]]:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM local_model_agents
+                WHERE owner_user_id = ?
+                ORDER BY revoked_at IS NOT NULL, created_at DESC
+                """,
+                (owner_user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_local_model_agent(self, agent_id: str) -> dict[str, Any] | None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM local_model_agents
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (str(agent_id), owner_user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def rename_local_model_agent(
+        self,
+        agent_id: str,
+        name: str,
+    ) -> dict[str, Any] | None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return None
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE local_model_agents SET name = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND revoked_at IS NULL
+                """,
+                (str(name), _utc_now(), str(agent_id), owner_user_id),
+            )
+        if updated.rowcount != 1:
+            return None
+        return self.get_local_model_agent(agent_id)
+
+    def heartbeat_local_model_agent(
+        self,
+        agent_id: str,
+        *,
+        cockpit_status: str,
+        last_error_code: str,
+    ) -> bool:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return False
+        now = _utc_now()
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE local_model_agents
+                SET last_seen_at = ?, cockpit_status = ?, last_error_code = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND revoked_at IS NULL
+                """,
+                (
+                    now,
+                    str(cockpit_status or "unknown")[:40],
+                    str(last_error_code or "")[:100],
+                    now,
+                    str(agent_id),
+                    owner_user_id,
+                ),
+            )
+        return updated.rowcount == 1
+
+    def revoke_local_model_agent(self, agent_id: str) -> bool:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return False
+        now = _utc_now()
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE local_model_agents
+                SET revoked_at = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND revoked_at IS NULL
+                """,
+                (now, now, str(agent_id), owner_user_id),
+            )
+            if updated.rowcount != 1:
+                return False
+            conn.execute(
+                """
+                UPDATE ai_models SET local_agent_id = NULL, updated_at = ?
+                WHERE owner_user_id = ? AND local_agent_id = ?
+                """,
+                (now, owner_user_id, str(agent_id)),
+            )
+            conn.execute(
+                """
+                UPDATE local_model_requests
+                SET status = 'failed', error = '本机 Companion 已撤销',
+                    result_error_code = 'agent.revoked',
+                    completed_at = ?, updated_at = ?
+                WHERE owner_user_id = ? AND agent_id = ?
+                  AND status IN ('pending', 'running')
+                """,
+                (now, now, owner_user_id, str(agent_id)),
+            )
+        return True
+
     def create_local_model_request(
         self,
         model_id: str,
         payload: dict[str, Any],
+        *,
+        timeout_seconds: float = 620.0,
     ) -> str:
         owner_user_id = self.owner_user_id
         if not owner_user_id:
@@ -2997,8 +3484,50 @@ class Database:
             != "local_openai_compatible"
         ):
             raise ValueError("本地模型不存在或不属于当前登录账号")
+        agent_id = str(model.get("local_agent_id") or "").strip()
+        if agent_id:
+            agent = self.get_local_model_agent(agent_id)
+            if not agent or str(agent.get("revoked_at") or "").strip():
+                raise ValueError("绑定的本机 Companion 不存在或已撤销")
+        if not isinstance(payload, dict):
+            raise ValueError("本地模型任务载荷无效")
+        allowed_keys = {"model", "messages", "temperature", "max_tokens", "stream"}
+        if set(payload).difference(allowed_keys):
+            raise ValueError("本地模型任务包含不允许的参数")
+        if payload.get("stream") not in {None, False}:
+            raise ValueError("本机 Companion 第一版不支持流式任务")
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("本地模型任务 messages 必须是数组")
+        clean_messages: list[dict[str, str]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError("本地模型任务消息格式无效")
+            role = str(message.get("role") or "")
+            content = message.get("content")
+            if role not in {"system", "user", "assistant"} or not isinstance(
+                content,
+                str,
+            ):
+                raise ValueError("本地模型任务消息格式无效")
+            clean_messages.append({"role": role, "content": content})
+        clean_payload: dict[str, Any] = {
+            "model": str(model.get("model") or "").strip(),
+            "messages": clean_messages,
+        }
+        if "temperature" in payload:
+            clean_payload["temperature"] = payload["temperature"]
+        if "max_tokens" in payload:
+            clean_payload["max_tokens"] = payload["max_tokens"]
+        request_json = json.dumps(clean_payload, ensure_ascii=False)
+        if len(request_json.encode("utf-8")) > 16 * 1024 * 1024:
+            raise ValueError("本地模型任务超过 16 MiB 限制")
         request_id = uuid.uuid4().hex
         now = _utc_now()
+        deadline_at = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=max(1.0, float(timeout_seconds)))
+        ).isoformat(timespec="microseconds")
         expired_before = (
             datetime.now(timezone.utc) - timedelta(days=1)
         ).isoformat(timespec="microseconds")
@@ -3014,14 +3543,19 @@ class Database:
                 """
                 INSERT INTO local_model_requests (
                     id, owner_user_id, model_id, status, request_json,
-                    response_text, error, claimed_by, created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', ?, '', '', '', ?, ?)
+                    response_text, error, claimed_by, agent_id, operation,
+                    attempt_id, nonce, deadline_at, lease_until, completed_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, '', '', '', ?,
+                          'chat.completions', '', '', ?, NULL, NULL, ?, ?)
                 """,
                 (
                     request_id,
                     owner_user_id,
                     model_id,
-                    json.dumps(payload, ensure_ascii=False),
+                    request_json,
+                    agent_id or None,
+                    deadline_at,
                     now,
                     now,
                 ),
@@ -3041,6 +3575,7 @@ class Database:
                 """
                 SELECT id FROM local_model_requests
                 WHERE owner_user_id = ? AND status = 'pending'
+                  AND agent_id IS NULL
                 ORDER BY created_at ASC LIMIT 1
                 """,
                 (owner_user_id,),
@@ -3053,6 +3588,7 @@ class Database:
                 UPDATE local_model_requests
                 SET status = 'running', claimed_by = ?, updated_at = ?
                 WHERE id = ? AND owner_user_id = ? AND status = 'pending'
+                  AND agent_id IS NULL
                 """,
                 (str(claimed_by), now, request_id, owner_user_id),
             )
@@ -3087,13 +3623,17 @@ class Database:
             conn.execute(
                 """
                 UPDATE local_model_requests
-                SET status = ?, response_text = ?, error = ?, updated_at = ?
+                SET status = ?, response_text = ?, error = ?, result_error_code = ?,
+                    completed_at = ?, updated_at = ?
                 WHERE id = ? AND owner_user_id = ? AND claimed_by = ?
+                  AND agent_id IS NULL
                 """,
                 (
                     status,
                     str(response_text or ""),
                     str(error or "")[:2000],
+                    "browser.failed" if status == "failed" else "",
+                    _utc_now(),
                     _utc_now(),
                     str(request_id),
                     owner_user_id,
@@ -3101,7 +3641,13 @@ class Database:
                 ),
             )
 
-    def fail_local_model_request(self, request_id: str, error: str) -> None:
+    def fail_local_model_request(
+        self,
+        request_id: str,
+        error: str,
+        *,
+        error_code: str = "browser.timeout",
+    ) -> None:
         owner_user_id = self.owner_user_id
         if not owner_user_id:
             return
@@ -3109,11 +3655,15 @@ class Database:
             conn.execute(
                 """
                 UPDATE local_model_requests
-                SET status = 'failed', error = ?, updated_at = ?
+                SET status = 'failed', error = ?, result_error_code = ?,
+                    completed_at = ?, updated_at = ?
                 WHERE id = ? AND owner_user_id = ?
+                  AND status IN ('pending', 'running')
                 """,
                 (
                     str(error or "")[:2000],
+                    str(error_code or "browser.timeout")[:100],
+                    _utc_now(),
                     _utc_now(),
                     str(request_id),
                     owner_user_id,
@@ -3143,6 +3693,227 @@ class Database:
                 "DELETE FROM local_model_requests WHERE id = ? AND owner_user_id = ?",
                 (str(request_id), owner_user_id),
             )
+
+    def claim_local_agent_request(
+        self,
+        agent_id: str,
+        *,
+        lease_seconds: float = 60.0,
+    ) -> dict[str, Any] | None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return None
+        agent = self.get_local_model_agent(agent_id)
+        if not agent or str(agent.get("revoked_at") or "").strip():
+            return None
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat(timespec="microseconds")
+        lease_until = (
+            now_dt + timedelta(seconds=max(1.0, float(lease_seconds)))
+        ).isoformat(timespec="microseconds")
+        attempt_id = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE local_model_requests
+                SET status = 'failed', error = '本地模型任务已超过截止时间',
+                    result_error_code = 'agent.deadline_exceeded',
+                    completed_at = ?, updated_at = ?
+                WHERE owner_user_id = ? AND agent_id = ?
+                  AND status IN ('pending', 'running')
+                  AND deadline_at IS NOT NULL AND deadline_at <= ?
+                """,
+                (now, now, owner_user_id, str(agent_id), now),
+            )
+            row = conn.execute(
+                """
+                SELECT id FROM local_model_requests
+                WHERE owner_user_id = ? AND agent_id = ?
+                  AND operation = 'chat.completions'
+                  AND deadline_at > ?
+                  AND (
+                      status = 'pending'
+                      OR (status = 'running' AND lease_until <= ?)
+                  )
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                (owner_user_id, str(agent_id), now, now),
+            ).fetchone()
+            if row is None:
+                return None
+            request_id = str(row["id"])
+            updated = conn.execute(
+                """
+                UPDATE local_model_requests
+                SET status = 'running', claimed_by = ?, attempt_id = ?,
+                    nonce = ?, lease_until = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND agent_id = ?
+                  AND deadline_at > ?
+                  AND (
+                      status = 'pending'
+                      OR (status = 'running' AND lease_until <= ?)
+                  )
+                """,
+                (
+                    f"agent:{agent_id}",
+                    attempt_id,
+                    nonce,
+                    lease_until,
+                    now,
+                    request_id,
+                    owner_user_id,
+                    str(agent_id),
+                    now,
+                    now,
+                ),
+            )
+            if updated.rowcount != 1:
+                return None
+            claimed = conn.execute(
+                """
+                SELECT * FROM local_model_requests
+                WHERE id = ? AND owner_user_id = ? AND agent_id = ?
+                  AND attempt_id = ? AND nonce = ?
+                """,
+                (
+                    request_id,
+                    owner_user_id,
+                    str(agent_id),
+                    attempt_id,
+                    nonce,
+                ),
+            ).fetchone()
+        if claimed is None:
+            return None
+        item = dict(claimed)
+        return {
+            "request_id": str(item["id"]),
+            "attempt_id": str(item["attempt_id"]),
+            "nonce": str(item["nonce"]),
+            "operation": "chat.completions",
+            "deadline_at": str(item.get("deadline_at") or ""),
+            "lease_until": str(item.get("lease_until") or ""),
+            "payload": _loads_json(item.get("request_json"), {}),
+        }
+
+    def renew_local_agent_request(
+        self,
+        request_id: str,
+        agent_id: str,
+        attempt_id: str,
+        nonce: str,
+        *,
+        lease_seconds: float = 60.0,
+    ) -> bool:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return False
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat(timespec="microseconds")
+        lease_until = (
+            now_dt + timedelta(seconds=max(1.0, float(lease_seconds)))
+        ).isoformat(timespec="microseconds")
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE local_model_requests
+                SET lease_until = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND agent_id = ?
+                  AND attempt_id = ? AND nonce = ? AND status = 'running'
+                  AND lease_until > ? AND deadline_at > ?
+                """,
+                (
+                    lease_until,
+                    now,
+                    str(request_id),
+                    owner_user_id,
+                    str(agent_id),
+                    str(attempt_id),
+                    str(nonce),
+                    now,
+                    now,
+                ),
+            )
+            if updated.rowcount == 1:
+                conn.execute(
+                    """
+                    UPDATE local_model_agents
+                    SET last_seen_at = ?, updated_at = ?
+                    WHERE id = ? AND owner_user_id = ? AND revoked_at IS NULL
+                    """,
+                    (now, now, str(agent_id), owner_user_id),
+                )
+        return updated.rowcount == 1
+
+    def complete_local_agent_request(
+        self,
+        request_id: str,
+        agent_id: str,
+        attempt_id: str,
+        nonce: str,
+        *,
+        status: str,
+        response_text: str = "",
+        error: str = "",
+        error_code: str = "",
+    ) -> str:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return "missing"
+        if status not in {"completed", "failed"}:
+            raise ValueError("本机任务结果状态无效")
+        now = _utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM local_model_requests
+                WHERE id = ? AND owner_user_id = ? AND agent_id = ?
+                """,
+                (str(request_id), owner_user_id, str(agent_id)),
+            ).fetchone()
+            if row is None:
+                return "missing"
+            item = dict(row)
+            same_attempt = (
+                str(item.get("attempt_id") or "") == str(attempt_id)
+                and str(item.get("nonce") or "") == str(nonce)
+            )
+            if str(item.get("status") or "") in {"completed", "failed"}:
+                return "duplicate" if same_attempt else "stale"
+            if (
+                not same_attempt
+                or str(item.get("status") or "") != "running"
+                or str(item.get("lease_until") or "") <= now
+                or str(item.get("deadline_at") or "") <= now
+            ):
+                return "stale"
+            updated = conn.execute(
+                """
+                UPDATE local_model_requests
+                SET status = ?, response_text = ?, error = ?, result_error_code = ?,
+                    completed_at = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND agent_id = ?
+                  AND attempt_id = ? AND nonce = ? AND status = 'running'
+                  AND lease_until > ? AND deadline_at > ?
+                """,
+                (
+                    status,
+                    str(response_text or ""),
+                    str(error or "")[:2000],
+                    str(error_code or "")[:100],
+                    now,
+                    now,
+                    str(request_id),
+                    owner_user_id,
+                    str(agent_id),
+                    str(attempt_id),
+                    str(nonce),
+                    now,
+                    now,
+                ),
+            )
+        return "accepted" if updated.rowcount == 1 else "stale"
 
     def list_prompt_templates(
         self,

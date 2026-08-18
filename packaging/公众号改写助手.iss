@@ -1,14 +1,16 @@
 #define MyAppName "公众号改写助手"
 #define MyAppPublisher "蓝血研究"
 #define MyAppExeName "公众号改写助手.exe"
-#define MyAppVersion "1.3.0"
-#define MyRemoteUrl "http://47.99.126.8/"
+#define MyAppVersion "1.4.0"
+#ifndef MyRemoteUrl
+  #define MyRemoteUrl "https://api.bluebloodlab.cn/publisher/"
+#endif
 #define BuildDir "..\dist\公众号改写助手"
 #ifndef MyAppId
   #define MyAppId "{{B5B0F085-6C6D-44F5-9D53-3895929B36EE}"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename MyAppName + "-生产环境安装包-" + MyAppVersion + "-20260730"
+  #define MyOutputBaseFilename MyAppName + "-受控测试安装包-" + MyAppVersion + "-20260818"
 #endif
 
 [Setup]
@@ -32,9 +34,14 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
+#ifdef MySignTool
+SignTool={#MySignTool} $f
+SignedUninstaller=yes
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: unchecked
+Name: "localagent"; Description: "登录 Windows 后自动启动本机模型助手"; GroupDescription: "本机模型："; Flags: checkedonce
 
 [Dirs]
 Name: "{app}\data"; Flags: uninsneveruninstall
@@ -64,12 +71,53 @@ Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--remote-url {#MyRemoteUrl}"; WorkingDir: "{app}"
+Name: "{autoprograms}\配置本机模型助手"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--local-agent --open-setup --remote-url {#MyRemoteUrl}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--remote-url {#MyRemoteUrl}"; WorkingDir: "{app}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "BlueBloodLabCockpitBridge"; ValueData: """{app}\{#MyAppExeName}"" --local-agent --remote-url ""{#MyRemoteUrl}"""; Flags: uninsdeletevalue; Tasks: localagent
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\BlueBloodLab\CockpitBridge"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--remote-url {#MyRemoteUrl}"; Description: "启动{#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--local-agent --remote-url {#MyRemoteUrl}"; Description: "启动本机模型助手"; WorkingDir: "{app}"; Flags: nowait postinstall; Check: ShouldStartLocalAgent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--local-agent --open-setup --remote-url {#MyRemoteUrl}"; Description: "配置本机模型助手"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: ShouldOpenLocalAgentSetup
 
 [Code]
+var
+  HadAgentAutostart: Boolean;
+
+procedure InitializeWizard;
+begin
+  HadAgentAutostart := RegValueExists(
+    HKCU,
+    'Software\Microsoft\Windows\CurrentVersion\Run',
+    'BlueBloodLabCockpitBridge'
+  );
+end;
+
+function ShouldStartLocalAgent: Boolean;
+begin
+  Result := HadAgentAutostart or WizardIsTaskSelected('localagent');
+end;
+
+function ShouldOpenLocalAgentSetup: Boolean;
+begin
+  Result := (not HadAgentAutostart) and WizardIsTaskSelected('localagent');
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RegDeleteValue(
+      HKCU,
+      'Software\Microsoft\Windows\CurrentVersion\Run',
+      'BlueBloodLabCockpitBridge'
+    );
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;

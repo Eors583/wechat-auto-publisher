@@ -12,9 +12,18 @@ from app.ai.model_registry import (
     apply_model_selection,
     public_models,
     save_model,
+    test_model_connection as run_model_connection_test,
 )
 from app.db import Database
-from app.ui.local_model_bridge import _browser_completion_script
+from app.ui.local_model_bridge import (
+    _browser_completion_script,
+    _browser_health_click_handler,
+    _browser_health_script,
+    _is_bridge_owner,
+    _register_bridge_owner,
+    _release_bridge_owner,
+    local_bridge_result_message,
+)
 
 
 def _save_local_model(db: Database, *, name: str = "我的 Ollama") -> str:
@@ -168,19 +177,19 @@ def test_failover_uses_local_browser_client_for_generation(tmp_path) -> None:
 def test_browser_bridge_posts_openai_payload_to_the_local_machine() -> None:
     script = _browser_completion_script(
         api_base="http://localhost:11434/v1",
-        api_key="",
         payload={"model": "qwen2.5:7b", "messages": []},
     )
 
     assert "http://localhost:11434/v1/chat/completions" in script
     assert "window.isSecureContext" not in script
     assert "当前页面不是 HTTPS 安全页面" not in script
-    assert "targetAddressSpace: 'local'" in script
+    assert "targetAddressSpace" not in script
+    assert "Authorization" not in script
     assert "credentials: 'omit'" in script
-    assert "AbortSignal.timeout(600000)" in script
+    assert "AbortSignal.timeout(620000)" in script
 
 
-def test_cockpit_key_cannot_be_saved_with_the_ollama_address(tmp_path) -> None:
+def test_local_key_cannot_be_saved_on_the_production_server(tmp_path) -> None:
     db = Database(tmp_path / "cockpit-address.db").for_user("user-a")
 
     try:
@@ -193,10 +202,148 @@ def test_cockpit_key_cannot_be_saved_with_the_ollama_address(tmp_path) -> None:
             api_key="agt_codex_example",
         )
     except ValueError as exc:
-        assert "Cockpit Tools" in str(exc)
-        assert "11798" in str(exc)
+        assert "不能保存到生产服务器" in str(exc)
+        assert "本机助手" in str(exc)
+        assert "agt_codex_example" not in str(exc)
     else:
-        raise AssertionError("Cockpit Tools key/address mismatch must fail")
+        raise AssertionError("local model key upload must fail")
+
+
+def test_browser_health_probe_supports_new_and_legacy_lna_permissions() -> None:
+    script = _browser_health_script(
+        api_base="http://127.0.0.1:11798/v1"
+    )
+    click_handler = _browser_health_click_handler(
+        base_element_id=13,
+        probe_mode_element_id=14,
+    )
+
+    for source in (script, click_handler):
+        assert "loopback-network" in source
+        assert "local-network-access" in source
+        assert "credentials: 'omit'" in source
+        assert "targetAddressSpace" not in source
+        assert "Authorization" not in source
+    assert "const readInputValue = (id)" in click_handler
+    assert "html?.value" in click_handler
+    assert "html?.querySelector?.('input')?.value" in click_handler
+    assert "getElement(id)?.modelValue" in click_handler
+    assert "readInputValue(config.baseId)" in click_handler
+    assert "readInputValue(config.probeModeId)" in click_handler
+    assert "http://127.0.0.1:11798/health" in click_handler
+    assert "probeMode !== 'cockpit_bridge'" in click_handler
+    assert "emit({ok: true, kind: 'skip'})" in click_handler
+    assert click_handler.count("emit(") >= 7
+
+
+def test_local_bridge_errors_are_actionable() -> None:
+    assert "网站设置" in local_bridge_result_message(
+        {"kind": "permission_denied"}
+    )
+    assert "本机助手设置" in local_bridge_result_message(
+        {"kind": "key_not_configured"}
+    )
+    assert "API Key" in local_bridge_result_message(
+        {"kind": "cockpit_unauthorized"}
+    )
+    assert "11797" in local_bridge_result_message(
+        {"kind": "cockpit_unavailable"}
+    )
+    assert "限流" in local_bridge_result_message(
+        {"kind": "cockpit_rate_limited"}
+    )
+
+
+def test_local_model_test_returns_before_server_http_client(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db = Database(tmp_path / "local-test-return.db").for_user("user-a")
+    model_id = _save_local_model(db)
+
+    class _BrowserClient:
+        def complete(self, *_args, **_kwargs) -> str:
+            return "OK"
+
+    class _ForbiddenServerClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise AssertionError("server must not construct OpenAICompatClient")
+
+    monkeypatch.setattr(
+        "app.ai.model_registry.build_text_client",
+        lambda *_args, **_kwargs: _BrowserClient(),
+    )
+    monkeypatch.setattr(
+        "app.ai.openai_compat.OpenAICompatClient",
+        _ForbiddenServerClient,
+    )
+
+    assert run_model_connection_test(db, model_id) == "连接成功"
+
+
+def test_legacy_local_credential_is_preserved_until_verified_cleanup(
+    tmp_path,
+) -> None:
+    path = tmp_path / "local-key-cleanup.db"
+    db = Database(path).for_user("user-a")
+    model_id = _save_local_model(db)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE ai_models SET api_key_encrypted = ? WHERE id = ?",
+            ("fernet:legacy-secret", model_id),
+        )
+
+    migrated = Database(path).for_user("user-a")
+    assert migrated.get_ai_model(model_id)["api_key_encrypted"] == (
+        "fernet:legacy-secret"
+    )
+
+    record = dict(migrated.get_ai_model(model_id) or {})
+    record["api_key_encrypted"] = "plaintext-must-not-persist"
+    migrated.upsert_ai_model(record)
+    assert migrated.get_ai_model(model_id)["api_key_encrypted"] == (
+        "fernet:legacy-secret"
+    )
+
+    assert migrated.clear_local_model_credential(model_id) is True
+    assert migrated.get_ai_model(model_id)["api_key_encrypted"] == ""
+    record["api_key_encrypted"] = "fernet:stale-concurrent-value"
+    migrated.upsert_ai_model(record)
+    assert migrated.get_ai_model(model_id)["api_key_encrypted"] == ""
+
+
+def test_local_url_rejects_userinfo_and_noncanonical_loopback(tmp_path) -> None:
+    db = Database(tmp_path / "strict-loopback.db").for_user("user-a")
+    for url in (
+        "http://user:secret@127.0.0.1:11798/v1",
+        "http://127.0.0.2:11798/v1",
+        "http://localhost.localdomain:11798/v1",
+    ):
+        try:
+            save_model(
+                db,
+                name="非法地址",
+                provider_type=LOCAL_OPENAI_COMPATIBLE,
+                api_base=url,
+                model="gpt-5.5",
+                api_key=None,
+            )
+        except ValueError as exc:
+            assert "本地模型地址" in str(exc)
+        else:
+            raise AssertionError(f"local URL must be rejected: {url}")
+
+
+def test_only_one_tab_is_the_active_browser_bridge_owner() -> None:
+    owner = "tab-owner-test"
+    _register_bridge_owner(owner, "tab-a")
+    _register_bridge_owner(owner, "tab-b")
+    assert not _is_bridge_owner(owner, "tab-a")
+    assert _is_bridge_owner(owner, "tab-b")
+
+    _release_bridge_owner(owner, "tab-b")
+    assert _is_bridge_owner(owner, "tab-a")
+    _release_bridge_owner(owner, "tab-a")
 
 
 def test_model_panel_routes_cockpit_through_the_local_browser_bridge() -> None:

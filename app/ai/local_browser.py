@@ -16,7 +16,7 @@ class LocalBrowserCompatClient(OpenAICompatClient):
         model_id: str,
         model: str,
         provider_name: str,
-        timeout: float = 620.0,
+        timeout: float = 640.0,
     ) -> None:
         super().__init__(
             api_key="browser-bridge",
@@ -50,6 +50,7 @@ class LocalBrowserCompatClient(OpenAICompatClient):
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             },
+            timeout_seconds=self.timeout,
         )
         deadline = time.monotonic() + self.timeout
         try:
@@ -68,15 +69,29 @@ class LocalBrowserCompatClient(OpenAICompatClient):
                         str(request.get("error") or "本地模型调用失败")
                     )
                 time.sleep(0.25)
+            latest = self.db.get_local_model_request(request_id) or {}
+            message = (
+                "等待本机 Companion 超时；请检查设备在线、配对状态、Cockpit 和本机密钥"
+                if str(latest.get("agent_id") or "").strip()
+                else "等待本地模型超时；请保持网页打开并确认浏览器权限和本地服务状态"
+            )
             self.db.fail_local_model_request(
                 request_id,
-                "等待本地模型超时；请保持网页打开并确认本地模型服务正在运行",
+                message,
+                error_code=(
+                    "agent.timeout"
+                    if str(latest.get("agent_id") or "").strip()
+                    else "browser.timeout"
+                ),
             )
-            raise RuntimeError(
-                "等待本地模型超时；请保持网页打开并确认本地模型服务正在运行"
-            )
+            raise RuntimeError(message)
         finally:
-            self.db.delete_local_model_request(request_id)
+            request = self.db.get_local_model_request(request_id)
+            # Browser fallback rows can be removed immediately. Companion rows
+            # remain for 24 hours so a lost HTTP acknowledgement can be retried
+            # idempotently with the same attempt_id and nonce.
+            if not request or not str(request.get("agent_id") or "").strip():
+                self.db.delete_local_model_request(request_id)
 
 
 def local_chat_completions_url(api_base: str) -> str:

@@ -5,6 +5,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,6 +183,17 @@ def run_packaging_self_test() -> dict[str, Any]:
         )
 
     check("external_sdk_resources", external_sdks)
+
+    def local_agent_runtime() -> str:
+        from app.local_agent import local_agent_self_test
+
+        with tempfile.TemporaryDirectory(prefix="blueblood-agent-smoke-") as directory:
+            result = local_agent_self_test(directory)
+        if not bool(result.get("ok")):
+            raise RuntimeError("本机 Companion DPAPI 状态往返失败")
+        return f"{result['loopback_bind']} -> {result['remote_origin']}"
+
+    check("local_agent_runtime", local_agent_runtime)
 
     def image_providers() -> str:
         from app.ai.image_providers import IMAGE_PROVIDER_PRESETS

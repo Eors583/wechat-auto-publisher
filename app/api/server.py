@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
 from app.api.editorial_reviews import create_editorial_review_router
+from app.api.local_agents import create_local_agent_router
 from app.ai.image_providers import is_image_provider
 from app.config import load_config
 from app.db import customer_data_scope
@@ -255,6 +256,7 @@ class AdminModelRequest(BaseModel):
     api_base: str = ""
     model: str = Field(min_length=1, max_length=200)
     api_key: str | None = None
+    local_agent_id: str | None = None
     enabled: bool = True
 
 
@@ -409,12 +411,7 @@ def create_api_app(
             and supplied
             and hmac.compare_digest(supplied, expected_token)
         ):
-            return {
-                "id": "legacy-api-token",
-                "username": "api",
-                "role": "admin",
-                "enabled": True,
-            }
+            return auth_service.ensure_default_admin()
         user = auth_service.authenticate(supplied)
         if user:
             return user
@@ -519,6 +516,7 @@ def create_api_app(
                     api_base=payload.api_base,
                     model=payload.model,
                     api_key=payload.api_key,
+                    local_agent_id=payload.local_agent_id,
                     enabled=payload.enabled,
                 )
         except ValueError as exc:
@@ -548,6 +546,9 @@ def create_api_app(
 
     app.include_router(
         create_editorial_review_router(batch_service, require_token)
+    )
+    app.include_router(
+        create_local_agent_router(batch_service.db, require_token)
     )
 
     @app.get("/health")
@@ -629,6 +630,7 @@ def create_api_app(
                 api_base=payload.api_base,
                 model=payload.model,
                 api_key=payload.api_key,
+                local_agent_id=payload.local_agent_id,
                 enabled=payload.enabled,
             )
         except ValueError as exc:

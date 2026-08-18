@@ -277,6 +277,7 @@ class ConfigurationService:
         api_base: str,
         model: str,
         api_key: str | None,
+        local_agent_id: str | None = None,
         enabled: bool = True,
         model_id: str | None = None,
     ) -> dict[str, Any]:
@@ -290,6 +291,7 @@ class ConfigurationService:
             api_base=api_base,
             model=model,
             api_key=api_key,
+            local_agent_id=local_agent_id,
             enabled=bool(enabled),
         )
         return self.get_model(saved_id)

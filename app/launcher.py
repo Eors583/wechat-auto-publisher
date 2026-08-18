@@ -259,6 +259,15 @@ def main() -> int:
             raise ValueError("--ui-smoke-server requires a port")
         _run_ui_smoke_server(int(sys.argv[index + 1]))
         return 0
+    if "--local-agent" in sys.argv:
+        _configure_file_logging("local-agent.log")
+        from app.local_agent import DEFAULT_REMOTE_URL, run_local_agent
+
+        remote_url = _remote_ui_url() or DEFAULT_REMOTE_URL
+        return run_local_agent(
+            remote_url,
+            open_setup="--open-setup" in sys.argv,
+        )
     if "--api-only" in sys.argv:
         _run_api_service()
         return 0

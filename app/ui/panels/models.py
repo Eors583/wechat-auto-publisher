@@ -28,7 +28,13 @@ from app.db import Database
 from app.services.configuration import ConfigurationService
 from app.services.onboarding import OnboardingService, TEXT_MODEL_PRESETS
 from app.services.onboarding_errors import friendly_model_error
+from app.services.local_agents import LocalAgentService
 from app.ui.state import AppState, set_button_loading
+from app.ui.local_model_bridge import (
+    _browser_health_click_handler,
+    _browser_health_script,
+    local_bridge_result_message,
+)
 
 
 IMAGE_PROVIDER_GUIDES: dict[str, dict[str, str]] = {
@@ -117,6 +123,7 @@ def build_models_panel(
     image_panel = purpose == "image"
     configuration = ConfigurationService(model_db, config)
     onboarding = OnboardingService(model_db, config)
+    local_agents = LocalAgentService(model_db)
     text_presets = {
         str(item["id"]): item for item in onboarding.model_presets()
     }
@@ -218,6 +225,7 @@ def build_models_panel(
 
             connection_in = None
             local_provider_in = None
+            local_agent_in = None
             if not image_panel:
                 ui.label("模型类型").classes("ops-config-field-label")
                 connection_in = ui.toggle(
@@ -241,9 +249,20 @@ def build_models_panel(
                         )
                         else "lm_studio"
                         if ":1234" in str((record or {}).get("api_base") or "")
-                        else "ollama"
+                        else "cockpit"
                     ),
                     label="本地服务",
+                ).classes("w-full").props("outlined stack-label")
+                agent_options = {"": "浏览器临时桥接（兼容模式）"}
+                for agent in model_db.list_local_model_agents():
+                    if not str(agent.get("revoked_at") or "").strip():
+                        agent_options[str(agent["id"])] = str(
+                            agent.get("name") or "Windows 本机助手"
+                        )
+                local_agent_in = ui.select(
+                    options=agent_options,
+                    value=str((record or {}).get("local_agent_id") or ""),
+                    label="执行设备（推荐 Companion）",
                 ).classes("w-full").props("outlined stack-label")
 
             name_in = ui.input(
@@ -251,6 +270,9 @@ def build_models_panel(
                 value=str((record or {}).get("name") or ""),
                 placeholder="留空则自动使用厂商和模型名称",
             ).classes("w-full").props("outlined stack-label")
+            probe_mode_in = ui.input(value="skip").classes("hidden").props(
+                "aria-hidden=true tabindex=-1"
+            )
 
             if image_panel:
                 type_in = ui.select(
@@ -293,6 +315,23 @@ def build_models_panel(
             ).classes("w-full").props(
                 "outlined stack-label autocomplete=new-password"
             )
+            with ui.column().classes(
+                "w-full q-pa-md rounded-borders bg-teal-1 gap-2"
+            ) as local_setup:
+                ui.label("第 2 步：配置并授权本机助手").classes(
+                    "text-weight-bold text-teal-9"
+                )
+                ui.label(
+                    "Cockpit API Key 只保存在这台电脑，不会上传到生产服务器。"
+                ).classes("muted")
+                ui.link(
+                    "打开本机助手设置",
+                    "http://127.0.0.1:11798/setup",
+                    new_tab=True,
+                ).classes("text-teal-9 text-weight-bold")
+                local_status = ui.label(
+                    "保存并测试时，浏览器会请求一次本地网络权限。"
+                ).classes("muted ops-break-anywhere")
             enabled_in = ui.switch(
                 "启用",
                 value=bool((record or {}).get("enabled", True)),
@@ -300,6 +339,8 @@ def build_models_panel(
 
             def sync_type(*, reset_model: bool = False) -> None:
                 if image_panel:
+                    key_in.set_visibility(True)
+                    local_setup.set_visibility(False)
                     provider_id = str(type_in.value or IMAGE_CUSTOM)
                     preset = get_image_provider_preset(provider_id)
                     guide = IMAGE_PROVIDER_GUIDES[provider_id]
@@ -338,8 +379,15 @@ def build_models_panel(
                     return
 
                 if str(connection_in.value or "api") == "local":
+                    is_cockpit = (
+                        str(local_provider_in.value or "") == "cockpit"
+                    )
                     type_in.set_visibility(False)
                     local_provider_in.set_visibility(True)
+                    local_agent_in.set_visibility(is_cockpit)
+                    if not is_cockpit and str(local_agent_in.value or ""):
+                        local_agent_in.value = ""
+                        local_agent_in.update()
                     base_in.set_visibility(True)
                     official_help.clear()
                     with official_help:
@@ -353,16 +401,17 @@ def build_models_panel(
                             "Cockpit Tools 经本地桥接器使用 11798；桥接器再安全转发到 Cockpit 的 11797。"
                         ).classes("muted")
                         ui.label(
+                            "绑定 Companion 后网页可以关闭；未绑定时才使用当前浏览器临时转发。"
+                        ).classes("muted")
+                        ui.label(
                             "Ollama 常用 11434，LM Studio 常用 1234；不同服务的地址和密钥不能混用。"
                         ).classes("muted")
                     endpoint_note.text = (
                         "这里只允许带端口的 localhost、127.0.0.1 或 ::1 地址；服务器不会直接访问该地址。"
                     )
                     model_note.text = "填写本地服务中已经下载并启用的准确模型名称。"
-                    key_in.props(
-                        'label="API Key（本地服务不需要时可留空）" '
-                        'placeholder="可选，仅在本地服务启用鉴权时填写"'
-                    )
+                    key_in.set_visibility(False)
+                    local_setup.set_visibility(is_cockpit)
                     if reset_model:
                         local_defaults = {
                             "cockpit": ("http://127.0.0.1:11798/v1", ""),
@@ -379,6 +428,9 @@ def build_models_panel(
 
                 type_in.set_visibility(True)
                 local_provider_in.set_visibility(False)
+                local_agent_in.set_visibility(False)
+                local_setup.set_visibility(False)
+                key_in.set_visibility(True)
                 key_in.props(
                     'label="第 2 步：粘贴 API Key" '
                     'placeholder="从上方官方页面复制，不要填写登录密码"'
@@ -435,15 +487,28 @@ def build_models_panel(
                 )
                 model_in.update()
 
+            def sync_probe_mode() -> None:
+                probe_mode_in.value = (
+                    "cockpit_bridge"
+                    if not image_panel
+                    and str(connection_in.value or "api") == "local"
+                    and str(local_provider_in.value or "") == "cockpit"
+                    and not str(local_agent_in.value or "").strip()
+                    else "skip"
+                )
+                probe_mode_in.update()
+
             type_in.on_value_change(lambda _: sync_type(reset_model=True))
             if connection_in is not None:
                 connection_in.on_value_change(
-                    lambda _: sync_type(reset_model=True)
+                    lambda _: (sync_type(reset_model=True), sync_probe_mode())
                 )
                 local_provider_in.on_value_change(
-                    lambda _: sync_type(reset_model=True)
+                    lambda _: (sync_type(reset_model=True), sync_probe_mode())
                 )
+                local_agent_in.on_value_change(lambda _: sync_probe_mode())
             sync_type()
+            sync_probe_mode()
 
             def persist_form() -> dict[str, Any]:
                 nonlocal current_model_id
@@ -489,7 +554,16 @@ def build_models_panel(
                     provider_type=provider_type,
                     api_base=selected_base,
                     model=selected_model,
-                    api_key=str(key_in.value or "") or None,
+                    api_key=(
+                        None
+                        if provider_type == LOCAL_OPENAI_COMPATIBLE
+                        else str(key_in.value or "") or None
+                    ),
+                    local_agent_id=(
+                        str(local_agent_in.value or "")
+                        if provider_type == LOCAL_OPENAI_COMPATIBLE
+                        else None
+                    ),
                     enabled=bool(enabled_in.value),
                 )
                 current_model_id = str(saved["id"])
@@ -602,17 +676,71 @@ def build_models_panel(
                         button=btn,
                     )
                 )
-                verify_btn.on_click(
-                    lambda _=None, btn=verify_btn: submit(
-                        test_after_save=True,
-                        button=btn,
-                    )
+                async def verify_from_click(event: Any) -> None:
+                    result = event.args if hasattr(event, "args") else {}
+                    if not isinstance(result, dict) or not bool(result.get("ok")):
+                        message = local_bridge_result_message(result)
+                        local_status.text = message
+                        local_status.classes(
+                            remove="text-positive muted",
+                            add="text-negative text-weight-medium",
+                        )
+                        local_status.update()
+                        ui.notify(message, type="negative", timeout=12000)
+                        return
+                    if str(result.get("kind") or "") == "ready":
+                        if current_model_id:
+                            await run.io_bound(
+                                lambda: model_db.clear_local_model_credential(
+                                    current_model_id
+                                )
+                            )
+                        local_status.text = (
+                            "本机助手、Cockpit Tools 和浏览器权限均已就绪，"
+                            "正在进行真实模型调用…"
+                        )
+                        local_status.classes(
+                            remove="text-negative muted",
+                            add="text-positive text-weight-medium",
+                        )
+                        local_status.update()
+                    await submit(test_after_save=True, button=verify_btn)
+
+                verify_btn.on(
+                    "click",
+                    verify_from_click,
+                    js_handler=_browser_health_click_handler(
+                        base_element_id=int(base_in.id),
+                        probe_mode_element_id=int(probe_mode_in.id),
+                    ),
                 )
         dialog.open()
 
     async def run_connection_test(model_id: str, button: Any) -> None:
+        owner_client = ui.context.client
         set_button_loading(button, True, "正在验证模型接口和 API Key…")
         try:
+            model = model_db.get_ai_model(model_id)
+            browser_cockpit_model = bool(
+                model
+                and str(model.get("provider_type") or "")
+                == LOCAL_OPENAI_COMPATIBLE
+                and ":11798" in str(model.get("api_base") or "")
+                and not str(model.get("local_agent_id") or "").strip()
+            )
+            if browser_cockpit_model:
+                bridge_result = await owner_client.run_javascript(
+                    _browser_health_script(
+                        api_base=str(model.get("api_base") or "")
+                    ),
+                    timeout=12,
+                )
+                if not isinstance(bridge_result, dict) or not bool(
+                    bridge_result.get("ok")
+                ):
+                    raise RuntimeError(
+                        local_bridge_result_message(bridge_result)
+                    )
             if image_panel:
                 result = await run.io_bound(
                     lambda: configuration.test_model(model_id)
@@ -620,6 +748,10 @@ def build_models_panel(
             else:
                 result = await run.io_bound(
                     lambda: onboarding.test_text_model(model_id)
+                )
+            if browser_cockpit_model:
+                await run.io_bound(
+                    lambda: model_db.clear_local_model_credential(model_id)
                 )
             state.refresh_model_selects()
             ui.notify(str(result.get("message") or "连接成功"), type="positive")
@@ -686,6 +818,63 @@ def build_models_panel(
             timeout=1800,
         )
 
+    def rename_local_agent(agent_id: str, current_name: str) -> None:
+        with ui.dialog() as rename_dialog, ui.card().classes(
+            "ops-dialog-model-editor"
+        ):
+            ui.label("重命名本机 Companion").classes("text-h6 text-weight-bold")
+            name_in = ui.input("设备名称", value=current_name).classes(
+                "w-full"
+            ).props("outlined stack-label maxlength=100")
+
+            def save_name() -> None:
+                try:
+                    local_agents.rename_agent(
+                        str(model_db.owner_user_id or ""),
+                        agent_id,
+                        str(name_in.value or ""),
+                    )
+                    rename_dialog.close()
+                    render_models()
+                    ui.notify("设备名称已更新", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(str(exc), type="negative")
+
+            with ui.row().classes("w-full justify-end"):
+                ui.button("取消", on_click=rename_dialog.close).props("flat no-caps")
+                ui.button("保存", on_click=save_name).props(
+                    "unelevated color=teal-9 no-caps"
+                )
+        rename_dialog.open()
+
+    def revoke_local_agent(agent_id: str, name: str) -> None:
+        with ui.dialog() as revoke_dialog, ui.card().classes(
+            "ops-dialog-model-editor"
+        ):
+            ui.label(f"撤销设备“{name}”？").classes("text-h6 text-weight-bold")
+            ui.label(
+                "撤销后该设备立即失去任务权限，已绑定模型会回到等待绑定状态。"
+            ).classes("muted ops-break-anywhere")
+
+            def revoke() -> None:
+                try:
+                    local_agents.revoke_agent(
+                        str(model_db.owner_user_id or ""),
+                        agent_id,
+                    )
+                    revoke_dialog.close()
+                    render_models()
+                    ui.notify("本机设备已撤销", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(str(exc), type="negative")
+
+            with ui.row().classes("w-full justify-end"):
+                ui.button("取消", on_click=revoke_dialog.close).props("flat no-caps")
+                ui.button("确认撤销", on_click=revoke).props(
+                    "unelevated color=red-7 no-caps"
+                )
+        revoke_dialog.open()
+
     def render_models() -> None:
         if host is None:
             return
@@ -701,6 +890,52 @@ def build_models_panel(
             item for item in listed if bool(item.get("is_config_model"))
         ]
         with host:
+            if not image_panel:
+                agents = local_agents.list_agents(
+                    str(model_db.owner_user_id or "")
+                )
+                active_agents = [item for item in agents if not item.get("revoked")]
+                with ui.element("div").classes("card w-full"):
+                    ui.label("本机 Companion").classes("text-h6 text-weight-bold")
+                    ui.label(
+                        "Companion 主动连接生产 HTTPS；绑定后关闭网页仍可运行本地模型。"
+                    ).classes("muted ops-break-anywhere")
+                    if not active_agents:
+                        ui.label(
+                            "尚未配对。请在 Windows 本机助手设置页生成配对码并在本页批准。"
+                        ).classes("text-warning ops-break-anywhere")
+                    for agent in active_agents:
+                        with ui.row().classes(
+                            "w-full items-center justify-between q-mt-sm ops-wrap-actions"
+                        ):
+                            with ui.column().classes("gap-0").style(
+                                "min-width:0;flex:1"
+                            ):
+                                ui.label(str(agent["name"])).classes(
+                                    "text-weight-bold ops-break-anywhere"
+                                )
+                                ui.label(
+                                    (
+                                        "在线"
+                                        if agent.get("online")
+                                        else "离线"
+                                    )
+                                    + " · Cockpit "
+                                    + str(agent.get("cockpit_status") or "unknown")
+                                ).classes(
+                                    "text-positive"
+                                    if agent.get("online")
+                                    else "muted"
+                                )
+                            with ui.row().classes("items-center q-gutter-xs"):
+                                ui.button(
+                                    "重命名",
+                                    on_click=lambda _=None, aid=str(agent["id"]), n=str(agent["name"]): rename_local_agent(aid, n),
+                                ).props("flat dense no-caps")
+                                ui.button(
+                                    "撤销",
+                                    on_click=lambda _=None, aid=str(agent["id"]), n=str(agent["name"]): revoke_local_agent(aid, n),
+                                ).props("flat dense color=red-7 no-caps")
             with ui.element("div").classes("card w-full"):
                 ui.label(
                     "图片模型接入：照着 3 步做"
@@ -749,7 +984,7 @@ def build_models_panel(
                             )
                             ui.label(description).classes("muted")
                 ui.label(
-                    "API Key 只会在系统中加密保存；界面、日志和任务记录不会显示明文。"
+                    "远程 API Key 会在服务器加密保存；本地模型密钥只保存在本机助手。"
                 ).classes("text-positive q-mt-sm")
 
             with ui.element("div").classes("card w-full"):
@@ -852,14 +1087,32 @@ def build_models_panel(
                             if item.get("api_base"):
                                 ui.label(str(item["api_base"])).classes("muted")
                             ui.label(
-                                "API Key：••••••••（已加密保存）"
-                                if item.get("has_api_key")
-                                else "API Key：本地服务未启用鉴权"
+                                "API Key：仅保存在本机助手"
+                                if item.get("connection_type") == "local"
+                                else (
+                                    "API Key：••••••••（已加密保存）"
+                                    if item.get("has_api_key")
+                                    else "API Key：尚未配置"
+                                )
                             ).classes("muted")
                             if item.get("connection_type") == "local":
+                                agent_id = str(item.get("local_agent_id") or "")
+                                agent = (
+                                    model_db.get_local_model_agent(agent_id)
+                                    if agent_id
+                                    else None
+                                )
                                 ui.label(
-                                    "通过当前浏览器连接本机；生成期间请保持网页打开"
-                                ).classes("text-warning")
+                                    (
+                                        "由 Companion “"
+                                        + str((agent or {}).get("name") or agent_id)
+                                        + "”在后台执行；网页可以关闭"
+                                    )
+                                    if agent_id
+                                    else "通过当前浏览器临时连接本机；生成期间请保持网页打开"
+                                ).classes(
+                                    "text-positive" if agent_id else "text-warning"
+                                )
                             if image_panel:
                                 tested_path = image_test_path(
                                     editable_model_id

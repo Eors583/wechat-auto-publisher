@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import ctypes
 import hashlib
-import ipaddress
 import os
 import uuid
 from ctypes import wintypes
@@ -169,6 +168,7 @@ def save_model(
     api_base: str,
     model: str,
     api_key: str | None,
+    local_agent_id: str | None = None,
     enabled: bool = True,
     model_id: str | None = None,
 ) -> str:
@@ -182,34 +182,26 @@ def save_model(
     if provider_type == LOCAL_OPENAI_COMPATIBLE:
         if not db.owner_user_id:
             raise ValueError("本地模型必须由登录用户在公众号配置中添加")
+        if str(api_key or "").strip():
+            raise ValueError(
+                "本地模型 API Key 不能保存到生产服务器；"
+                "请在本机助手设置页中配置密钥"
+            )
         parsed = urlparse(api_base.strip())
         hostname = str(parsed.hostname or "").casefold()
         try:
             port = parsed.port
         except ValueError:
             port = None
-        try:
-            is_loopback = bool(
-                hostname and ipaddress.ip_address(hostname).is_loopback
-            )
-        except ValueError:
-            is_loopback = False
         if (
             parsed.scheme not in {"http", "https"}
             or not port
-            or (
-                hostname not in {"localhost", "localhost.localdomain"}
-                and not is_loopback
-            )
+            or hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed.username is not None
+            or parsed.password is not None
         ):
             raise ValueError(
                 "本地模型地址必须是带端口的 localhost/127.0.0.1/::1 地址"
-            )
-        if str(api_key or "").strip().startswith("agt_codex_") and port == 11434:
-            raise ValueError(
-                "Cockpit Tools 密钥不能配合 Ollama 的 11434 地址使用；"
-                "请填写 Cockpit Tools“服务配置”中显示的 API 地址，"
-                "浏览器桥接地址通常为 http://127.0.0.1:11798/v1"
             )
     if provider_type == MANUS:
         api_base = api_base.strip() or "https://api.manus.ai"
@@ -228,13 +220,38 @@ def save_model(
         if provider_type == OPENAI_IMAGE and not api_base:
             raise ValueError("自定义生图接口必须填写 API Base URL")
     existing = db.get_ai_model(model_id) if model_id else None
-    encrypted = encrypt_api_key(api_key.strip()) if api_key and api_key.strip() else ""
-    if (
-        not encrypted
-        and existing
-        and str(existing.get("provider_type") or "") == provider_type
-    ):
-        encrypted = str(existing["api_key_encrypted"])
+    if provider_type == LOCAL_OPENAI_COMPATIBLE:
+        selected_agent_id = (
+            str(existing.get("local_agent_id") or "").strip()
+            if local_agent_id is None and existing
+            else str(local_agent_id or "").strip()
+        )
+        if selected_agent_id:
+            if api_base.strip() != "http://127.0.0.1:11798/v1":
+                raise ValueError(
+                    "本机 Companion 当前仅支持 Cockpit Tools，"
+                    "地址必须为 http://127.0.0.1:11798/v1"
+                )
+            agent = db.get_local_model_agent(selected_agent_id)
+            if not agent or str(agent.get("revoked_at") or "").strip():
+                raise ValueError("所选本机 Companion 不存在、已撤销或不属于当前账号")
+    else:
+        if str(local_agent_id or "").strip():
+            raise ValueError("远程 API 模型不能绑定本机 Companion")
+        selected_agent_id = ""
+    encrypted = ""
+    if provider_type != LOCAL_OPENAI_COMPATIBLE:
+        encrypted = (
+            encrypt_api_key(api_key.strip())
+            if api_key and api_key.strip()
+            else ""
+        )
+        if (
+            not encrypted
+            and existing
+            and str(existing.get("provider_type") or "") == provider_type
+        ):
+            encrypted = str(existing["api_key_encrypted"])
     if not encrypted and provider_type != LOCAL_OPENAI_COMPATIBLE:
         raise ValueError("API Key 不能为空")
     model_id = model_id or f"custom_{uuid.uuid4().hex[:12]}"
@@ -246,6 +263,7 @@ def save_model(
             "api_base": api_base.strip(),
             "model": model,
             "api_key_encrypted": encrypted,
+            "local_agent_id": selected_agent_id,
             "enabled": enabled,
             "created_at": existing.get("created_at") if existing else None,
         }
@@ -266,17 +284,19 @@ def public_models(
         models = [item for item in models if is_image_provider(item.get("provider_type"))]
     for item in models:
         record_owner = str(item.pop("owner_user_id", "") or "")
-        has_api_key = bool(str(item.get("api_key_encrypted") or ""))
+        is_local = item.get("provider_type") == LOCAL_OPENAI_COMPATIBLE
+        has_api_key = (
+            False
+            if is_local
+            else bool(str(item.get("api_key_encrypted") or ""))
+        )
         item.pop("api_key_encrypted", None)
         item["enabled"] = bool(item.get("enabled"))
         item["has_api_key"] = has_api_key
         item["scope"] = "private" if record_owner else "platform"
         item["editable"] = record_owner == db.owner_user_id
-        item["connection_type"] = (
-            "local"
-            if item.get("provider_type") == LOCAL_OPENAI_COMPATIBLE
-            else "api"
-        )
+        item["connection_type"] = "local" if is_local else "api"
+        item["credential_scope"] = "device" if is_local else "server"
     return models
 
 
@@ -300,13 +320,18 @@ def apply_model_selection(
         record = db.get_ai_model(model_id)
         if not record or not bool(record.get("enabled")):
             raise ValueError(f"所选模型不可用或已停用：{model_id}")
+        is_local = record["provider_type"] == LOCAL_OPENAI_COMPATIBLE
         custom[model_id] = {
             "id": model_id,
             "name": record["name"],
             "provider_type": record["provider_type"],
             "api_base": record.get("api_base") or "",
             "model": record["model"],
-            "api_key": decrypt_api_key(record["api_key_encrypted"]),
+            "api_key": (
+                ""
+                if is_local
+                else decrypt_api_key(record["api_key_encrypted"])
+            ),
         }
     result = dict(config)
     ai = dict(result.get("ai") or {})
@@ -336,11 +361,12 @@ def test_model_connection(db: Database, model_id: str) -> str:
     record = db.get_ai_model(model_id)
     if not record:
         raise ValueError("模型不存在")
-    key = decrypt_api_key(record["api_key_encrypted"])
     if record["provider_type"] == LOCAL_OPENAI_COMPATIBLE:
         client = build_text_client(db, {}, model_id)
         client.complete("只回复 OK", max_tokens=8, temperature=0, max_attempts=1)
-    elif is_image_provider(record["provider_type"]):
+        return "连接成功"
+    key = decrypt_api_key(record["api_key_encrypted"])
+    if is_image_provider(record["provider_type"]):
         from app.ai.image_generator import test_image_endpoint
 
         return test_image_endpoint(
@@ -437,7 +463,11 @@ def build_text_client(
         provider = model_id
         provider_type = str(record.get("provider_type") or OPENAI_COMPATIBLE)
         name = str(record.get("name") or model_id)
-        key = decrypt_api_key(str(record.get("api_key_encrypted") or ""))
+        key = (
+            ""
+            if provider_type == LOCAL_OPENAI_COMPATIBLE
+            else decrypt_api_key(str(record.get("api_key_encrypted") or ""))
+        )
 
     if provider_type == LOCAL_OPENAI_COMPATIBLE:
         return LocalBrowserCompatClient(

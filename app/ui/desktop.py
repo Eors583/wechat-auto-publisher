@@ -175,6 +175,12 @@ def create_desktop_app() -> None:
     requested_config_account_id = str(
         query_params.get("account_id") or ""
     ).strip()
+    requested_pairing_id = str(
+        query_params.get("pairing_id") or ""
+    ).strip()
+    requested_pairing_code = str(
+        query_params.get("user_code") or ""
+    ).strip()
     open_requested_admin = (
         str(query_params.get("view") or "").strip().lower() == "admin"
     )
@@ -211,6 +217,64 @@ def create_desktop_app() -> None:
             str((page_state.current_user or {}).get("role") or "") == "admin",
         )
     )
+
+    if requested_pairing_id:
+        from app.services.local_agents import LocalAgentService
+
+        pairing_service = LocalAgentService(page_state.db)
+        with ui.dialog() as pairing_dialog, ui.card().classes(
+            "ops-dialog-model-editor ops-dialog-scroll"
+        ):
+            ui.label("批准本机 Companion").classes("text-h6 text-weight-bold")
+            ui.label(
+                "确认后，这台 Windows 电脑只能领取当前登录账号绑定给它的本地模型任务。"
+            ).classes("muted ops-break-anywhere")
+            pairing_code_input = ui.input(
+                "输入本机助手显示的 8 位配对码",
+                value=requested_pairing_code,
+                placeholder="例如 12345678",
+            ).props("outlined maxlength=8 inputmode=numeric").classes("w-full")
+            pairing_status = ui.label(
+                "请确认该配对码与本机助手设置页显示的一致。"
+            ).classes("muted ops-break-anywhere")
+
+            async def approve_local_agent() -> None:
+                try:
+                    result = await run.io_bound(
+                        lambda: pairing_service.approve_pairing(
+                            str((page_state.current_user or {}).get("id") or ""),
+                            requested_pairing_id,
+                            str(pairing_code_input.value or "").strip(),
+                        )
+                    )
+                    pairing_status.text = (
+                        "设备已批准："
+                        + str(result.get("device_name") or "Windows 本机助手")
+                        + "。本机助手将在几秒内完成配对。"
+                    )
+                    pairing_status.classes(
+                        remove="muted text-negative",
+                        add="text-positive text-weight-medium",
+                    )
+                    pairing_status.update()
+                except Exception as exc:  # noqa: BLE001
+                    pairing_status.text = str(exc)
+                    pairing_status.classes(
+                        remove="muted text-positive",
+                        add="text-negative text-weight-medium",
+                    )
+                    pairing_status.update()
+
+            with ui.row().classes("w-full justify-end q-mt-md"):
+                ui.button("取消", on_click=pairing_dialog.close).props(
+                    "flat no-caps"
+                )
+                ui.button(
+                    "确认批准此设备",
+                    icon="devices",
+                    on_click=approve_local_agent,
+                ).props("unelevated color=teal-9 no-caps")
+        pairing_dialog.open()
 
     onboarding_service: OnboardingService | None = None
     onboarding_status: dict[str, Any] = {}
@@ -257,7 +321,8 @@ def create_desktop_app() -> None:
                 with ui.column().classes("gap-0"):
                     ui.label("我的大模型").classes("text-h6 text-weight-bold")
                     ui.label(
-                        "配置只属于当前登录账号，API Key 加密保存到数据库。"
+                        "配置只属于当前登录账号；远程 API Key 加密保存，"
+                        "本地模型密钥只保存在本机助手。"
                     ).classes("muted")
                 ui.space()
                 ui.button(

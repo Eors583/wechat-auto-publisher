@@ -1451,6 +1451,21 @@ body,
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+.ops-break-anywhere {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.ops-wrap-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+  row-gap: var(--ui-space-2);
+}
+.ops-dialog-model-editor > .q-row {
+  min-width: 0;
+  flex-wrap: wrap;
+  row-gap: var(--ui-space-2);
+}
 .ops-model-kind-toggle {
   min-height: var(--ui-segment-height);
   padding: var(--ui-space-1);

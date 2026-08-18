@@ -55,10 +55,25 @@ def test_installer_shortcuts_open_the_hosted_application() -> None:
         / "公众号改写助手.iss"
     ).read_text(encoding="utf-8")
 
-    assert '#define MyRemoteUrl "http://47.99.126.8/"' in installer
+    assert (
+        '#define MyRemoteUrl "https://api.bluebloodlab.cn/publisher/"'
+        in installer
+    )
     assert installer.count(
         'Parameters: "--remote-url {#MyRemoteUrl}"'
     ) == 3
+    assert "--local-agent --open-setup" in installer
+    assert "BlueBloodLabCockpitBridge" in installer
+    assert "procedure CurUninstallStepChanged" in installer
+    assert "RegDeleteValue(" in installer
+
+    build_script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "build_installer.ps1"
+    ).read_text(encoding="utf-8")
+    assert "$productionRemoteUrl = 'https://api.bluebloodlab.cn/publisher/'" in build_script
+    assert "Public release remote URL must be exactly" in build_script
 
 
 def test_ui_smoke_server_enables_nicegui_user_storage(monkeypatch) -> None:
