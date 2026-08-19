@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from html import unescape
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -45,8 +46,16 @@ def ingest_url(url: str, timeout: float = 30.0) -> IngestedContent:
 
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (compatible; WeChatAutoPublisher/0.1; +https://localhost)"
-        )
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/151.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+        "Referer": "https://mp.weixin.qq.com/",
     }
     with httpx.Client(follow_redirects=True, timeout=timeout, headers=headers) as client:
         resp = client.get(url)
@@ -64,7 +73,22 @@ def ingest_url(url: str, timeout: float = 30.0) -> IngestedContent:
         raise ValueError(
             f"Failed to extract article body from URL: {url}. Please paste text manually."
         )
-    _reject_block_page(title, content, url)
+    try:
+        _reject_block_page(title, content, url)
+    except ValueError:
+        if str(urlsplit(url).hostname or "").casefold() != "mp.weixin.qq.com":
+            raise
+        from app.services.wechat_layout_import import fetch_wechat_article_layout
+
+        recovered = fetch_wechat_article_layout(url, timeout=timeout)
+        title = recovered.title
+        content = unescape(_html_to_text(recovered.content_html))
+        images = re.findall(
+            r'<img[^>]+(?:data-src|src)=["\']([^"\']+)["\']',
+            recovered.content_html,
+            flags=re.I,
+        )
+        _reject_block_page(title, content, url)
 
     return IngestedContent(
         title=title or "",
