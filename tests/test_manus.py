@@ -69,8 +69,13 @@ class ManusClientTests(unittest.TestCase):
 
     def test_rewrite_schema_contains_all_single_pass_fields(self) -> None:
         schema = _rewrite_schema()
-        self.assertEqual(schema["required"], ["body", "titles", "subtitles"])
-        self.assertEqual(set(schema["properties"]), {"body", "titles", "subtitles"})
+        self.assertEqual(
+            schema["required"], ["body", "titles", "subtitles", "digest"]
+        )
+        self.assertIn("120", schema["properties"]["digest"]["description"])
+        self.assertEqual(
+            set(schema["properties"]), {"body", "titles", "subtitles", "digest"}
+        )
         self.assertFalse(schema["additionalProperties"])
 
     def test_every_structured_output_schema_avoids_manus_forbidden_keywords(

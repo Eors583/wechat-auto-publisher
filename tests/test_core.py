@@ -28,6 +28,9 @@ class ParseTests(unittest.TestCase):
         self.assertIn("只加粗核心观点、关键数据和行动建议", prompt)
         self.assertIn("禁止整段加粗", prompt)
         self.assertIn("禁止连续多个段落", prompt)
+        self.assertIn("digest", prompt)
+        self.assertIn("不得照抄标题或正文第一段", prompt)
+        self.assertIn("120 字", prompt)
 
     def test_emphasis_guard_removes_whole_paragraph_and_consecutive_bold(self) -> None:
         body = (
@@ -65,6 +68,7 @@ class ParseTests(unittest.TestCase):
             "body": body,
             "titles": ["标题一", "标题二", "标题三", "标题四", "标题五"],
             "subtitles": ["副1", "副2", "副3", "副4", "副5"],
+            "digest": "摘要：这是阅读全文后形成的核心概括。",
         }
         import json
 
@@ -73,6 +77,7 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(len(result.body) > 50)
         self.assertEqual(len(result.titles), 5)
         self.assertEqual(result.titles[0], "标题一")
+        self.assertEqual(result.digest, "这是阅读全文后形成的核心概括。")
 
     def test_parse_titles(self) -> None:
         result = parse_title_output('{"titles":["爆款1","爆款2","爆款3"]}')
@@ -204,6 +209,20 @@ class AdCoverRenderTests(unittest.TestCase):
         self.assertNotIn("默认课程推荐", html)
         self.assertNotIn("欢迎关注本公众号", html)
         self.assertTrue(len(make_digest("摘要内容测试")) > 0)
+
+    def test_digest_fallback_samples_the_whole_article_within_wechat_limit(self) -> None:
+        body = (
+            "开头说明企业正在面对新的经营压力。\n\n"
+            "第二段补充背景，但不是全文的最终结论。\n\n"
+            "中段指出真正的关键是组织协作与决策效率。\n\n"
+            "随后给出流程调整和责任边界的具体方法。\n\n"
+            "结尾总结企业应把短期应对转化为长期能力建设。"
+        )
+        digest = make_digest(body)
+        self.assertLessEqual(len(digest), 120)
+        self.assertIn("组织协作与决策效率", digest)
+        self.assertIn("长期能力建设", digest)
+        self.assertNotEqual(digest, "".join(body.split())[:120])
 
     def test_renderer_separates_heading_from_body_and_hides_outline_labels(self) -> None:
         cfg = load_config()

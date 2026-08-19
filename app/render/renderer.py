@@ -282,8 +282,21 @@ def _render_markdown_table(value: Any) -> Markup:
     return Markup("".join(parts))
 
 
-def make_digest(body: str, limit: int = 54) -> str:
-    text = "".join(body.split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + "…"
+def make_digest(body: str, limit: int = 120) -> str:
+    """Build a bounded fallback from representative parts of the article."""
+    plain = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", str(body or ""))
+    plain = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", plain)
+    plain = re.sub(r"^[ \t]*#{1,6}[ \t]+", "", plain, flags=re.M)
+    plain = re.sub(r"[`*_>#]+", "", plain)
+    sentences = [
+        re.sub(r"\s+", "", item).strip("，,；;：:")
+        for item in re.split(r"(?<=[。！？!?])|\n+", plain)
+    ]
+    sentences = [item for item in sentences if len(item) >= 8]
+    if not sentences:
+        return re.sub(r"\s+", "", plain)[:limit]
+    selected: list[str] = []
+    for index in (0, len(sentences) // 2, len(sentences) - 1):
+        if sentences[index] not in selected:
+            selected.append(sentences[index])
+    return "".join(selected)[:limit]

@@ -8,6 +8,7 @@ from app.ads import render_ad_html, select_ad
 from app.ai.openai_compat import is_junk_title_or_subtitle
 from app.cover import generate_article_cover, pick_random_image_media_id, resolve_cover
 from app.inline_images import insert_inline_images, resolve_inline_images
+from app.ai import normalize_digest
 from app.render import finalize_article_html, make_digest
 from app.services.failures import sanitize_failure_text
 from app.wechat.template_snapshot import (
@@ -104,7 +105,7 @@ class RenderingStep:
         db.update_job(
             job_id,
             html_content=finalized.html,
-            digest=str(job.get("digest") or "").strip()
+            digest=normalize_digest(job.get("digest") or "")
             or make_digest(job.get("body") or ""),
             thumb_media_id=thumb,
             ad_id=(ad or {}).get("id") if ad else None,

@@ -23,6 +23,7 @@ class RewriteResult:
     body: str
     titles: list[str] = field(default_factory=list)
     subtitles: list[str] = field(default_factory=list)
+    digest: str = ""
     provider: str = ""
     raw: str = ""
 
@@ -41,6 +42,9 @@ def build_rewrite_user_prompt(topic: str, raw_content: str, instruction: str) ->
         f"{TITLE_CANDIDATE_COUNT} 个互不重复的主标题，subtitles 必须包含恰好 "
         f"{SUBTITLE_CANDIDATE_COUNT} 个互不重复的副标题。不得把 JSON 字段名、"
         "数组括号、引号或逗号当成标题内容。\n\n"
+        "【摘要硬性协议】最终结构化结果中的 digest 必须阅读全文后重新概括核心事实、"
+        "主要观点和结论，使用一段自然中文，不得照抄标题或正文第一段，含标点最多 "
+        "120 字。\n\n"
         f"【话题】\n{topic}\n\n"
         f"【原始内容（仅作参考，禁止照搬）】\n{raw_content[:12000]}\n"
     )
@@ -63,12 +67,14 @@ def parse_rewrite_output(text: str) -> RewriteResult:
         )
         titles = _as_str_list(data.get("titles") or data.get("title_list") or [])
         subtitles = _as_str_list(data.get("subtitles") or data.get("subtitle_list") or [])
+        digest = normalize_digest(data.get("digest") or data.get("summary") or "")
         # 允许仅返回 titles/subtitles（无 body）的 JSON，避免被当成解析失败
         if body or titles or subtitles:
             return RewriteResult(
                 body=body,
                 titles=titles[:TITLE_CANDIDATE_COUNT],
                 subtitles=subtitles[:SUBTITLE_CANDIDATE_COUNT],
+                digest=digest,
                 raw=text,
             )
 
@@ -87,6 +93,15 @@ def parse_rewrite_output(text: str) -> RewriteResult:
         subtitles=subtitles[:SUBTITLE_CANDIDATE_COUNT],
         raw=text,
     )
+
+
+def normalize_digest(value: Any, *, limit: int = 120) -> str:
+    """Return a plain, single-paragraph digest within WeChat's hard limit."""
+    text = str(value or "").strip()
+    text = re.sub(r"^\s*(?:摘要|内容摘要|文章摘要|summary)\s*[:：]\s*", "", text, flags=re.I)
+    text = re.sub(r"[`*_#>]+", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text[:limit]
 
 
 def normalize_model_body(text: str) -> str:

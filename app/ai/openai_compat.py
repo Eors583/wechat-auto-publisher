@@ -144,7 +144,7 @@ class OpenAICompatClient:
                 target_chars=target_chars,
             )
 
-        titles, subtitles = self._generate_titles_bundle(
+        titles, subtitles, digest = self._generate_titles_bundle(
             topic,
             body,
             instruction=instruction,
@@ -154,6 +154,7 @@ class OpenAICompatClient:
             body=body.strip(),
             titles=titles,
             subtitles=subtitles,
+            digest=digest,
             provider=self.provider_name,
             raw=body[:500],
         )
@@ -185,7 +186,7 @@ class OpenAICompatClient:
             instruction=instruction,
             target_chars=target_chars,
         )
-        titles, subtitles = self._generate_titles_bundle(
+        titles, subtitles, digest = self._generate_titles_bundle(
             topic,
             body,
             instruction=instruction,
@@ -195,6 +196,7 @@ class OpenAICompatClient:
             body=body,
             titles=titles,
             subtitles=subtitles,
+            digest=digest,
             provider=self.provider_name,
         )
 
@@ -281,10 +283,11 @@ class OpenAICompatClient:
         *,
         instruction: str = "",
         title_instruction: str = "",
-    ) -> tuple[list[str], list[str]]:
-        """生成标题+副标题；只用模型结果或正文真实摘录，绝不塞占位空话。"""
+    ) -> tuple[list[str], list[str], str]:
+        """同一次调用生成标题、副标题和基于全文的摘要。"""
         titles: list[str] = []
         subtitles: list[str] = []
+        digest = ""
         bundle_example = json.dumps(
             {
                 "titles": [
@@ -294,6 +297,7 @@ class OpenAICompatClient:
                     f"副标题候选{i}"
                     for i in range(1, SUBTITLE_CANDIDATE_COUNT + 1)
                 ],
+                "digest": "阅读全文后形成的120字以内摘要",
             },
             ensure_ascii=False,
         )
@@ -301,28 +305,31 @@ class OpenAICompatClient:
         prompt = (
             f"{_title_instruction_block(instruction, title_instruction)}\n\n"
             f"【当前阶段输出协议（优先级最高）】\n"
-            f"本阶段只生成主标题和副标题，不重新生成正文。必须输出下述 JSON。\n\n"
+            f"本阶段只生成主标题和副标题，并同时生成摘要，不重新生成正文。必须输出下述 JSON。\n\n"
             f"根据话题与正文，生成 {TITLE_CANDIDATE_COUNT} 个公众号主标题和 "
             f"{SUBTITLE_CANDIDATE_COUNT} 个副标题。\n"
             f"主标题：约 16–28 字，有点击欲，不要编号，彼此角度不同。\n"
             f"副标题：一句有信息量的说明，约 12–24 字；"
             f"严禁输出「关于××的关键补充」「补充1」等占位空话。\n"
+            f"摘要 digest：阅读全文后独立概括核心事实、主要观点和结论，不得照抄"
+            f"标题或第一段，含标点最多120字。\n"
             f"只输出 JSON（不要其它文字），titles 与 subtitles 数组都必须恰好包含 "
             f"{TITLE_CANDIDATE_COUNT} 项。格式示例：{bundle_example}\n\n"
-            f"【话题】{topic}\n\n【正文节选】\n{body[:3500]}\n"
+            f"【话题】{topic}\n\n【完整正文】\n{body[:12000]}\n"
         )
         try:
             content = self.complete(
                 prompt,
                 system=(
-                    "只输出合法 JSON。titles 与 subtitles 必须是真实可用文案，"
-                    f"各自必须恰好包含 {TITLE_CANDIDATE_COUNT} 项；"
-                    "禁止任何占位符、模板句。"
+                    "只输出合法 JSON。titles、subtitles 与 digest 必须是真实可用文案，"
+                    f"titles 与 subtitles 各自必须恰好包含 {TITLE_CANDIDATE_COUNT} 项；"
+                    "digest 必须基于全文且不超过120字；禁止任何占位符、模板句。"
                 ),
                 max_tokens=2600,
                 temperature=0.85,
             )
             parsed = parse_rewrite_output(content)
+            digest = parsed.digest
             titles = [
                 clean_candidate_text(t)
                 for t in parsed.titles
@@ -410,6 +417,7 @@ class OpenAICompatClient:
         return (
             titles[:TITLE_CANDIDATE_COUNT],
             subtitles[:SUBTITLE_CANDIDATE_COUNT],
+            digest,
         )
 
     def _generate_titles_only(

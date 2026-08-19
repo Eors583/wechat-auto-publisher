@@ -199,6 +199,8 @@ class FailoverRewriter:
                                 expanded.titles = result.titles
                             if not expanded.subtitles and result.subtitles:
                                 expanded.subtitles = result.subtitles
+                            if not expanded.digest and result.digest:
+                                expanded.digest = result.digest
                             result = expanded
                     result.titles = [
                         item

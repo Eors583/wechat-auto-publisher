@@ -208,6 +208,7 @@ class _RewriteProvider:
             body="生成后的正文",
             titles=_titles("主标题", 13),
             subtitles=_titles("副标题", 13),
+            digest="阅读全文后形成的经营决策摘要",
             provider="fake",
         )
 
@@ -253,6 +254,7 @@ def test_generation_rewrite_persists_at_most_ten_titles_and_subtitles() -> None:
 
     assert context.db.last_changes["titles_json"] == _titles("主标题", 13)[:10]
     assert context.db.last_changes["subtitles_json"] == _titles("副标题", 13)[:10]
+    assert context.db.last_changes["digest"] == "阅读全文后形成的经营决策摘要"
 
 
 def test_generation_title_optimization_persists_at_most_ten_candidates() -> None:
