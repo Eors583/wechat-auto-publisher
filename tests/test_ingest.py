@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 from app.providers import ingest
 
@@ -29,20 +30,7 @@ class _Client:
         return _Response()
 
 
-def _environment_error_page(monkeypatch) -> None:
-    monkeypatch.setattr(ingest.httpx, "Client", _Client)
-    monkeypatch.setattr(
-        ingest,
-        "_extract_with_trafilatura",
-        lambda _html, _url: (
-            "环境异常",
-            "视频 小程序 赞 轻点两下取消赞 在看 轻点两下取消在看" * 3,
-            [],
-        ),
-    )
-
 def test_environment_error_page_is_rejected_when_recovery_fails(monkeypatch) -> None:
-    _environment_error_page(monkeypatch)
     monkeypatch.setattr(
         "app.services.wechat_layout_import.fetch_wechat_article_layout",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
@@ -55,7 +43,6 @@ def test_environment_error_page_is_rejected_when_recovery_fails(monkeypatch) -> 
 
 
 def test_environment_error_page_recovers_through_existing_reader(monkeypatch) -> None:
-    _environment_error_page(monkeypatch)
     monkeypatch.setattr(
         "app.services.wechat_layout_import.fetch_wechat_article_layout",
         lambda *_args, **_kwargs: SimpleNamespace(
@@ -73,6 +60,24 @@ def test_environment_error_page_recovers_through_existing_reader(monkeypatch) ->
     assert result.title == "一篇真实的公众号文章"
     assert "第二段继续解释原因" in result.content
     assert result.images == ["https://mmbiz.qpic.cn/example.jpg"]
+    assert result.meta["extractor"] == "wechat-multichannel"
+
+
+def test_generic_url_uses_browser_headers(monkeypatch) -> None:
+    monkeypatch.setattr(ingest.httpx, "Client", _Client)
+    monkeypatch.setattr(
+        ingest,
+        "_extract_with_trafilatura",
+        lambda _html, _url: (
+            "普通文章",
+            "这是普通网页的完整正文内容。" * 10,
+            [],
+        ),
+    )
+
+    result = ingest.ingest_url("https://example.com/article")
+
+    assert result.title == "普通文章"
     assert "Chrome/151" in _Client.last_headers["User-Agent"]
     assert _Client.last_headers["Referer"] == "https://mp.weixin.qq.com/"
     assert _Client.last_headers["Accept-Language"].startswith("zh-CN")

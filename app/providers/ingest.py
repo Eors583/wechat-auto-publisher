@@ -43,6 +43,8 @@ def ingest_url(url: str, timeout: float = 30.0) -> IngestedContent:
     url = url.strip()
     if not url:
         raise ValueError("Empty URL")
+    if str(urlsplit(url).hostname or "").casefold() == "mp.weixin.qq.com":
+        return _ingest_wechat_url(url, timeout=timeout)
 
     headers = {
         "User-Agent": (
@@ -73,22 +75,7 @@ def ingest_url(url: str, timeout: float = 30.0) -> IngestedContent:
         raise ValueError(
             f"Failed to extract article body from URL: {url}. Please paste text manually."
         )
-    try:
-        _reject_block_page(title, content, url)
-    except ValueError:
-        if str(urlsplit(url).hostname or "").casefold() != "mp.weixin.qq.com":
-            raise
-        from app.services.wechat_layout_import import fetch_wechat_article_layout
-
-        recovered = fetch_wechat_article_layout(url, timeout=timeout)
-        title = recovered.title
-        content = unescape(_html_to_text(recovered.content_html))
-        images = re.findall(
-            r'<img[^>]+(?:data-src|src)=["\']([^"\']+)["\']',
-            recovered.content_html,
-            flags=re.I,
-        )
-        _reject_block_page(title, content, url)
+    _reject_block_page(title, content, url)
 
     return IngestedContent(
         title=title or "",
@@ -96,6 +83,29 @@ def ingest_url(url: str, timeout: float = 30.0) -> IngestedContent:
         source_url=url,
         images=images,
         meta={"extractor": "trafilatura/readability"},
+    )
+
+
+def _ingest_wechat_url(url: str, *, timeout: float) -> IngestedContent:
+    from app.services.wechat_layout_import import fetch_wechat_article_layout
+
+    recovered = fetch_wechat_article_layout(url, timeout=timeout)
+    content = unescape(_html_to_text(recovered.content_html))
+    images = [
+        unescape(value)
+        for value in re.findall(
+            r'<img[^>]+(?:data-src|src)=["\']([^"\']+)["\']',
+            recovered.content_html,
+            flags=re.I,
+        )
+    ]
+    _reject_block_page(recovered.title, content, url)
+    return IngestedContent(
+        title=recovered.title,
+        content=content,
+        source_url=url,
+        images=list(dict.fromkeys(images)),
+        meta={"extractor": "wechat-multichannel"},
     )
 
 

@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from app.services.wechat_layout_import import (
+    clear_wechat_article_cache,
     fetch_wechat_article_layout,
     parse_wechat_article_layout,
 )
@@ -40,6 +41,13 @@ WECHAT_PAGE = """
 </body>
 </html>
 """
+
+
+@pytest.fixture(autouse=True)
+def _clear_article_cache() -> None:
+    clear_wechat_article_cache()
+    yield
+    clear_wechat_article_cache()
 
 
 def test_public_wechat_layout_preserves_inline_structure_and_extracts_rules() -> None:
@@ -192,9 +200,10 @@ def test_fetch_uses_browser_headers_and_referer(monkeypatch: pytest.MonkeyPatch)
     )
 
     headers = dict(captured[0]["headers"])
-    assert "Mozilla/5.0" in str(headers["User-Agent"])
+    assert "MicroMessenger/8.0.50" in str(headers["User-Agent"])
     assert headers["Referer"] == "https://mp.weixin.qq.com/"
-    assert "Cookie" not in headers
+    assert headers["Cookie"] == "wxuin=test; pass_ticket=test-ticket"
+    assert headers["Cache-Control"] == "no-cache"
     assert captured[0]["follow_redirects"] is True
     assert len(captured) == 1
     assert result.title == "成熟排版示例"
@@ -228,14 +237,21 @@ def test_fetch_reports_wechat_captcha_without_requesting_login_state(
     assert "更新公众号后台登录态" not in str(exc_info.value)
 
 
-def test_fetch_retries_public_article_with_mobile_browser_profile(
+def test_fetch_switches_to_reader_immediately_after_captcha(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen_headers: list[dict[str, str]] = []
+    requested_urls: list[str] = []
+    reader_page = """
+    <html><head><meta property="og:title" content="验证码后备文章"></head><body>
+      <article><h1>验证码后备文章</h1><div class="content">
+        <p>验证码出现后应立即切换公开阅读后备，不再使用其他请求头重复访问微信。</p>
+      </div></article>
+    </body></html>
+    """
 
     class FakeClient:
-        def __init__(self, **kwargs: object) -> None:
-            seen_headers.append(dict(kwargs.get("headers") or {}))
+        def __init__(self, **_kwargs: object) -> None:
+            pass
 
         def __enter__(self) -> FakeClient:
             return self
@@ -244,29 +260,50 @@ def test_fetch_retries_public_article_with_mobile_browser_profile(
             return None
 
         def get(self, url: str) -> httpx.Response:
-            if len(seen_headers) == 1:
-                return httpx.Response(
-                    200,
-                    text="<html><body>captcha 环境异常</body></html>" * 40,
-                    request=httpx.Request("GET", url),
-                    extensions={
-                        "url": "https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha"
-                    },
-                )
+            requested_urls.append(url)
+            if url.startswith("https://api.readgzh.site/rd?"):
+                return httpx.Response(200, text=reader_page, request=httpx.Request("GET", url))
             return httpx.Response(
                 200,
-                text=WECHAT_PAGE,
+                text="<html><body>captcha 环境异常</body></html>" * 40,
                 request=httpx.Request("GET", url),
+                extensions={"url": "https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha"},
             )
 
     monkeypatch.setattr("app.services.wechat_layout_import.httpx.Client", FakeClient)
 
     result = fetch_wechat_article_layout("https://mp.weixin.qq.com/s/example")
 
-    assert result.title == "成熟排版示例"
-    assert "Mobile" not in seen_headers[0]["User-Agent"]
-    assert "Mobile" in seen_headers[1]["User-Agent"]
-    assert all("Cookie" not in headers for headers in seen_headers)
+    assert result.title == "验证码后备文章"
+    assert sum(url.startswith("https://mp.weixin.qq.com/") for url in requested_urls) == 1
+    assert sum(url.startswith("https://api.readgzh.site/rd?") for url in requested_urls) == 1
+
+
+def test_fetch_caches_successful_article_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests = 0
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            return httpx.Response(200, text=WECHAT_PAGE, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("app.services.wechat_layout_import.httpx.Client", FakeClient)
+
+    first = fetch_wechat_article_layout("https://mp.weixin.qq.com/s/cached?tracking=1")
+    second = fetch_wechat_article_layout("https://mp.weixin.qq.com/s/cached?tracking=2")
+
+    assert first.title == second.title == "成熟排版示例"
+    assert requests == 1
 
 
 def test_fetch_uses_public_reader_when_wechat_blocks_server(

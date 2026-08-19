@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
+import logging
 import re
+from threading import RLock
+import time
 from typing import Any, Iterable
 from urllib.parse import urlencode, urlsplit
 
@@ -18,6 +22,11 @@ from app.layout_profiles import normalize_layout, validate_layout
 _WECHAT_HOST = "mp.weixin.qq.com"
 _PUBLIC_READER_URL = "https://api.readgzh.site/rd"
 _MAX_ARTICLE_HTML_CHARS = 5_000_000
+_ARTICLE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+_ARTICLE_CACHE_MAX_ITEMS = 256
+_ARTICLE_PAGE_CACHE: OrderedDict[str, tuple[float, str]] = OrderedDict()
+_ARTICLE_PAGE_CACHE_LOCK = RLock()
+logger = logging.getLogger(__name__)
 _DIMENSION = re.compile(r"^(?:0|\d+(?:\.\d+)?(?:px|em|rem|%))$")
 _LINE_HEIGHT = re.compile(r"^\d+(?:\.\d+)?(?:px|em|rem|%)?$")
 _COLOR = re.compile(
@@ -35,24 +44,19 @@ _NAMED_COLORS = {
 }
 _BROWSER_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/151.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 12; SM-G9910) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 "
+        "MicroMessenger/8.0.50.2600(0x28003235) WeChat/arm64 Weixin "
+        "NetType/WIFI Language/zh_CN ABI/arm64"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,*/*;q=0.8"
     ),
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Referer": "https://mp.weixin.qq.com/",
-}
-_MOBILE_BROWSER_HEADERS = {
-    **_BROWSER_HEADERS,
-    "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/151.0.0.0 Mobile Safari/537.36"
-    ),
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
 }
 
 
@@ -78,6 +82,14 @@ def fetch_wechat_article_layout(
     """Fetch one public WeChat article and derive reusable account layout rules."""
 
     clean_url = _validate_wechat_article_url(url)
+    cached_page = _get_cached_article_page(clean_url)
+    if cached_page:
+        return parse_wechat_article_layout(
+            cached_page,
+            source_url=clean_url,
+            current_layout=current_layout,
+        )
+
     def fetch_page(request_headers: dict[str, str]) -> tuple[str, str]:
         with httpx.Client(
             headers=request_headers,
@@ -88,33 +100,33 @@ def fetch_wechat_article_layout(
             response.raise_for_status()
             return str(response.text or ""), str(response.url)
 
-    attempts = [dict(_BROWSER_HEADERS), dict(_MOBILE_BROWSER_HEADERS)]
+    request_headers = dict(_BROWSER_HEADERS)
     configured_cookie = str(cookie or "").strip()
     if configured_cookie:
-        cookie_headers = dict(_BROWSER_HEADERS)
-        cookie_headers["Cookie"] = configured_cookie
-        attempts.append(cookie_headers)
+        request_headers["Cookie"] = configured_cookie
 
     last_error: ValueError | None = None
     page = ""
     final_url = clean_url
-    for request_headers in attempts:
+    try:
         page, final_url = fetch_page(request_headers)
-        if len(page) < 500:
-            last_error = ValueError("微信返回了空页面，请确认文章链接可以公开访问")
-            continue
-        try:
+        if len(page) >= 500:
             _raise_for_wechat_access_page(page, final_url=final_url)
-        except ValueError as exc:
-            last_error = exc
-            continue
-        break
-    else:
+        else:
+            last_error = ValueError("微信返回了空页面，请确认文章链接可以公开访问")
+    except ValueError as exc:
+        last_error = exc
+    except httpx.HTTPError as exc:
+        last_error = ValueError("微信文章网络请求失败，系统正在切换备用解析通道")
+        logger.info("wechat direct channel unavailable: %s", type(exc).__name__)
+
+    if last_error:
         fallback_page = _fetch_public_reader_page(clean_url, timeout=timeout)
         if fallback_page:
             page = fallback_page
         else:
             raise last_error or ValueError("没有读取到微信文章正文")
+    _set_cached_article_page(clean_url, page)
     return parse_wechat_article_layout(
         page,
         # 微信可能为短链接补充查询参数或 hash；结果仍归属用户输入的
@@ -122,6 +134,47 @@ def fetch_wechat_article_layout(
         source_url=clean_url,
         current_layout=current_layout,
     )
+
+
+def clear_wechat_article_cache() -> None:
+    """Clear the bounded process cache; primarily useful for tests and operations."""
+
+    with _ARTICLE_PAGE_CACHE_LOCK:
+        _ARTICLE_PAGE_CACHE.clear()
+
+
+def _article_cache_key(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.path.startswith("/s/"):
+        return parsed.path.rstrip("/")
+    return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+
+
+def _get_cached_article_page(url: str) -> str:
+    key = _article_cache_key(url)
+    now = time.monotonic()
+    with _ARTICLE_PAGE_CACHE_LOCK:
+        cached = _ARTICLE_PAGE_CACHE.get(key)
+        if not cached:
+            return ""
+        expires_at, page = cached
+        if expires_at <= now:
+            _ARTICLE_PAGE_CACHE.pop(key, None)
+            return ""
+        _ARTICLE_PAGE_CACHE.move_to_end(key)
+        return page
+
+
+def _set_cached_article_page(url: str, page: str) -> None:
+    key = _article_cache_key(url)
+    with _ARTICLE_PAGE_CACHE_LOCK:
+        _ARTICLE_PAGE_CACHE[key] = (
+            time.monotonic() + _ARTICLE_CACHE_TTL_SECONDS,
+            page,
+        )
+        _ARTICLE_PAGE_CACHE.move_to_end(key)
+        while len(_ARTICLE_PAGE_CACHE) > _ARTICLE_CACHE_MAX_ITEMS:
+            _ARTICLE_PAGE_CACHE.popitem(last=False)
 
 
 def parse_wechat_article_layout(
@@ -276,10 +329,14 @@ def _raise_for_wechat_access_page(page: str, *, final_url: str) -> None:
         marker in lowered
         for marker in (
             "wappoc_appmsgcaptcha",
+            "weixin110",
+            "security_check",
             "captcha",
             "环境异常",
+            "请在微信客户端打开",
             "访问过于频繁",
             "操作频繁",
+            "去验证",
         )
     ):
         raise ValueError(
@@ -294,6 +351,7 @@ def _raise_for_wechat_access_page(page: str, *, final_url: str) -> None:
             "已停止访问该网页",
             "内容已被发布者删除",
             "该内容已被发布者删除",
+            "已被删除",
         )
     ):
         raise ValueError("这篇微信文章已删除、停用或不可公开访问，无法提取排版")
@@ -788,6 +846,7 @@ def _metadata_content(document: Any, name: str) -> str:
 __all__ = [
     "WeChatLayoutImport",
     "build_wechat_layout_preview",
+    "clear_wechat_article_cache",
     "fetch_wechat_article_layout",
     "parse_wechat_article_layout",
 ]
