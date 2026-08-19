@@ -139,6 +139,29 @@ def test_body_keeps_normal_prose_about_titles() -> None:
     assert "## 标题决定点击率" in result.body
 
 
+def test_candidate_sections_can_be_prefixed_or_placed_before_body() -> None:
+    result = parse_rewrite_output(
+        json.dumps(
+            {
+                "body": """## 二、10个标题
+1. 候选标题
+
+## 三、10个副标题
+1. 候选副标题
+
+# 真正的文章标题
+
+正文内容。""",
+                "titles": _titles("主标题", 10),
+                "subtitles": _titles("副标题", 10),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert result.body == "# 真正的文章标题\n\n正文内容。"
+
+
 def test_review_workbench_uses_clean_candidates_and_offers_subtitle_radio() -> None:
     job = {
         "title_candidates": [

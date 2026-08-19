@@ -103,18 +103,36 @@ def normalize_model_body(text: str) -> str:
 
 
 def strip_candidate_appendix(text: str) -> str:
-    """Remove title-candidate protocol sections accidentally appended to body."""
+    """Remove title-candidate protocol sections misplaced in the article body."""
 
-    heading = re.search(
-        r"""(?im)^[ \t]*(?:\#{1,6}[ \t]*)?(?:\*\*|__)?(?:【|\[)?[ \t]*
+    value = text or ""
+    heading_pattern = re.compile(
+        r"""(?ix)^[ \t]*(?:\#{1,6}[ \t]*)?(?:\*\*|__)?(?:【|\[)?[ \t]*
+        (?:(?:[一二三四五六七八九十百]+|\d+)[、.．）)][ \t]*)?
         (?:(?:\d+[ \t]*个[ \t]*)(?:主标题|标题|副标题)(?:候选)?|
            (?:主标题|标题|副标题)(?:候选|列表|方案|备选)|
            (?:候选|备选)(?:主标题|标题|副标题))
         [ \t]*(?:】|\])?(?:\*\*|__)?[ \t]*[:：]?[ \t]*$""",
-        text or "",
-        flags=re.X,
     )
-    return (text or "")[: heading.start()].strip() if heading else (text or "").strip()
+    lines = value.splitlines()
+    candidate_indexes = [
+        index for index, line in enumerate(lines) if heading_pattern.match(line)
+    ]
+    if not candidate_indexes:
+        return value.strip()
+
+    start = candidate_indexes[0]
+    last_candidate = candidate_indexes[-1]
+    next_article_heading = next(
+        (
+            index
+            for index in range(last_candidate + 1, len(lines))
+            if re.match(r"^[ \t]*\#{1,6}[ \t]+\S", lines[index])
+            and not heading_pattern.match(lines[index])
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[:start] + lines[next_article_heading:]).strip()
 
 
 def enforce_emphasis_rules(text: str) -> str:
