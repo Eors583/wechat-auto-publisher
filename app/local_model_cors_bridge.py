@@ -9,6 +9,7 @@ import socket
 import sys
 import threading
 import webbrowser
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -25,7 +26,7 @@ from app.local_credentials import (
     LocalCredentialStore,
     normalize_cockpit_api_base,
 )
-
+from app.local_wechat_extractor import WeChatExtractionError, fetch_wechat_article
 
 DEFAULT_ORIGIN = "https://api.bluebloodlab.cn"
 DEFAULT_HOST = "127.0.0.1:11798"
@@ -36,6 +37,8 @@ MODEL_ROUTES = {
     ("GET", "/v1/models"),
     ("POST", "/v1/chat/completions"),
 }
+BROWSER_ROUTES = {*MODEL_ROUTES, ("POST", "/extract/wechat")}
+MAX_EXTRACT_URLS = 10
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -57,6 +60,7 @@ def create_handler(
     allowed_host: str = DEFAULT_HOST,
     credential_store: Any | None = None,
     agent_controller: Any | None = None,
+    article_fetcher: Callable[[str], dict[str, Any]] | None = None,
     request_timeout: float = 620.0,
 ) -> type[BaseHTTPRequestHandler]:
     """Create the loopback-only HTTP handler used by the Windows bridge."""
@@ -67,6 +71,7 @@ def create_handler(
     # Cockpit is always loopback. Never inherit system proxy settings and never
     # follow a redirect that could carry the locally stored Bearer key away.
     local_opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
+    fetch_article = article_fetcher or fetch_wechat_article
 
     class BridgeHandler(BaseHTTPRequestHandler):
         server_version = "BlueBloodLabCockpitBridge/1"
@@ -285,7 +290,7 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
             allowed = (
                 requested_method == "GET"
                 if path == "/health"
-                else (requested_method, path) in MODEL_ROUTES
+                else (requested_method, path) in BROWSER_ROUTES
             )
             if not allowed:
                 self._send_json(405, {"error": "method not allowed"}, cors=True)
@@ -324,7 +329,87 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
             if path == "/setup":
                 self._save_setup()
                 return
+            if path == "/extract/wechat":
+                self._extract_wechat()
+                return
             self._proxy_model()
+
+        def _extract_wechat(self) -> None:
+            cors = self.headers.get("Origin") == allowed_origin
+            if not self._host_allowed():
+                self._send_json(403, {"error": "host not allowed"}, cors=cors)
+                return
+            if not self._origin_allowed(required=True):
+                self._send_json(403, {"error": "origin not allowed"}, cors=False)
+                return
+            if self.headers.get("Authorization"):
+                self._send_json(400, {"error": "authorization is not accepted"}, cors=True)
+                return
+            content_type = str(self.headers.get("Content-Type") or "")
+            if content_type.split(";", 1)[0].strip().casefold() != "application/json":
+                self._send_json(415, {"error": "JSON required"}, cors=True)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length <= 0 or length > MAX_BODY_BYTES:
+                self._send_json(413, {"error": "request body too large"}, cors=True)
+                return
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                urls = payload.get("urls") if isinstance(payload, dict) else None
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"error": "invalid JSON"}, cors=True)
+                return
+            if (
+                not isinstance(urls, list)
+                or not urls
+                or len(urls) > MAX_EXTRACT_URLS
+                or any(not isinstance(item, str) for item in urls)
+            ):
+                self._send_json(
+                    400,
+                    {"error": {"code": "invalid_urls", "message": "请提交 1 至 10 个微信文章链接。"}},
+                    cors=True,
+                )
+                return
+            items: list[dict[str, Any]] = []
+            response_bytes = 0
+            try:
+                for url in urls:
+                    item = fetch_article(url)
+                    response_bytes += len(
+                        str(item.get("title") or "").encode("utf-8")
+                    ) + len(str(item.get("content") or "").encode("utf-8"))
+                    if response_bytes > MAX_BODY_BYTES:
+                        self._send_json(
+                            413,
+                            {
+                                "error": {
+                                    "code": "extracted_content_too_large",
+                                    "message": "提取后的参考资料总长度超过限制。",
+                                }
+                            },
+                            cors=True,
+                        )
+                        return
+                    items.append(item)
+            except WeChatExtractionError as exc:
+                self._send_json(
+                    422,
+                    {"error": {"code": exc.code, "message": str(exc)}},
+                    cors=True,
+                )
+                return
+            except Exception:
+                self._send_json(
+                    502,
+                    {"error": {"code": "local_extract_failed", "message": "本机获取微信文章失败。"}},
+                    cors=True,
+                )
+                return
+            self._send_json(200, {"items": items}, cors=True)
 
         def _health(self) -> None:
             cors = self.headers.get("Origin") == allowed_origin

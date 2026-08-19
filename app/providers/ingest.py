@@ -11,6 +11,16 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _reject_block_page(title: str, content: str, source_url: str | None = None) -> None:
+    combined = f"{title}\n{content}"
+    if "环境异常" in combined:
+        suffix = f"：{source_url}" if source_url else ""
+        raise ValueError(
+            "微信公众号返回了“环境异常”拦截页，未获取到真实文章正文。"
+            f"请稍后重试或直接粘贴正文{suffix}"
+        )
+
+
 @dataclass
 class IngestedContent:
     title: str = ""
@@ -24,6 +34,7 @@ def ingest_text(text: str, title: str = "", source_url: str | None = None) -> In
     cleaned = text.strip()
     if not cleaned:
         raise ValueError("Empty text content")
+    _reject_block_page(title, cleaned, source_url)
     return IngestedContent(title=title.strip(), content=cleaned, source_url=source_url)
 
 
@@ -53,11 +64,7 @@ def ingest_url(url: str, timeout: float = 30.0) -> IngestedContent:
         raise ValueError(
             f"Failed to extract article body from URL: {url}. Please paste text manually."
         )
-    if "环境异常" in title or "环境异常" in content:
-        raise ValueError(
-            "微信公众号返回了“环境异常”拦截页，未获取到真实文章正文。"
-            f"请稍后重试或直接粘贴正文：{url}"
-        )
+    _reject_block_page(title, content, url)
 
     return IngestedContent(
         title=title or "",

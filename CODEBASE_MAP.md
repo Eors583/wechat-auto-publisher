@@ -141,7 +141,8 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `app/launcher.py` | Desktop startup, remote URL mode, owned API child process and native/browser fallback. Use this for application lifecycle changes, not UI navigation. |
 | `app/local_agent.py` | Windows Companion lifecycle: single-instance lock, pairing, HTTPS long polling, lease renewal, result replay and fixed Cockpit 11797 calls. |
 | `app/local_credentials.py` | Windows CurrentUser DPAPI-only storage for the Cockpit key, Agent token and pending result state. Never replace with the production credential encryption key. |
-| `app/local_model_cors_bridge.py` | Loopback-only 11798 compatibility bridge and `/setup`; exact Origin/Host/routes, no system proxy, local key injection and sanitized responses. |
+| `app/local_model_cors_bridge.py` | Loopback-only 11798 compatibility bridge and `/setup`; exact Origin/Host/routes, local key injection, sanitized model responses and browser-triggered local WeChat extraction. |
+| `app/local_wechat_extractor.py` | Standard-library WeChat article URL validation, user-network HTML fetching, `js_content` extraction and verification/error-page rejection for the standalone bridge. |
 | `app/config.py` | Loads YAML + environment substitutions; computes `_root`, `_data_dir`, `_db_target`; `database_target` enforces PostgreSQL runtime. |
 | `app/db.py` | Schema initialization/migrations, user scoping and every CRUD method. Add persistence here before writing service logic. Large hotspot: do not issue raw customer-table SQL elsewhere. |
 | `app/db_backend.py` | PostgreSQL compatibility layer, schema SQL conversion, cursor/connection wrappers and integrity-error mapping. |

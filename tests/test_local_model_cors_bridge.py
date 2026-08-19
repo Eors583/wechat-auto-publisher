@@ -4,10 +4,11 @@ import json
 import re
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Iterator
+from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -15,7 +16,6 @@ from urllib.request import Request, urlopen
 import pytest
 
 from app.local_model_cors_bridge import MAX_BODY_BYTES, create_handler
-
 
 ORIGIN = "https://api.bluebloodlab.cn"
 
@@ -102,6 +102,7 @@ def _running_bridge(
     key: str = "local-secret",
     status: int = 200,
     request_timeout: float = 1,
+    article_fetcher: Any | None = None,
 ) -> Iterator[tuple[str, _MemoryStore, dict[str, Any]]]:
     state: dict[str, Any] = {
         "expected_key": "local-secret",
@@ -122,6 +123,7 @@ def _running_bridge(
             allowed_origin=ORIGIN,
             allowed_host="",
             credential_store=store,
+            article_fetcher=article_fetcher,
             request_timeout=request_timeout,
         ),
     )
@@ -180,6 +182,65 @@ def test_bridge_adds_private_network_cors_and_injects_local_key() -> None:
         assert headers["Access-Control-Allow-Origin"] == ORIGIN
         assert state["authorization"] == "Bearer local-secret"
         assert b"local-secret" not in state["body"]
+
+
+def test_bridge_extracts_wechat_articles_for_exact_production_origin() -> None:
+    seen: list[str] = []
+
+    def fetcher(url: str) -> dict[str, Any]:
+        seen.append(url)
+        return {
+            "title": "本机文章",
+            "content": "这是在用户电脑上获取并解析的完整公众号正文。" * 5,
+            "source_url": url,
+            "images": [],
+        }
+
+    with _running_bridge(article_fetcher=fetcher) as (base, _store, _state):
+        preflight = Request(
+            f"{base}/extract/wechat",
+            method="OPTIONS",
+            headers={
+                "Origin": ORIGIN,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type, Accept",
+            },
+        )
+        with urlopen(preflight) as response:  # noqa: S310
+            assert response.status == 204
+            assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
+
+        url = "https://mp.weixin.qq.com/s/local-example"
+        request = Request(
+            f"{base}/extract/wechat",
+            data=json.dumps({"urls": [url]}).encode(),
+            method="POST",
+            headers={
+                "Origin": ORIGIN,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        status, payload, headers = _open_json(request)
+        assert status == 200
+        assert seen == [url]
+        assert payload["items"][0]["title"] == "本机文章"
+        assert headers["Access-Control-Allow-Origin"] == ORIGIN
+
+
+def test_bridge_extract_route_rejects_missing_origin() -> None:
+    with _running_bridge(article_fetcher=lambda _url: {}) as (base, _store, _state):
+        request = Request(
+            f"{base}/extract/wechat",
+            data=json.dumps(
+                {"urls": ["https://mp.weixin.qq.com/s/local-example"]}
+            ).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        status, payload, _headers = _open_json(request)
+        assert status == 403
+        assert payload["error"] == "origin not allowed"
 
 
 @pytest.mark.parametrize(

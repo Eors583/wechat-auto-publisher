@@ -95,6 +95,80 @@ from app.wechat.client import WeChatClient
 from app.wechat.factory import build_wechat_client
 from app.wechat.template_snapshot import load_template_snapshot
 
+
+def _local_wechat_extraction_script(urls: list[str]) -> str:
+    serialized_urls = json.dumps(urls, ensure_ascii=False)
+    return f"""
+async () => {{
+  const urls = {serialized_urls};
+  const controller = new AbortController();
+  const timeoutMs = Math.min(220000, Math.max(30000, urls.length * 25000));
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {{
+    const response = await fetch('http://127.0.0.1:11798/extract/wechat', {{
+      method: 'POST',
+      mode: 'cors',
+      credentials: 'omit',
+      headers: {{'Content-Type': 'application/json', 'Accept': 'application/json'}},
+      body: JSON.stringify({{urls}}),
+      signal: controller.signal,
+    }});
+    let data = {{}};
+    try {{ data = await response.json(); }} catch (_error) {{}}
+    const detail = data?.error;
+    return {{
+      ok: response.ok,
+      status: response.status,
+      data,
+      code: typeof detail === 'object' ? String(detail?.code || '') : '',
+      error: typeof detail === 'object'
+        ? String(detail?.message || '')
+        : String(detail || ''),
+    }};
+  }} catch (error) {{
+    return {{
+      ok: false,
+      status: 0,
+      code: error?.name === 'AbortError' ? 'local_extract_timeout' : 'bridge_unreachable',
+      error: String(error?.message || error || 'Failed to fetch'),
+    }};
+  }} finally {{
+    clearTimeout(timer);
+  }}
+}}
+"""
+
+
+def _local_wechat_error_message(result: Any) -> str:
+    if not isinstance(result, dict):
+        return "本机助手没有返回有效结果，请重新启动最新桥接器。"
+    status = int(result.get("status") or 0)
+    code = str(result.get("code") or "")
+    detail = str(result.get("error") or "").strip()
+    if status == 404:
+        return "当前运行的是旧版桥接器，请退出后重新下载并启动最新版 EXE。"
+    if status == 0:
+        return (
+            "浏览器未连接到本机助手。请启动最新版桥接器，并在浏览器提示中允许"
+            "“设备上的应用/本地网络访问”；杀毒软件或本机进程拦截也可能导致此错误。"
+        )
+    if code == "wechat_blocked":
+        return detail or "微信向用户电脑返回了验证/拦截页，请打开原文完成验证后重试。"
+    return detail or f"本机获取公众号文章失败（HTTP {status}）。"
+
+
+def _compose_local_wechat_content(items: list[dict[str, Any]]) -> str:
+    sections: list[str] = []
+    for index, item in enumerate(items, 1):
+        title = str(item.get("title") or item.get("source_url") or "未命名").strip()
+        source_url = str(item.get("source_url") or "").strip()
+        content = str(item.get("content") or "").strip()
+        sections.append(
+            f"【本机获取的参考资料 {index}：{title}】\n"
+            f"来源：{source_url}\n{content}"
+        )
+    return "\n\n".join(sections)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -1909,6 +1983,7 @@ def _build_wizard(
         async def start_rewrite() -> None:
             nonlocal active_batch_service, active_batch_id
             nonlocal active_stop_requested
+            owner_client = ui.context.client
             if state.busy:
                 ui.notify("已有任务在处理", type="warning")
                 return
@@ -1924,6 +1999,7 @@ def _build_wizard(
                 for line in str(references_in.value or "").splitlines()
                 if line.strip()
             ]
+            reference_urls = list(dict.fromkeys(reference_urls))
             if source_mode_value == "topic" and not topic:
                 topic = "由 AI 自动策划选题"
                 set_topic(topic, "manual")
@@ -1982,6 +2058,62 @@ def _build_wizard(
             if url:
                 append_log(f"链接：{url}")
             append_log(f"目标公众号：{len(selected_accounts)} 个")
+
+            source_urls = (
+                [url]
+                if source_mode_value == "link"
+                else reference_urls
+                if source_mode_value == "references"
+                else []
+            )
+            use_local_wechat = bool(source_urls) and all(
+                item.casefold().startswith("https://mp.weixin.qq.com/s")
+                for item in source_urls
+            )
+            if use_local_wechat:
+                status_label.text = "本机获取原文…"
+                progress_stage.text = "正在通过本机助手获取公众号正文"
+                progress_hint.text = "原文由当前浏览器所在电脑访问，不经过生产服务器抓取"
+                append_log("正在通过本机助手获取并清洗公众号正文…")
+                try:
+                    local_result = await owner_client.run_javascript(
+                        _local_wechat_extraction_script(source_urls),
+                        timeout=230,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    local_result = {
+                        "ok": False,
+                        "status": 0,
+                        "error": sanitize_failure_text(exc),
+                    }
+                items = (
+                    list((local_result.get("data") or {}).get("items") or [])
+                    if isinstance(local_result, dict) and local_result.get("ok")
+                    else []
+                )
+                if len(items) != len(source_urls):
+                    safe_error = _local_wechat_error_message(local_result)
+                    state.busy = False
+                    show_rewrite_action(running=False)
+                    status_label.text = "本机获取失败"
+                    progress_stage.text = "未创建生成任务"
+                    progress_percent.text = "未开始"
+                    progress_hint.text = safe_error
+                    append_log(f"本机获取失败：{safe_error}")
+                    ui.notify(safe_error, type="negative", timeout=15000)
+                    active_batch_service = None
+                    return
+                text = _compose_local_wechat_content(items)
+                source_mode_value = "text"
+                reference_urls = []
+                url = source_urls[0]
+                for index, item in enumerate(items, 1):
+                    append_log(
+                        f"已获取参考资料 {index}："
+                        f"{str(item.get('title') or '未命名')}（{len(str(item.get('content') or ''))} 字）"
+                    )
+                append_log("正文已在本机校验，正在提交生产任务…")
+
             append_log("正在检查公众号、模型、模板和素材接口…")
             preflight_ok = await confirm_preflight(selected_accounts)
             if not ui_alive():

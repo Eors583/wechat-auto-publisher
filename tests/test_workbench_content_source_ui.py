@@ -46,3 +46,16 @@ def test_topic_is_optional_for_every_source_mode() -> None:
     assert 'if not topic:\n                ui.notify("请先选择或输入话题"' not in desktop_source
     assert 'if mode == "link":\n                return bool(str(url_in.value' in desktop_source
     assert 'if mode == "text":\n                return bool(str(text_in.value' in desktop_source
+
+
+def test_wechat_links_are_extracted_by_the_user_local_bridge_before_batch_creation() -> None:
+    desktop_source = (ROOT / "app" / "ui" / "desktop.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "http://127.0.0.1:11798/extract/wechat" in desktop_source
+    assert "正在通过本机助手获取公众号正文" in desktop_source
+    assert "source_mode_value = \"text\"" in desktop_source
+    assert "reference_urls = []" in desktop_source
+    assert "raw_content=text or None" in desktop_source
+    assert "targetAddressSpace" not in desktop_source

@@ -2,11 +2,12 @@ BlueBloodLab Cockpit 本地 API 桥接器（免安装便携版）
 
 用途：
 - 只为 https://api.bluebloodlab.cn 提供浏览器到本机 Cockpit Tools 的安全桥接。
+- 在“文章链接/多篇参考”模式下，可由这台电脑获取公众号正文，避免生产服务器被微信拦截。
 - 不包含公众号主程序、数据库、飞书、微信发布或后台 Companion。
 - 使用本包时，生产网页必须保持打开；需要关闭网页后继续任务时请安装完整 Companion。
 
 使用：
-1. 解压整个 ZIP，双击 BlueBloodLab-Cockpit-Bridge-*.exe。
+1. 直接双击下载的 BlueBloodLab-Cockpit-Bridge-*.exe（ZIP 包用户需先解压）。
 2. 浏览器会自动打开 http://127.0.0.1:11798/setup。
 3. 填写 Cockpit Tools 实际的 API Base URL，例如 http://127.0.0.1:21888。
 4. 填写 Cockpit API Key，点击“验证并保存本机连接”。
