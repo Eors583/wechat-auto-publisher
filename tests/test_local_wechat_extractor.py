@@ -72,6 +72,8 @@ def test_server_rejects_locally_submitted_environment_error_text() -> None:
 def test_browser_script_calls_local_extractor_without_address_space_override() -> None:
     script = _local_wechat_extraction_script(["https://mp.weixin.qq.com/s/example"])
 
+    assert script.strip().startswith("(async () => {")
+    assert script.strip().endswith("})()")
     assert "http://127.0.0.1:11798/extract/wechat" in script
     assert "credentials: 'omit'" in script
     assert "targetAddressSpace" not in script

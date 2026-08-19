@@ -99,7 +99,7 @@ from app.wechat.template_snapshot import load_template_snapshot
 def _local_wechat_extraction_script(urls: list[str]) -> str:
     serialized_urls = json.dumps(urls, ensure_ascii=False)
     return f"""
-async () => {{
+(async () => {{
   const urls = {serialized_urls};
   const controller = new AbortController();
   const timeoutMs = Math.min(220000, Math.max(30000, urls.length * 25000));
@@ -135,7 +135,7 @@ async () => {{
   }} finally {{
     clearTimeout(timer);
   }}
-}}
+}})()
 """
 
 
