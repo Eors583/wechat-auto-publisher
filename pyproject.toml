@@ -1,6 +1,6 @@
 [project]
 name = "wechat-auto-publisher"
-version = "1.4.0"
+version = "1.4.2"
 description = "Local CLI to rewrite articles and push WeChat Official Account drafts"
 readme = "README.md"
 requires-python = ">=3.11"

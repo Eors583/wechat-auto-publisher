@@ -38,12 +38,12 @@ def test_cockpit_bridge_download_is_an_exact_non_browsable_file_route() -> None:
     ).read_text(encoding="utf-8")
 
     assert (
-        "location = /downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe"
+        "location = /downloads/BlueBloodLab-Cockpit-Bridge-1.4.2.exe"
         in nginx
     )
     assert (
         "alias /opt/wechat-publisher/shared/downloads/"
-        "BlueBloodLab-Cockpit-Bridge-1.4.1.exe;"
+        "BlueBloodLab-Cockpit-Bridge-1.4.2.exe;"
         in nginx
     )
     assert "default_type application/octet-stream;" in nginx

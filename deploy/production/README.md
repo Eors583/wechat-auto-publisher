@@ -62,12 +62,12 @@ Docker 镜像、执行健康检查并切换 `current` 软链接。生产密钥�
 仅在 EXE 已完成生产代码签名与校验后，将便携桥接器放到：
 
 ```text
-/opt/wechat-publisher/shared/downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe
+/opt/wechat-publisher/shared/downloads/BlueBloodLab-Cockpit-Bridge-1.4.2.exe
 ```
 
-生产 Nginx 通过精确 `/downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe`
+生产 Nginx 通过精确 `/downloads/BlueBloodLab-Cockpit-Bridge-1.4.2.exe`
 路由提供下载，不开启目录浏览。上传后执行 `nginx -t` 并重载 Nginx，再校验下载文件
-SHA-256 与构建产物一致。
+SHA-256 与构建产物一致。旧版本的精确下载路由可保留兼容，但页面下载入口只指向最新版本。
 
 服务器本身使用固定出口 IP 时保持 `WECHAT_RELAY_ENABLED=false`，并把服务器
 公网出口 IP 加入每个公众号的微信开发者 IP 白名单。

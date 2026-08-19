@@ -39,7 +39,7 @@ from app.ui.local_model_bridge import (
 
 LOCAL_BRIDGE_DOWNLOAD_URL = (
     "https://api.bluebloodlab.cn/downloads/"
-    "BlueBloodLab-Cockpit-Bridge-1.4.1.exe"
+    "BlueBloodLab-Cockpit-Bridge-1.4.2.exe"
 )
 
 

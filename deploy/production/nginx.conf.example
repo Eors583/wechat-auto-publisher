@@ -70,6 +70,14 @@ server {
 
     client_max_body_size 30m;
 
+    location = /downloads/BlueBloodLab-Cockpit-Bridge-1.4.2.exe {
+        alias /opt/wechat-publisher/shared/downloads/BlueBloodLab-Cockpit-Bridge-1.4.2.exe;
+        default_type application/octet-stream;
+        add_header Content-Disposition 'attachment; filename="BlueBloodLab-Cockpit-Bridge-1.4.2.exe"' always;
+        add_header X-Content-Type-Options nosniff always;
+    }
+
+    # Keep the previous direct URL available for users who already received it.
     location = /downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe {
         alias /opt/wechat-publisher/shared/downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe;
         default_type application/octet-stream;

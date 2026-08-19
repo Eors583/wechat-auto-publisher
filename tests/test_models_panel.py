@@ -295,7 +295,7 @@ def test_model_editor_guides_users_to_download_and_run_portable_bridge(
         if getattr(item, "text", None) == "1. 直接下载本机桥接器（Windows EXE）"
     )
     assert str(download._props.get("href") or "").endswith(
-        "/downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe"
+        "/downloads/BlueBloodLab-Cockpit-Bridge-1.4.2.exe"
     )
     assert "2. 双击下载的 EXE，并保持桥接器窗口打开。" in texts
     assert any("填写 Cockpit 实际地址和 Key" in text for text in texts)
