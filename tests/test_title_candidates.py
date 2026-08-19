@@ -88,6 +88,57 @@ def test_rewrite_and_title_results_preserve_ten_candidates() -> None:
     assert optimized.titles == titles[:10]
 
 
+def test_structured_rewrite_strips_candidate_lists_accidentally_put_in_body() -> None:
+    titles = _titles("主标题", 10)
+    subtitles = _titles("副标题", 10)
+    contaminated_body = """开场正文。
+
+## 经营韧性来自组织能力
+
+这里是完整文章的结尾。
+
+10个标题
+1. 不应出现在正文里的候选标题
+2. 第二个候选标题
+
+10个副标题
+1. 不应出现在正文里的候选副标题
+"""
+
+    result = parse_rewrite_output(
+        json.dumps(
+            {
+                "body": contaminated_body,
+                "titles": titles,
+                "subtitles": subtitles,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert result.body.endswith("这里是完整文章的结尾。")
+    assert "10个标题" not in result.body
+    assert "候选副标题" not in result.body
+    assert result.titles == titles
+    assert result.subtitles == subtitles
+
+
+def test_body_keeps_normal_prose_about_titles() -> None:
+    result = parse_rewrite_output(
+        json.dumps(
+            {
+                "body": "文章标题决定第一印象。\n\n## 标题决定点击率\n\n正文继续。",
+                "titles": _titles("主标题", 10),
+                "subtitles": _titles("副标题", 10),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert "文章标题决定第一印象" in result.body
+    assert "## 标题决定点击率" in result.body
+
+
 def test_review_workbench_uses_clean_candidates_and_offers_subtitle_radio() -> None:
     job = {
         "title_candidates": [

@@ -99,7 +99,22 @@ def normalize_model_body(text: str) -> str:
         or literal_breaks >= max(2, actual_breaks * 2)
     ):
         value = value.replace(r"\r\n", "\n").replace(r"\n", "\n")
-    return value.strip()
+    return strip_candidate_appendix(value)
+
+
+def strip_candidate_appendix(text: str) -> str:
+    """Remove title-candidate protocol sections accidentally appended to body."""
+
+    heading = re.search(
+        r"""(?im)^[ \t]*(?:\#{1,6}[ \t]*)?(?:\*\*|__)?(?:【|\[)?[ \t]*
+        (?:(?:\d+[ \t]*个[ \t]*)(?:主标题|标题|副标题)(?:候选)?|
+           (?:主标题|标题|副标题)(?:候选|列表|方案|备选)|
+           (?:候选|备选)(?:主标题|标题|副标题))
+        [ \t]*(?:】|\])?(?:\*\*|__)?[ \t]*[:：]?[ \t]*$""",
+        text or "",
+        flags=re.X,
+    )
+    return (text or "")[: heading.start()].strip() if heading else (text or "").strip()
 
 
 def enforce_emphasis_rules(text: str) -> str:

@@ -7,6 +7,7 @@ from app.ai import (
     SUBTITLE_CANDIDATE_COUNT,
     TITLE_CANDIDATE_COUNT,
     clean_candidate_text,
+    normalize_model_body,
 )
 from app.ai.openai_compat import is_junk_title_or_subtitle
 from app.providers.ingest import ingest_text, ingest_url, ingest_urls
@@ -101,7 +102,7 @@ class GenerationSteps:
             )
         db.update_job(
             job_id,
-            body=result.body,
+            body=normalize_model_body(result.body),
             titles_json=titles,
             subtitles_json=subtitles,
             selected_title=titles[0] if titles else None,
