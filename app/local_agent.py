@@ -17,13 +17,16 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.local_credentials import LocalCredentialStore, LocalSecureStateStore
+from app.local_credentials import (
+    DEFAULT_COCKPIT_API_BASE,
+    LocalCredentialStore,
+    LocalSecureStateStore,
+    normalize_cockpit_api_base,
+)
 from app.local_model_cors_bridge import create_handler
 
 
 DEFAULT_REMOTE_URL = "https://api.bluebloodlab.cn/publisher/"
-COCKPIT_CHAT_URL = "http://127.0.0.1:11797/v1/chat/completions"
-COCKPIT_MODELS_URL = "http://127.0.0.1:11797/v1/models"
 SETUP_URL = "http://127.0.0.1:11798/setup"
 MAX_JOB_BYTES = 16 * 1024 * 1024
 TOKEN_REJECTION_CODES = {
@@ -150,6 +153,15 @@ class LocalAgent:
     def _save_state(self) -> None:
         with self._state_lock:
             self.state_store.save(self.state)
+
+    def _cockpit_api_base(self) -> str:
+        loader = getattr(self.credential_store, "load_cockpit_api_base", None)
+        if callable(loader):
+            try:
+                return normalize_cockpit_api_base(loader())
+            except (OSError, ValueError):
+                pass
+        return DEFAULT_COCKPIT_API_BASE
 
     def public_status(self) -> dict[str, Any]:
         with self._state_lock:
@@ -328,7 +340,7 @@ class LocalAgent:
         try:
             with httpx.Client(trust_env=False, timeout=5) as client:
                 response = client.get(
-                    COCKPIT_MODELS_URL,
+                    f"{self._cockpit_api_base()}/v1/models",
                     headers={"Authorization": f"Bearer {key}"},
                 )
             if response.status_code in {401, 403}:
@@ -440,7 +452,7 @@ class LocalAgent:
             ) as client:
                 with client.stream(
                     "POST",
-                    COCKPIT_CHAT_URL,
+                    f"{self._cockpit_api_base()}/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json",
@@ -683,7 +695,6 @@ def local_agent_self_test(directory: str | Path) -> dict[str, Any]:
 
 
 __all__ = [
-    "COCKPIT_CHAT_URL",
     "DEFAULT_REMOTE_URL",
     "LocalAgent",
     "SingleInstanceLock",

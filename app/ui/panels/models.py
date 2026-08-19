@@ -398,7 +398,7 @@ def build_models_panel(
                             "生成期间请保持 HTTPS 页面打开；本地服务必须允许当前网页跨域访问。"
                         ).classes("muted")
                         ui.label(
-                            "Cockpit Tools 经本地桥接器使用 11798；桥接器再安全转发到 Cockpit 的 11797。"
+                            "Cockpit Tools 经本地桥接器使用 11798；Cockpit 自己的地址和端口在本机助手设置页填写。"
                         ).classes("muted")
                         ui.label(
                             "绑定 Companion 后网页可以关闭；未绑定时才使用当前浏览器临时转发。"

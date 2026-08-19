@@ -1,7 +1,7 @@
 #define MyAppName "公众号改写助手"
 #define MyAppPublisher "蓝血研究"
 #define MyAppExeName "公众号改写助手.exe"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.4.1"
 #ifndef MyRemoteUrl
   #define MyRemoteUrl "https://api.bluebloodlab.cn/publisher/"
 #endif
@@ -10,7 +10,7 @@
   #define MyAppId "{{B5B0F085-6C6D-44F5-9D53-3895929B36EE}"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename MyAppName + "-受控测试安装包-" + MyAppVersion + "-20260818"
+  #define MyOutputBaseFilename MyAppName + "-受控测试安装包-" + MyAppVersion + "-20260819"
 #endif
 
 [Setup]

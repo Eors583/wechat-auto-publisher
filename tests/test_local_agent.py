@@ -28,11 +28,19 @@ class _StateStore:
 
 
 class _CredentialStore:
-    def __init__(self, key: str = "") -> None:
+    def __init__(
+        self,
+        key: str = "",
+        api_base: str = "http://127.0.0.1:11797",
+    ) -> None:
         self.key = key
+        self.api_base = api_base
 
     def load_api_key(self) -> str:
         return self.key
+
+    def load_cockpit_api_base(self) -> str:
+        return self.api_base
 
 
 def test_companion_requires_production_https() -> None:
@@ -163,6 +171,59 @@ def test_companion_caps_cockpit_response_bytes(monkeypatch) -> None:
     result = agent._run_cockpit_job(job)
     assert result["status"] == "failed"
     assert "16 MiB" in result["error"]
+
+
+def test_companion_uses_locally_configured_cockpit_port(monkeypatch) -> None:
+    requested: list[str] = []
+
+    class _Response:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):
+            yield b'{"choices":[{"message":{"content":"OK"}}]}'
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, _method, url, **_kwargs):
+            requested.append(url)
+            return _Response()
+
+    monkeypatch.setattr("app.local_agent.httpx.Client", _Client)
+    agent = LocalAgent(
+        state_store=_StateStore(),
+        credential_store=_CredentialStore(
+            "local-key",
+            "http://127.0.0.1:27891/v1",
+        ),
+    )
+    result = agent._run_cockpit_job(
+        {
+            "request_id": "request-1",
+            "attempt_id": "attempt-12345678",
+            "nonce": "nonce-1234567890",
+            "payload": {"model": "gpt-5.5", "messages": []},
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert requested == ["http://127.0.0.1:27891/v1/chat/completions"]
 
 
 def test_companion_blocks_cockpit_key_echo_before_upload(monkeypatch) -> None:

@@ -267,7 +267,7 @@ def local_bridge_result_message(result: Any) -> str:
     if kind == "cockpit_rate_limited":
         return "Cockpit Tools 当前限流，请稍后再测试。"
     if kind in {"cockpit_unavailable", "cockpit_upstream_error"}:
-        return "本机助手在线，但 Cockpit Tools 的 127.0.0.1:11797 未启动或响应异常。"
+        return "本机助手在线，但设置页中填写的 Cockpit 地址未启动或响应异常。"
     if kind == "bridge_http":
         return f"本机助手返回 HTTP {int(item.get('status') or 0)}，请重新启动本机助手后重试。"
     if kind == "invalid_bridge":
@@ -309,7 +309,7 @@ return await (async (config) => {{
         404: 'Cockpit 接口或模型名称不存在',
         428: '本机助手尚未配置 Cockpit API Key',
         429: 'Cockpit 当前限流，请稍后重试',
-        502: '本机助手在线，但 Cockpit Tools 11797 不可达',
+        502: '本机助手在线，但设置页中填写的 Cockpit 地址不可达',
         504: 'Cockpit 模型调用超时',
       }};
       return {{

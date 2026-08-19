@@ -132,7 +132,7 @@ try {
 
     $isccArgs = @("/DMyRemoteUrl=$remoteUrl")
     if ($PublicRelease) {
-        $outputName = '公众号改写助手-生产环境安装包-1.4.0-20260818'
+        $outputName = '公众号改写助手-生产环境安装包-1.4.1-20260819'
         $innoSignCommand = '"' + $signTool + '" sign /sha1 ' + $signingThumbprint + ' /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $f'
         $isccArgs += "/DMyOutputBaseFilename=$outputName"
         $isccArgs += "/DMySignTool=bluesign"

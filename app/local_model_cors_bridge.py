@@ -17,12 +17,16 @@ from urllib.request import (
     build_opener,
 )
 
-from app.local_credentials import LocalCredentialStore
+from app.local_credentials import (
+    DEFAULT_COCKPIT_API_BASE,
+    LocalCredentialStore,
+    normalize_cockpit_api_base,
+)
 
 
 DEFAULT_ORIGIN = "https://api.bluebloodlab.cn"
 DEFAULT_HOST = "127.0.0.1:11798"
-DEFAULT_UPSTREAM = "http://127.0.0.1:11797"
+DEFAULT_UPSTREAM = DEFAULT_COCKPIT_API_BASE
 MAX_BODY_BYTES = 16 * 1024 * 1024
 MAX_SETUP_BYTES = 16 * 1024
 MODEL_ROUTES = {
@@ -45,7 +49,7 @@ def _read_limited(response: Any) -> bytes:
 
 def create_handler(
     *,
-    upstream: str = DEFAULT_UPSTREAM,
+    upstream: str | None = None,
     allowed_origin: str = DEFAULT_ORIGIN,
     allowed_host: str = DEFAULT_HOST,
     credential_store: Any | None = None,
@@ -54,7 +58,7 @@ def create_handler(
 ) -> type[BaseHTTPRequestHandler]:
     """Create the loopback-only HTTP handler used by the Windows bridge."""
 
-    upstream = upstream.rstrip("/")
+    fixed_upstream = normalize_cockpit_api_base(upstream) if upstream else ""
     store = credential_store or LocalCredentialStore()
     csrf_token = secrets.token_urlsafe(32)
     # Cockpit is always loopback. Never inherit system proxy settings and never
@@ -64,6 +68,17 @@ def create_handler(
     class BridgeHandler(BaseHTTPRequestHandler):
         server_version = "BlueBloodLabCockpitBridge/1"
         sys_version = ""
+
+        def _cockpit_api_base(self) -> str:
+            if fixed_upstream:
+                return fixed_upstream
+            loader = getattr(store, "load_cockpit_api_base", None)
+            if callable(loader):
+                try:
+                    return normalize_cockpit_api_base(loader())
+                except (OSError, ValueError):
+                    pass
+            return DEFAULT_UPSTREAM
 
         def _expected_host(self) -> str:
             if allowed_host:
@@ -116,6 +131,8 @@ def create_handler(
 
         def _send_setup(self, status: int, message: str = "") -> None:
             configured = bool(store.configured())
+            cockpit_api_base = self._cockpit_api_base()
+            safe_cockpit_api_base = html.escape(cockpit_api_base, quote=True)
             safe_message = html.escape(str(message or ""))
             state = "已在本机安全保存" if configured else "尚未配置"
             agent_section = ""
@@ -188,10 +205,13 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
 <form method="post" action="/setup" autocomplete="off">
 <input type="hidden" name="csrf_token" value="{csrf_token}">
 <input type="hidden" name="action" value="save_key">
+<label for="cockpit_api_base">Cockpit API Base URL</label>
+<input id="cockpit_api_base" name="cockpit_api_base" type="url" required maxlength="200" value="{safe_cockpit_api_base}" autocomplete="url" inputmode="url">
+<p class="small">每台电脑可填写不同端口，例如 http://127.0.0.1:11797；也可填写末尾带 /v1 的地址。仅允许本机回环地址。</p>
 <label for="api_key">新的 Cockpit API Key</label>
-<input id="api_key" name="api_key" type="password" required maxlength="4096" autocomplete="new-password">
-<button type="submit">验证并保存到本机</button></form>
-<p class="small">保存前会直接调用 127.0.0.1:11797/v1/models 验证密钥。请勿把密钥粘贴到生产网页或发送给任何人。</p>
+<input id="api_key" name="api_key" type="password" {'required' if not configured else ''} maxlength="4096" autocomplete="new-password" placeholder="{'留空则继续使用已保存的 Key' if configured else '请输入 Cockpit API Key'}">
+<button type="submit">验证并保存本机连接</button></form>
+<p class="small">保存前会直接调用所填地址的 /v1/models 验证连接。地址和密钥都不会发送到生产服务器；请勿把密钥发送给任何人。</p>
 {agent_section}
 </main></body></html>""".encode("utf-8")
             self.send_response(status)
@@ -213,9 +233,16 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
             except Exception:
                 return ""
 
-        def _probe_cockpit(self, api_key: str) -> tuple[str, int]:
+        def _probe_cockpit(
+            self,
+            api_key: str,
+            api_base: str = "",
+        ) -> tuple[str, int]:
+            target = normalize_cockpit_api_base(api_base) if api_base else (
+                self._cockpit_api_base()
+            )
             request = Request(
-                f"{upstream}/v1/models",
+                f"{target}/v1/models",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Accept": "application/json",
@@ -383,27 +410,43 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
                 self._send_setup(200, "本机助手正在退出；本页稍后将无法访问。")
                 agent_controller.request_stop()
                 return
+            submitted_api_base = str(
+                (form.get("cockpit_api_base") or [""])[0]
+            ).strip()
+            try:
+                cockpit_api_base = normalize_cockpit_api_base(submitted_api_base)
+            except ValueError as exc:
+                self._send_setup(400, str(exc))
+                return
             api_key = str((form.get("api_key") or [""])[0]).strip()
+            if not api_key and store.configured():
+                api_key = self._load_key()
             if not api_key or len(api_key) > 4096:
                 self._send_setup(400, "请输入有效的 Cockpit API Key。")
                 return
-            cockpit_status, status_code = self._probe_cockpit(api_key)
+            cockpit_status, status_code = self._probe_cockpit(
+                api_key,
+                cockpit_api_base,
+            )
             if cockpit_status != "ready":
                 messages = {
                     "unauthorized": "Cockpit API Key 无效，请生成新 Key 后重试。",
                     "endpoint_not_found": "Cockpit Tools 的 /v1/models 接口不可用。",
                     "rate_limited": "Cockpit Tools 当前限流，请稍后重试。",
-                    "unavailable": "无法连接 127.0.0.1:11797，请先启动 Cockpit Tools API 服务。",
+                    "unavailable": f"无法连接 {cockpit_api_base}，请检查地址、端口并启动 Cockpit Tools API 服务。",
                     "upstream_error": f"Cockpit Tools 返回 HTTP {status_code}。",
                 }
                 self._send_setup(400, messages.get(cockpit_status, "验证失败。"))
                 return
             try:
+                saver = getattr(store, "save_cockpit_api_base", None)
+                if callable(saver):
+                    saver(cockpit_api_base)
                 store.save_api_key(api_key)
             except Exception:
-                self._send_setup(500, "密钥无法写入 Windows 当前用户凭据存储。")
+                self._send_setup(500, "Cockpit 地址或密钥无法写入本机存储。")
                 return
-            self._send_setup(200, "验证成功，密钥已经安全保存到本机。")
+            self._send_setup(200, "验证成功，Cockpit 地址和密钥已经安全保存到本机。")
 
         def _proxy_model(self) -> None:
             cors = self.headers.get("Origin") == allowed_origin
@@ -464,7 +507,7 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
                 headers["Content-Type"] = "application/json"
             try:
                 request = Request(
-                    f"{upstream}{path}",
+                    f"{self._cockpit_api_base()}{path}",
                     data=body,
                     headers=headers,
                     method=self.command,
@@ -541,7 +584,7 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
                     {
                         "error": {
                             "code": "cockpit_unavailable",
-                            "message": "Cockpit Tools 11797 未启动或不可达",
+                            "message": "已配置的 Cockpit Tools 地址未启动或不可达",
                         }
                     },
                     cors=True,
@@ -552,7 +595,7 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
                     {
                         "error": {
                             "code": "cockpit_unavailable",
-                            "message": "Cockpit Tools 11797 未启动或不可达",
+                            "message": "已配置的 Cockpit Tools 地址未启动或不可达",
                         }
                     },
                     cors=True,

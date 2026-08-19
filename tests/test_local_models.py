@@ -246,7 +246,7 @@ def test_local_bridge_errors_are_actionable() -> None:
     assert "API Key" in local_bridge_result_message(
         {"kind": "cockpit_unauthorized"}
     )
-    assert "11797" in local_bridge_result_message(
+    assert "填写的 Cockpit 地址" in local_bridge_result_message(
         {"kind": "cockpit_unavailable"}
     )
     assert "限流" in local_bridge_result_message(

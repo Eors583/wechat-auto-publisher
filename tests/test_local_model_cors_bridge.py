@@ -21,8 +21,13 @@ ORIGIN = "https://api.bluebloodlab.cn"
 
 
 class _MemoryStore:
-    def __init__(self, key: str = "") -> None:
+    def __init__(
+        self,
+        key: str = "",
+        api_base: str = "http://127.0.0.1:11797",
+    ) -> None:
         self.key = key
+        self.api_base = api_base
 
     def configured(self) -> bool:
         return bool(self.key)
@@ -32,6 +37,12 @@ class _MemoryStore:
 
     def save_api_key(self, api_key: str) -> None:
         self.key = api_key
+
+    def load_cockpit_api_base(self) -> str:
+        return self.api_base
+
+    def save_cockpit_api_base(self, api_base: str) -> None:
+        self.api_base = api_base
 
 
 def _upstream_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
@@ -101,11 +112,13 @@ def _running_bridge(
         _upstream_handler(state),
     )
     _serve(upstream)
-    store = _MemoryStore(key)
+    store = _MemoryStore(
+        key,
+        f"http://127.0.0.1:{upstream.server_port}",
+    )
     bridge = ThreadingHTTPServer(
         ("127.0.0.1", 0),
         create_handler(
-            upstream=f"http://127.0.0.1:{upstream.server_port}",
             allowed_origin=ORIGIN,
             allowed_host="",
             credential_store=store,
@@ -233,10 +246,19 @@ def test_setup_page_uses_csrf_security_headers_and_never_echoes_key() -> None:
             assert response.headers["Referrer-Policy"] == "same-origin"
         token = re.search(r'name="csrf_token" value="([^"]+)"', page)
         assert token is not None
+        api_base = re.search(
+            r'name="cockpit_api_base"[^>]+value="([^"]+)"', page
+        )
+        assert api_base is not None
+        assert "每台电脑可填写不同端口" in page
 
         api_key = "local-secret"
         body = urlencode(
-            {"csrf_token": token.group(1), "api_key": api_key}
+            {
+                "csrf_token": token.group(1),
+                "cockpit_api_base": api_base.group(1),
+                "api_key": api_key,
+            }
         ).encode()
         request = Request(
             f"{base}/setup",
@@ -250,6 +272,7 @@ def test_setup_page_uses_csrf_security_headers_and_never_echoes_key() -> None:
         with urlopen(request) as response:  # noqa: S310
             saved_page = response.read().decode("utf-8")
         assert store.key == api_key
+        assert store.api_base == api_base.group(1)
         assert api_key not in saved_page
         assert "验证成功" in saved_page
 
@@ -270,7 +293,11 @@ def test_setup_page_uses_csrf_security_headers_and_never_echoes_key() -> None:
         invalid = Request(
             f"{base}/setup",
             data=urlencode(
-                {"csrf_token": "wrong", "api_key": "do-not-store"}
+                {
+                    "csrf_token": "wrong",
+                    "cockpit_api_base": api_base.group(1),
+                    "api_key": "do-not-store",
+                }
             ).encode(),
             method="POST",
             headers={
@@ -282,6 +309,44 @@ def test_setup_page_uses_csrf_security_headers_and_never_echoes_key() -> None:
             urlopen(invalid)  # noqa: S310
         assert error.value.code == 403
         assert store.key == api_key
+
+
+def test_setup_rejects_non_loopback_or_invalid_cockpit_urls_without_overwrite() -> None:
+    with _running_bridge(key="") as (base, store, _state):
+        with urlopen(f"{base}/setup") as response:  # noqa: S310
+            page = response.read().decode("utf-8")
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page)
+        assert token is not None
+        original = store.api_base
+
+        for invalid in (
+            "https://127.0.0.1:11797",
+            "http://192.168.1.2:11797",
+            "http://user:secret@127.0.0.1:11797",
+            "http://127.0.0.1",
+            "http://127.0.0.1:11797/admin",
+            "http://127.0.0.1:11797?next=evil",
+        ):
+            request = Request(
+                f"{base}/setup",
+                data=urlencode(
+                    {
+                        "csrf_token": token.group(1),
+                        "cockpit_api_base": invalid,
+                        "api_key": "do-not-store",
+                    }
+                ).encode(),
+                method="POST",
+                headers={
+                    "Origin": base,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            with pytest.raises(HTTPError) as error:
+                urlopen(request)  # noqa: S310
+            assert error.value.code == 400
+            assert store.api_base == original
+            assert store.key == ""
 
 
 @pytest.mark.parametrize("upstream_status", [401, 404, 429, 500])
