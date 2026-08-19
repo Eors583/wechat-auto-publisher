@@ -55,6 +55,8 @@ def test_wechat_links_are_extracted_by_the_user_local_bridge_before_batch_creati
 
     assert "http://127.0.0.1:11798/extract/wechat" in desktop_source
     assert "正在通过本机助手获取公众号正文" in desktop_source
+    assert "本机获取未成功，正在自动切换服务器解析" in desktop_source
+    assert "已自动切换服务器多级解析，不中断当前生成任务。" in desktop_source
     assert "source_mode_value = \"text\"" in desktop_source
     assert "reference_urls = []" in desktop_source
     assert "raw_content=text or None" in desktop_source

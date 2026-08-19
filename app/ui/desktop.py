@@ -2093,26 +2093,27 @@ def _build_wizard(
                 )
                 if len(items) != len(source_urls):
                     safe_error = _local_wechat_error_message(local_result)
-                    state.busy = False
-                    show_rewrite_action(running=False)
-                    status_label.text = "本机获取失败"
-                    progress_stage.text = "未创建生成任务"
-                    progress_percent.text = "未开始"
-                    progress_hint.text = safe_error
-                    append_log(f"本机获取失败：{safe_error}")
-                    ui.notify(safe_error, type="negative", timeout=15000)
-                    active_batch_service = None
-                    return
-                text = _compose_local_wechat_content(items)
-                source_mode_value = "text"
-                reference_urls = []
-                url = source_urls[0]
-                for index, item in enumerate(items, 1):
-                    append_log(
-                        f"已获取参考资料 {index}："
-                        f"{str(item.get('title') or '未命名')}（{len(str(item.get('content') or ''))} 字）"
+                    status_label.text = "切换服务器解析…"
+                    progress_stage.text = "本机获取未成功，正在自动切换服务器解析"
+                    progress_hint.text = "系统将使用原始链接继续创建任务，无需重新提交"
+                    append_log(f"本机获取未成功：{safe_error}")
+                    append_log("已自动切换服务器多级解析，不中断当前生成任务。")
+                    ui.notify(
+                        "本机获取未成功，已自动切换服务器解析",
+                        type="warning",
+                        timeout=8000,
                     )
-                append_log("正文已在本机校验，正在提交生产任务…")
+                else:
+                    text = _compose_local_wechat_content(items)
+                    source_mode_value = "text"
+                    reference_urls = []
+                    url = source_urls[0]
+                    for index, item in enumerate(items, 1):
+                        append_log(
+                            f"已获取参考资料 {index}："
+                            f"{str(item.get('title') or '未命名')}（{len(str(item.get('content') or ''))} 字）"
+                        )
+                    append_log("正文已在本机校验，正在提交生产任务…")
 
             append_log("正在检查公众号、模型、模板和素材接口…")
             preflight_ok = await confirm_preflight(selected_accounts)
