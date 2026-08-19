@@ -34,7 +34,7 @@ DEFAULT_LAYOUT: dict[str, Any] = {
     },
     "argument": {
         "font_size": "17px",
-        "color": "#0052ff",
+        "color": "#595959",
         "line_height": "1.8",
         "spacing_before": "20px",
         "spacing_after": "12px",
@@ -55,7 +55,7 @@ DEFAULT_LAYOUT: dict[str, Any] = {
     "list": {
         "font_size": "16px",
         "color": "#595959",
-        "marker_color": "#0052ff",
+        "marker_color": "#595959",
         "line_height": "2",
         "indent": "1.5em",
         "spacing_after": "8px",
@@ -111,6 +111,19 @@ def normalize_layout(value: Any) -> dict[str, Any]:
         incoming = value.get(section)
         if isinstance(incoming, dict):
             result[section].update(incoming)
+    legacy_argument = value.get("argument")
+    if isinstance(legacy_argument, dict) and legacy_argument == {
+        "font_size": "17px",
+        "color": "#0052ff",
+        "line_height": "1.8",
+        "spacing_before": "20px",
+        "spacing_after": "12px",
+        "alignment": "left",
+        "bold": True,
+        "background": "transparent",
+        "border_color": "transparent",
+    }:
+        result["argument"]["color"] = result["body"]["color"]
     return result
 
 

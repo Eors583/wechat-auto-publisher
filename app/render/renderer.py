@@ -63,7 +63,9 @@ class TemplateRenderer:
                 "body_font_family", '微软雅黑, "Microsoft YaHei"'
             ),
             h1_color=tpl_cfg.get("h1_color", "#1a1a1a"),
-            h2_color=tpl_cfg.get("h2_color", "#222222"),
+            h2_color=tpl_cfg.get(
+                "argument_color", tpl_cfg.get("body_color", "#333333")
+            ),
             title_font_size=tpl_cfg.get("title_font_size", "20px"),
             title_color=tpl_cfg.get("title_color", tpl_cfg.get("h1_color", "#1a1a1a")),
             title_line_height=tpl_cfg.get("title_line_height", "1.55"),
@@ -72,7 +74,9 @@ class TemplateRenderer:
             title_alignment=tpl_cfg.get("title_alignment", "left"),
             title_weight="bold" if bool(tpl_cfg.get("title_bold", True)) else "normal",
             argument_font_size=tpl_cfg.get("argument_font_size", tpl_cfg.get("body_font_size", "16px")),
-            argument_color=tpl_cfg.get("argument_color", tpl_cfg.get("h2_color", "#222222")),
+            argument_color=tpl_cfg.get(
+                "argument_color", tpl_cfg.get("body_color", "#333333")
+            ),
             argument_line_height=tpl_cfg.get("argument_line_height", "1.8"),
             argument_spacing_before=tpl_cfg.get("argument_spacing_before", "20px"),
             argument_spacing_after=tpl_cfg.get("argument_spacing_after", "12px"),
@@ -91,7 +95,9 @@ class TemplateRenderer:
             quote_spacing_after=tpl_cfg.get("quote_spacing_after", "20px"),
             list_font_size=tpl_cfg.get("list_font_size", tpl_cfg.get("body_font_size", "16px")),
             list_color=tpl_cfg.get("list_color", tpl_cfg.get("body_color", "#333333")),
-            list_marker_color=tpl_cfg.get("list_marker_color", tpl_cfg.get("h2_color", "#222222")),
+            list_marker_color=tpl_cfg.get(
+                "list_marker_color", tpl_cfg.get("body_color", "#333333")
+            ),
             list_line_height=tpl_cfg.get("list_line_height", "2"),
             list_indent=tpl_cfg.get("list_indent", "1.5em"),
             list_spacing_after=tpl_cfg.get("list_spacing_after", "8px"),

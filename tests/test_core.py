@@ -18,7 +18,7 @@ from app.ai.failover import FailoverRewriter
 from app.config import load_config
 from app.cover import resolve_cover
 from app.db import Database
-from app.layout_profiles import validate_layout
+from app.layout_profiles import normalize_layout, validate_layout
 from app.render import TemplateRenderer, make_digest
 
 
@@ -221,13 +221,13 @@ class AdCoverRenderTests(unittest.TestCase):
         self.assertIn("组织能力决定执行上限", html)
         self.assertNotIn("一、", html)
         self.assertNotIn("<h2", html)
-        self.assertIn("color:#0052ff;font-weight:bold", html)
+        self.assertIn("color:#595959;font-weight:bold", html)
         self.assertIn("line-height:35px", html)
         self.assertIn("margin:0 0 16px", html)
         self.assertIn("padding-right:10px;padding-left:10px", html)
         self.assertIn("蓝血创作组", html)
         self.assertIn("#ff6827", html)
-        self.assertIn("#0052ff", html)
+        self.assertNotIn("#0052ff", html)
         self.assertNotIn("height:1px", html)
         self.assertIn("<p style=", html)
         self.assertIn("这是开场正文，不应被渲染成粗体标题。", html)
@@ -238,10 +238,30 @@ class AdCoverRenderTests(unittest.TestCase):
             body=r"开场正文。\n\n## 组织能力决定执行上限\n\n这里是论点说明。"
         )
         self.assertIn("开场正文。", html)
-        self.assertIn("color:#0052ff;font-weight:bold", html)
+        self.assertIn("color:#595959;font-weight:bold", html)
         self.assertIn("组织能力决定执行上限", html)
         self.assertIn("这里是论点说明。", html)
         self.assertNotIn(r"\n", html)
+
+    def test_legacy_default_blue_argument_inherits_body_color(self) -> None:
+        layout = normalize_layout(
+            {
+                "body": {"color": "#f26b1d"},
+                "argument": {
+                    "font_size": "17px",
+                    "color": "#0052ff",
+                    "line_height": "1.8",
+                    "spacing_before": "20px",
+                    "spacing_after": "12px",
+                    "alignment": "left",
+                    "bold": True,
+                    "background": "transparent",
+                    "border_color": "transparent",
+                },
+            }
+        )
+
+        self.assertEqual(layout["argument"]["color"], "#f26b1d")
 
     def test_renderer_applies_custom_layout_and_list_styles(self) -> None:
         cfg = load_config()

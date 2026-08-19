@@ -134,6 +134,34 @@ def test_task_queue_width_chain_and_breakpoints_cannot_push_sidebar_offscreen() 
     assert "minmax(0, 1fr) 230px" not in narrow_css[:700]
 
 
+def test_task_account_filter_only_contains_real_accounts_and_shows_selection() -> None:
+    source = inspect.getsource(tasks.build_tasks_panel)
+
+    assert '"": "全部公众号"' in source
+    assert '"__refresh__": "刷新任务"' not in source
+    assert 'display-value="全部公众号"' not in source
+    assert "account_options = load_account_options()" in source
+    assert 'account_in.on("popup-show", refresh_account_options)' in source
+    assert "account_in.set_options(" in source
+    assert "account_in.on_value_change(reset_and_render)" in source
+
+
+def test_task_rows_expose_direct_batch_archive_actions() -> None:
+    inbox_source = inspect.getsource(tasks._render_inbox_article_card)
+    batch_source = inspect.getsource(tasks._render_batch_card)
+    confirm_source = inspect.getsource(tasks._open_archive_confirmation)
+
+    for source in (inbox_source, batch_source):
+        assert '"归档"' in source
+        assert '"archive"' in source
+        assert "_open_archive_confirmation(" in source
+        assert '"ops-task-row-archive-action"' in source
+    assert '"取消归档" if archived else "归档"' in batch_source
+    assert "service.archive_batch(batch_id, archived=archived)" in confirm_source
+    assert '“待我处理”和“全部批次”' in confirm_source
+    assert ".ops-task-row-archive-action" in APP_CSS
+
+
 def test_review_workbench_supports_article_navigation_and_background_rewrite() -> None:
     source = inspect.getsource(tasks.open_review_workbench)
 

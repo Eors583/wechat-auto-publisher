@@ -339,9 +339,12 @@ def build_tasks_panel(
         recover_stale_work=False,
     )
     workflow_host = ui.column().classes("ops-hidden-control")
-    account_options = {"": "全部公众号", "__refresh__": "刷新任务", **{
-        item["id"]: item["name"] for item in service.list_accounts()
-    }}
+    def load_account_options() -> dict[str, str]:
+        return {"": "全部公众号", **{
+            item["id"]: item["name"] for item in service.list_accounts()
+        }}
+
+    account_options = load_account_options()
     initial_view_mode = "batches" if initial_view == "batches" else "inbox"
     initial_status = str(initial_status_filter or "")
     initial_segment = (
@@ -402,8 +405,7 @@ def build_tasks_panel(
         account_in = ui.select(
             options=account_options, value=""
         ).props(
-            'outlined dense options-dense hide-bottom-space '
-            'display-value="全部公众号"'
+            "outlined dense options-dense hide-bottom-space"
         ).classes("ops-filter-account")
         today_filter_btn = ui.button(
             "今天", on_click=lambda: today_only.set_value(True)
@@ -1075,11 +1077,13 @@ def build_tasks_panel(
     for element in (search_in, status_in, today_only, archived_in):
         element.on_value_change(reset_and_render)
 
-    def change_account_filter(event: Any) -> None:
-        if str(event.value or "") == "__refresh__":
-            account_in.set_value("")
-            return
-        reset_and_render()
+    def refresh_account_options() -> None:
+        options = load_account_options()
+        current = str(account_in.value or "")
+        account_in.set_options(
+            options,
+            value=current if current in options else "",
+        )
 
     attach_interaction_feedback(
         queue_segment,
@@ -1094,7 +1098,8 @@ def build_tasks_panel(
     attach_interaction_feedback(today_filter_btn, "正在筛选今天的任务")
     attach_interaction_feedback(running_tasks_btn, "正在加载后台任务")
     attach_interaction_feedback(archive_tasks_btn, "正在加载归档任务")
-    account_in.on_value_change(change_account_filter)
+    account_in.on("popup-show", refresh_account_options)
+    account_in.on_value_change(reset_and_render)
     running_tasks_btn.on_click(show_running_tasks)
     archive_tasks_btn.on_click(show_archived_tasks)
     render()
@@ -1928,6 +1933,14 @@ def _render_inbox_article_card(
         primary_label = "写入草稿"
         primary_icon = "send"
 
+    def confirm_archive() -> None:
+        _open_archive_confirmation(
+            service,
+            batch_id,
+            str(item.get("batch_display_id") or batch_id),
+            refresh,
+        )
+
     with ui.card().classes("ops-task-row-card") as card:
         with ui.element("span").classes(
             "ops-task-row-icon ops-icon-blue"
@@ -1956,6 +1969,13 @@ def _render_inbox_article_card(
             ).classes("ops-task-row-primary-action").props(
                 "outline dense color=primary no-caps"
             )
+            ui.button(
+                "归档",
+                icon="archive",
+                on_click=confirm_archive,
+            ).classes("ops-task-row-archive-action").props(
+                "outline dense color=grey-7 no-caps aria-label=归档批次"
+            ).tooltip("归档所在批次")
             ui.button(icon="more_horiz", on_click=details_dialog.open).props(
                 "flat round dense color=grey-7 aria-label=查看任务详情"
             ).tooltip("查看任务详情")
@@ -4680,6 +4700,17 @@ def _render_batch_card(
         action_label = "查看任务"
         action_icon = "visibility"
 
+    archived = bool(batch.get("archived_at"))
+
+    def confirm_archive() -> None:
+        _open_archive_confirmation(
+            service,
+            str(batch["id"]),
+            str(batch.get("display_id") or batch["id"]),
+            refresh,
+            archived=not archived,
+        )
+
     row = ui.card().classes("ops-task-row-card ops-batch-row-card")
     with row:
         with ui.element("span").classes("ops-task-row-icon"):
@@ -4704,6 +4735,14 @@ def _render_batch_card(
             ).classes("ops-task-row-primary-action").props(
                 "unelevated dense color=primary no-caps"
             )
+            ui.button(
+                "取消归档" if archived else "归档",
+                icon="unarchive" if archived else "archive",
+                on_click=confirm_archive,
+            ).classes("ops-task-row-archive-action").props(
+                "outline dense color=grey-7 no-caps "
+                f'aria-label={"取消归档" if archived else "归档批次"}'
+            )
             ui.button(icon="more_horiz", on_click=open_details).props(
                 "flat round dense color=grey-7 aria-label=查看任务详情"
             )
@@ -4712,6 +4751,42 @@ def _render_batch_card(
         ui.timer(0.05, open_details, once=True)
     _ = auto_expand
     return row
+
+
+def _open_archive_confirmation(
+    service: BatchService,
+    batch_id: str,
+    display_id: str,
+    refresh: Callable[[], None],
+    *,
+    archived: bool = True,
+) -> None:
+    action = "归档" if archived else "取消归档"
+    with ui.dialog() as dialog, ui.card().classes("q-pa-lg ops-dialog-md"):
+        ui.label(f"确认{action}批次 #{display_id}？").classes(
+            "text-h6 text-weight-bold"
+        )
+        ui.label(
+            "归档后，该批次会从“待我处理”和“全部批次”中隐藏，可在“查看归档”中恢复。"
+            if archived
+            else "取消归档后，该批次会重新出现在任务列表中。"
+        ).classes("muted")
+        with ui.row().classes("w-full justify-end q-mt-md"):
+            ui.button("取消", on_click=dialog.close).props("flat no-caps")
+
+            def submit() -> None:
+                dialog.close()
+                _run_action(
+                    lambda: service.archive_batch(batch_id, archived=archived),
+                    refresh,
+                    f"批次已{action}",
+                )
+
+            ui.button(action, on_click=submit).props(
+                "unelevated color=primary no-caps icon="
+                + ("archive" if archived else "unarchive")
+            )
+    dialog.open()
 
 
 def _render_batch_detail_content(

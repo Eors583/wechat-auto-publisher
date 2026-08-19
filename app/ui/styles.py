@@ -2693,7 +2693,7 @@ APP_CSS += """
 }
 .ops-task-row-card,
 .ops-batch-row-card {
-  grid-template-columns: 42px minmax(0, 1.5fr) minmax(0, .7fr) minmax(0, .7fr) 84px !important;
+  grid-template-columns: 42px minmax(0, 1.5fr) minmax(0, .7fr) minmax(0, .7fr) 154px !important;
   align-self: stretch;
   width: 100% !important;
   min-height: var(--ui-task-row-height) !important;
@@ -2704,6 +2704,7 @@ APP_CSS += """
 .ops-task-row-icon { position: relative; width: 38px; height: 38px; }
 .ops-task-row-actions .q-btn:last-child { display: none; }
 .ops-task-row-actions .q-btn { min-height: 38px; }
+.ops-task-row-archive-action { min-width: 62px; white-space: nowrap; }
 .ops-task-row-primary-action {
   width: 84px;
   min-width: 84px;
@@ -2723,10 +2724,12 @@ APP_CSS += """
 @container (max-width: 720px) {
   .ops-task-row-card,
   .ops-batch-row-card {
-    grid-template-columns: 38px minmax(0, 1fr) 84px !important;
+    grid-template-columns: 38px minmax(0, 1fr) 128px !important;
   }
   .ops-task-row-state,
   .ops-task-row-badge { display: none !important; }
+  .ops-task-row-archive-action { width: 38px; min-width: 38px; padding-inline: 0 !important; }
+  .ops-task-row-archive-action .q-btn__content > span:not(.q-icon) { display: none; }
 }
 .ops-flow-panel { grid-template-rows: auto minmax(0, 1fr) auto; }
 .ops-flow-list { display: grid; align-content: start; gap: var(--ui-space-2); padding: var(--ui-space-3); }

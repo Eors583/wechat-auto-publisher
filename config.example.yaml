@@ -89,7 +89,6 @@ template:
   body_horizontal_padding: "10px"
   body_font_family: '微软雅黑, "Microsoft YaHei"'
   h1_color: "#1a1a1a"
-  h2_color: "#0052ff"
 
 # 公众号编辑器“模板”的本地快照。先在后台插入一次模板并保存临时文章，
 # 程序会提取其 HTML；之后直接套用快照，不再依赖每次点击后台模板按钮。
