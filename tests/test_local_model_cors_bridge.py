@@ -507,3 +507,19 @@ def test_bridge_rejects_oversized_requests_without_reading_the_body() -> None:
         response = connection.getresponse()
         assert response.status == 413
         connection.close()
+
+
+def test_portable_bridge_self_test_cli_ignores_default_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import local_model_cors_bridge
+
+    monkeypatch.setattr("sys.argv", ["cockpit-bridge", "--self-test"])
+    monkeypatch.setattr(
+        local_model_cors_bridge,
+        "ThreadingHTTPServer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("self-test must not use the production bridge port")
+        ),
+    )
+    local_model_cors_bridge.main()

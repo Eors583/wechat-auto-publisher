@@ -6,6 +6,9 @@ import html
 import json
 import secrets
 import socket
+import sys
+import threading
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -614,14 +617,40 @@ button{{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cockpit Tools browser bridge")
     parser.add_argument("--port", type=int, default=11798)
+    parser.add_argument("--open-setup", action="store_true")
+    parser.add_argument("--no-open-setup", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    if args.self_test:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+        return
     host = "127.0.0.1"
     allowed_host = f"{host}:{args.port}"
-    server = ThreadingHTTPServer(
-        (host, args.port),
-        create_handler(allowed_host=allowed_host),
-    )
-    server.serve_forever()
+    try:
+        server = ThreadingHTTPServer(
+            (host, args.port),
+            create_handler(allowed_host=allowed_host),
+        )
+    except OSError:
+        print(
+            f"无法启动：{host}:{args.port} 已被占用。请先退出其他本机助手。",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from None
+    if (args.open_setup or getattr(sys, "frozen", False)) and not args.no_open_setup:
+        threading.Timer(
+            0.4,
+            lambda: webbrowser.open(f"http://{allowed_host}/setup"),
+        ).start()
+    print(f"Cockpit 本地 API 桥接器正在运行：http://{allowed_host}/setup")
+    print("请保持此窗口打开；关闭窗口即停止桥接。")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nCockpit 本地 API 桥接器已停止。")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
