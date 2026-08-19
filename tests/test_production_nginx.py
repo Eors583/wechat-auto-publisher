@@ -32,6 +32,24 @@ def test_https_publisher_reuses_the_existing_api_certificate_host() -> None:
     assert "http://127.0.0.1:18778/publisher/" in deploy
 
 
+def test_cockpit_bridge_download_is_an_exact_non_browsable_file_route() -> None:
+    nginx = (
+        ROOT / "deploy" / "production" / "nginx.conf.example"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "location = /downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe"
+        in nginx
+    )
+    assert (
+        "alias /opt/wechat-publisher/shared/downloads/"
+        "BlueBloodLab-Cockpit-Bridge-1.4.1.exe;"
+        in nginx
+    )
+    assert "default_type application/octet-stream;" in nginx
+    assert "autoindex on" not in nginx
+
+
 def test_production_processes_share_one_release_lease_owner() -> None:
     compose = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
 

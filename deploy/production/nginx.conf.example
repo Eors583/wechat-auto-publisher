@@ -70,6 +70,13 @@ server {
 
     client_max_body_size 30m;
 
+    location = /downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe {
+        alias /opt/wechat-publisher/shared/downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe;
+        default_type application/octet-stream;
+        add_header Content-Disposition 'attachment; filename="BlueBloodLab-Cockpit-Bridge-1.4.1.exe"' always;
+        add_header X-Content-Type-Options nosniff always;
+    }
+
     location /publisher/ {
         proxy_pass http://127.0.0.1:18778/;
         proxy_http_version 1.1;

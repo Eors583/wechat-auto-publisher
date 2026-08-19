@@ -37,6 +37,12 @@ from app.ui.local_model_bridge import (
 )
 
 
+LOCAL_BRIDGE_DOWNLOAD_URL = (
+    "https://api.bluebloodlab.cn/downloads/"
+    "BlueBloodLab-Cockpit-Bridge-1.4.1.exe"
+)
+
+
 IMAGE_PROVIDER_GUIDES: dict[str, dict[str, str]] = {
     IMAGE_ALIBABA: {
         "key_url": "https://bailian.console.aliyun.com/?apiKey=1#/api-key",
@@ -318,19 +324,27 @@ def build_models_panel(
             with ui.column().classes(
                 "w-full q-pa-md rounded-borders bg-teal-1 gap-2"
             ) as local_setup:
-                ui.label("第 2 步：配置并授权本机助手").classes(
+                ui.label("第 2 步：下载、配置并授权本机助手").classes(
                     "text-weight-bold text-teal-9"
                 )
                 ui.label(
                     "Cockpit API Key 只保存在这台电脑，不会上传到生产服务器。"
                 ).classes("muted")
                 ui.link(
-                    "打开本机助手设置",
+                    "1. 直接下载本机桥接器（Windows EXE）",
+                    LOCAL_BRIDGE_DOWNLOAD_URL,
+                    new_tab=True,
+                ).classes("text-teal-9 text-weight-bold ops-break-anywhere")
+                ui.label(
+                    "2. 双击下载的 EXE，并保持桥接器窗口打开。"
+                ).classes("muted ops-break-anywhere")
+                ui.link(
+                    "3. 打开本机助手设置",
                     "http://127.0.0.1:11798/setup",
                     new_tab=True,
                 ).classes("text-teal-9 text-weight-bold")
                 local_status = ui.label(
-                    "保存并测试时，浏览器会请求一次本地网络权限。"
+                    "4. 填写 Cockpit 实际地址和 Key；回到这里保存并测试时，浏览器会请求一次本地网络权限。"
                 ).classes("muted ops-break-anywhere")
             enabled_in = ui.switch(
                 "启用",

@@ -76,6 +76,21 @@ def test_installer_shortcuts_open_the_hosted_application() -> None:
     assert "Public release remote URL must be exactly" in build_script
 
 
+def test_portable_bridge_public_build_requires_valid_code_signing() -> None:
+    build_script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "build_local_bridge.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "[switch]$PublicRelease" in build_script
+    assert "WECHAT_PUBLISHER_SIGNING_THUMBPRINT" in build_script
+    assert "signtool.exe" in build_script
+    assert "Get-AuthenticodeSignature" in build_script
+    assert "Status -ne 'Valid'" in build_script
+    assert "$downloadExe = Join-Path $installerDir \"$exeName.exe\"" in build_script
+
+
 def test_ui_smoke_server_enables_nicegui_user_storage(monkeypatch) -> None:
     from nicegui import ui
 

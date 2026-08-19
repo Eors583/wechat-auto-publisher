@@ -272,6 +272,35 @@ def test_model_editor_defines_local_probe_listener_with_string_icon(
     assert "loopback-network" in click_events[0]["js_handler"]
 
 
+def test_model_editor_guides_users_to_download_and_run_portable_bridge(
+    tmp_path,
+) -> None:
+    state = _PanelState(tmp_path)
+
+    try:
+        build_models_panel(state, purpose="text")
+        _click_button("添加自定义模型")
+        links = [
+            element
+            for element in ui.context.client.elements.values()
+            if type(element).__name__ == "Link"
+        ]
+        texts = _rendered_texts()
+    finally:
+        ui.context.client.remove_all_elements()
+
+    download = next(
+        item
+        for item in links
+        if getattr(item, "text", None) == "1. 直接下载本机桥接器（Windows EXE）"
+    )
+    assert str(download._props.get("href") or "").endswith(
+        "/downloads/BlueBloodLab-Cockpit-Bridge-1.4.1.exe"
+    )
+    assert "2. 双击下载的 EXE，并保持桥接器窗口打开。" in texts
+    assert any("填写 Cockpit 实际地址和 Key" in text for text in texts)
+
+
 def test_user_model_panel_marks_platform_models_read_only(
     tmp_path,
     monkeypatch,
