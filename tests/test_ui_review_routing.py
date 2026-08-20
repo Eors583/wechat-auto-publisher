@@ -4,6 +4,7 @@ import inspect
 
 from app.ui import desktop
 from app.ui.panels import tasks
+from app.ui.styles import APP_CSS
 
 
 def test_generation_completion_focuses_batch_before_opening_task_center() -> None:
@@ -84,6 +85,7 @@ def test_task_review_action_keeps_a_text_only_single_line_button() -> None:
     assert 'primary_label = "打开审核"' in source
     assert "primary_icon = None" in source
     assert 'classes("ops-task-row-primary-action")' in source
+    assert ".ops-task-row-primary-action .q-icon { display: none !important; }" in APP_CSS
 
 
 def test_task_center_workflow_guide_follows_effective_batch_state() -> None:

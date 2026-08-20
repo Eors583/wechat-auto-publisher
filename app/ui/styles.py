@@ -2726,6 +2726,7 @@ APP_CSS += """
   justify-content: center;
   white-space: nowrap;
 }
+.ops-task-row-primary-action .q-icon { display: none !important; }
 @container (max-width: 720px) {
   .ops-task-row-card,
   .ops-batch-row-card {
