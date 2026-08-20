@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 TITLE_CANDIDATE_COUNT = 10
 SUBTITLE_CANDIDATE_COUNT = 10
 
+ARTICLE_DIGEST_PROMPT = (
+    "根据文章内容，写一段120字以内的文章摘要，用于公众号摘要展示，可以提炼文章的"
+    "核心意思或金句进行撰写，避免晦涩难懂，要具有接地气、强传播的特性。"
+)
+
 EMPHASIS_PROMPT = (
     "【重点加粗规则】只加粗核心观点、关键数据和行动建议，使用 Markdown "
     "**文字** 标记；每次只加粗一句中的关键短语，禁止整段加粗；"
@@ -42,9 +47,7 @@ def build_rewrite_user_prompt(topic: str, raw_content: str, instruction: str) ->
         f"{TITLE_CANDIDATE_COUNT} 个互不重复的主标题，subtitles 必须包含恰好 "
         f"{SUBTITLE_CANDIDATE_COUNT} 个互不重复的副标题。不得把 JSON 字段名、"
         "数组括号、引号或逗号当成标题内容。\n\n"
-        "【摘要硬性协议】最终结构化结果中的 digest 必须阅读全文后重新概括核心事实、"
-        "主要观点和结论，使用一段自然中文，不得照抄标题或正文第一段，含标点最多 "
-        "120 字。\n\n"
+        f"【摘要硬性协议】最终结构化结果中的 digest 必须满足：{ARTICLE_DIGEST_PROMPT}\n\n"
         f"【话题】\n{topic}\n\n"
         f"【原始内容（仅作参考，禁止照搬）】\n{raw_content[:12000]}\n"
     )

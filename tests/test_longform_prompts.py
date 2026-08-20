@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app.ai import RewriteResult
+from app.ai import ARTICLE_DIGEST_PROMPT, RewriteResult
 from app.ai.failover import FailoverRewriter
 from app.ai.openai_compat import OpenAICompatClient
 
@@ -65,6 +65,8 @@ def test_all_openai_compatible_longform_providers_receive_configured_prompts(
     assert "正文唯一规则MARKER" in title_prompt
     assert "标题唯一规则TITLE_MARKER" in title_prompt
     assert "本阶段只生成主标题和副标题" in title_prompt
+    assert ARTICLE_DIGEST_PROMPT in title_prompt
+    assert ARTICLE_DIGEST_PROMPT in _title_system
     assert result.titles == _TEN_TITLES
     assert result.subtitles == _TEN_SUBTITLES
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.ads.scheduler import render_ad_html, select_ad
 from app.ai import (
+    ARTICLE_DIGEST_PROMPT,
     build_rewrite_user_prompt,
     enforce_emphasis_rules,
     normalize_model_body,
@@ -29,8 +30,7 @@ class ParseTests(unittest.TestCase):
         self.assertIn("禁止整段加粗", prompt)
         self.assertIn("禁止连续多个段落", prompt)
         self.assertIn("digest", prompt)
-        self.assertIn("不得照抄标题或正文第一段", prompt)
-        self.assertIn("120 字", prompt)
+        self.assertIn(ARTICLE_DIGEST_PROMPT, prompt)
 
     def test_emphasis_guard_removes_whole_paragraph_and_consecutive_bold(self) -> None:
         body = (

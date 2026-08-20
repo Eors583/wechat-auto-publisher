@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from . import (
+    ARTICLE_DIGEST_PROMPT,
     EMPHASIS_PROMPT,
     RewriteResult,
     SUBTITLE_CANDIDATE_COUNT,
@@ -186,8 +187,8 @@ class ManusClient:
             "body 去除空白后不得少于 2000 字，不设置严格字数上限，也不需要精确统计或"
             f"反复截断字数；titles 必须给出恰好 {TITLE_CANDIDATE_COUNT} 个互不重复的"
             f"标题；subtitles 必须给出恰好 {SUBTITLE_CANDIDATE_COUNT} 个互不重复的"
-            "副标题，并与标题形成信息互补；digest 必须基于完整正文自行概括，不得照抄"
-            "标题或首段，含标点最多120字。该规则优先于运营提示词中的旧规则。\n"
+            f"副标题，并与标题形成信息互补；digest 必须满足：{ARTICLE_DIGEST_PROMPT}"
+            "该规则优先于运营提示词中的旧规则。\n"
             "最终结果将由程序按结构化 JSON 接收，请不要省略任何字段。\n\n"
             + prompt
         )
@@ -216,8 +217,8 @@ class ManusClient:
             "案例、数据或对比，每个观点至少使用两个自然段说明；段落间用空行分隔。\n"
             f"{EMPHASIS_PROMPT}\n"
             f"同时返回 {TITLE_CANDIDATE_COUNT} 个标题和 "
-            f"{SUBTITLE_CANDIDATE_COUNT} 个副标题，以及阅读全文后重新概括的 digest；"
-            "digest 不得照抄标题或首段，含标点最多120字。不要解释任务，不要省略正文。\n\n"
+            f"{SUBTITLE_CANDIDATE_COUNT} 个副标题，以及 digest；digest 必须满足："
+            f"{ARTICLE_DIGEST_PROMPT}不要解释任务，不要省略正文。\n\n"
             f"【话题】{topic}\n\n【待扩写正文】\n{draft_body[:12000]}"
         )
         value = self._run_structured_task(
@@ -532,7 +533,7 @@ def _rewrite_schema() -> dict[str, Any]:
             },
             "digest": {
                 "type": "string",
-                "description": "阅读全文后概括核心事实、观点和结论，不照抄标题或首段，含标点最多120字",
+                "description": ARTICLE_DIGEST_PROMPT,
             },
         },
         "required": ["body", "titles", "subtitles", "digest"],

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import httpx
 
+from app.ai import ARTICLE_DIGEST_PROMPT
 from app.ai.failover import FailoverRewriter
 from app.ai.manus import (
     ManusAPIError,
@@ -73,6 +74,10 @@ class ManusClientTests(unittest.TestCase):
             schema["required"], ["body", "titles", "subtitles", "digest"]
         )
         self.assertIn("120", schema["properties"]["digest"]["description"])
+        self.assertEqual(
+            schema["properties"]["digest"]["description"],
+            ARTICLE_DIGEST_PROMPT,
+        )
         self.assertEqual(
             set(schema["properties"]), {"body", "titles", "subtitles", "digest"}
         )

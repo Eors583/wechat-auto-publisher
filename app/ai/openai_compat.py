@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from . import (
+    ARTICLE_DIGEST_PROMPT,
     EMPHASIS_PROMPT,
     RewriteResult,
     SUBTITLE_CANDIDATE_COUNT,
@@ -297,7 +298,7 @@ class OpenAICompatClient:
                     f"副标题候选{i}"
                     for i in range(1, SUBTITLE_CANDIDATE_COUNT + 1)
                 ],
-                "digest": "阅读全文后形成的120字以内摘要",
+                "digest": "接地气、易传播的120字以内文章摘要",
             },
             ensure_ascii=False,
         )
@@ -311,8 +312,7 @@ class OpenAICompatClient:
             f"主标题：约 16–28 字，有点击欲，不要编号，彼此角度不同。\n"
             f"副标题：一句有信息量的说明，约 12–24 字；"
             f"严禁输出「关于××的关键补充」「补充1」等占位空话。\n"
-            f"摘要 digest：阅读全文后独立概括核心事实、主要观点和结论，不得照抄"
-            f"标题或第一段，含标点最多120字。\n"
+            f"摘要 digest：{ARTICLE_DIGEST_PROMPT}\n"
             f"只输出 JSON（不要其它文字），titles 与 subtitles 数组都必须恰好包含 "
             f"{TITLE_CANDIDATE_COUNT} 项。格式示例：{bundle_example}\n\n"
             f"【话题】{topic}\n\n【完整正文】\n{body[:12000]}\n"
@@ -323,7 +323,7 @@ class OpenAICompatClient:
                 system=(
                     "只输出合法 JSON。titles、subtitles 与 digest 必须是真实可用文案，"
                     f"titles 与 subtitles 各自必须恰好包含 {TITLE_CANDIDATE_COUNT} 项；"
-                    "digest 必须基于全文且不超过120字；禁止任何占位符、模板句。"
+                    f"digest 必须满足：{ARTICLE_DIGEST_PROMPT}禁止任何占位符、模板句。"
                 ),
                 max_tokens=2600,
                 temperature=0.85,
