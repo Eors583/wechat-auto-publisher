@@ -529,6 +529,7 @@ class BatchService:
         chat_id: str | None = None,
         parent_batch_id: str | None = None,
         source_channel: str | None = None,
+        source_integration_id: str | None = None,
     ) -> dict[str, Any]:
         source_url = (source_url or "").strip() or None
         raw_content = (raw_content or "").strip() or None
@@ -572,6 +573,7 @@ class BatchService:
             requested_by=requested_by,
             chat_id=chat_id,
             parent_batch_id=parent_batch_id,
+            source_integration_id=source_integration_id,
         )
         cancel_event = threading.Event()
         task_items: list[dict[str, Any]] = []
@@ -601,6 +603,7 @@ class BatchService:
                         "fallback_model_id": "",
                         "requested_by": requested_by,
                         "chat_id": chat_id,
+                        "source_integration_id": str(source_integration_id or ""),
                         "source_mode": source_mode,
                         "reference_urls": references,
                         "required_facts": str(required_facts or ""),

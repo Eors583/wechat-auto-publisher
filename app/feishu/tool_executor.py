@@ -187,6 +187,8 @@ class FeishuToolExecutor(
         admin_open_ids: set[str] | None = None,
         source_channel: str = "feishu",
         channel_settings_label: str = "飞书接入设置",
+        integration_id: str = "",
+        allowed_account_ids: list[str] | None = None,
     ) -> None:
         self.service = service
         self.config = config
@@ -200,6 +202,12 @@ class FeishuToolExecutor(
         self.channel_settings_label = str(
             channel_settings_label or "飞书接入设置"
         ).strip()
+        self.integration_id = str(integration_id or "").strip()
+        self.allowed_account_ids = {
+            str(item).strip()
+            for item in allowed_account_ids or []
+            if str(item).strip()
+        }
         db = getattr(service, "db", None)
         self.configuration = ConfigurationService(db, config) if db is not None else None
         self.creation_plans = (
@@ -431,7 +439,7 @@ class FeishuToolExecutor(
         if not source_url and not raw_content and not topic and not reference_urls:
             self.reply_text(message_id, "请提供文章链接、正文、多篇参考链接或原创话题。")
             return
-        batch = self.service.create_batch(
+        create_arguments = dict(
             source_url=source_url or None,
             raw_content=raw_content or None,
             topic=topic or None,
@@ -444,6 +452,9 @@ class FeishuToolExecutor(
             chat_id=chat_id,
             source_channel=self.source_channel,
         )
+        if self.integration_id:
+            create_arguments["source_integration_id"] = self.integration_id
+        batch = self.service.create_batch(**create_arguments)
         self.sessions.bind_batch(chat_id, str(batch["id"]))
         if followed_article_id and self.followed_content is not None:
             try:
@@ -620,6 +631,12 @@ class FeishuToolExecutor(
 
     def resolve_accounts(self, arguments: dict[str, Any]) -> list[str]:
         accounts = self.service.list_accounts()
+        if self.allowed_account_ids:
+            accounts = [
+                item
+                for item in accounts
+                if str(item.get("id") or "") in self.allowed_account_ids
+            ]
         by_id = {str(item["id"]): str(item["id"]) for item in accounts}
         by_name = {str(item["name"]): str(item["id"]) for item in accounts}
         references = [
@@ -629,7 +646,17 @@ class FeishuToolExecutor(
             *string_list(arguments.get("account_name")),
         ]
         if not references:
-            return self.default_account_ids or list(by_id)
+            defaults = [
+                account_id
+                for account_id in self.default_account_ids
+                if account_id in by_id
+            ]
+            if len(defaults) == 1:
+                return defaults
+            names = "、".join(by_name) or "暂无可用公众号"
+            raise ValueError(
+                "请明确指定本次使用的公众号。当前可选：" + names
+            )
         resolved: list[str] = []
         unknown: list[str] = []
         for reference in references:

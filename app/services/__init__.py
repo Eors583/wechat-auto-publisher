@@ -23,6 +23,10 @@ _EXPORTS = {
         "app.services.followed_content",
         "FollowedContentService",
     ),
+    "FeishuIntegrationService": (
+        "app.services.feishu_integrations",
+        "FeishuIntegrationService",
+    ),
     "OnboardingService": ("app.services.onboarding", "OnboardingService"),
     "TopicSourceService": (
         "app.services.topic_sources",

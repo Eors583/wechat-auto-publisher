@@ -12,6 +12,23 @@ SENSITIVE_FIELDS = ("app_secret", "verification_token", "encrypt_key")
 
 
 def public_feishu_settings(db: Database) -> dict[str, Any]:
+    if db.owner_user_id:
+        from app.services.feishu_integrations import FeishuIntegrationService
+
+        current = FeishuIntegrationService(db).public()
+        if current.get("configured"):
+            default_account_id = str(
+                current.get("default_account_id") or ""
+            ).strip()
+            return {
+                **current,
+                "default_account_ids": [default_account_id]
+                if default_account_id
+                else [],
+                "allow_all": False,
+                "allowed_open_ids": [],
+                "allowed_chat_ids": [],
+            }
     stored = _load(db)
     return {
         "enabled": bool(stored.get("enabled", False)),
@@ -81,6 +98,20 @@ def effective_feishu_settings(
     db: Database,
     config_fallback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if db.owner_user_id:
+        from app.services.feishu_integrations import FeishuIntegrationService
+
+        effective = FeishuIntegrationService(db).effective_for_owner()
+        if effective:
+            return {
+                **effective,
+                "integration_id": str(effective.get("id") or ""),
+                "allow_all": False,
+                "allowed_open_ids": [str(effective.get("bound_open_id") or "")]
+                if effective.get("bound_open_id")
+                else [],
+                "allowed_chat_ids": [],
+            }
     stored = _load(db)
     if not stored:
         fallback = dict(config_fallback or {})

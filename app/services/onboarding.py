@@ -784,7 +784,10 @@ class OnboardingService:
 
         feishu = public_feishu_settings(self.db)
         effective_feishu = effective_feishu_settings(self.db)
-        runtime = get_runtime(self.db)
+        runtime = get_runtime(
+            self.db,
+            integration_id=str(feishu.get("id") or ""),
+        )
         credentials_test = dict(state.get("feishu_credentials_test") or {})
         credentials_ok = bool(credentials_test.get("ok")) and str(
             credentials_test.get("credential_fingerprint") or ""
@@ -792,6 +795,12 @@ class OnboardingService:
             str(effective_feishu.get("app_id") or ""),
             str(effective_feishu.get("app_secret") or ""),
         )
+        if feishu.get("configured"):
+            credentials_ok = bool(
+                feishu.get("has_app_secret")
+                and feishu.get("has_verification_token")
+                and feishu.get("has_encrypt_key")
+            )
         runtime_is_current = bool(
             runtime.get("app_id")
             and str(runtime.get("app_id") or "") == str(feishu.get("app_id") or "")
@@ -804,13 +813,20 @@ class OnboardingService:
             runtime.get("last_reply_at"),
             runtime.get("last_message_at"),
         )
-        message_authorized = bool(
-            feishu.get("allow_all")
-            or str(runtime.get("last_open_id") or "")
-            in set(feishu.get("allowed_open_ids") or [])
-            or str(runtime.get("last_chat_id") or "")
-            in set(feishu.get("allowed_chat_ids") or [])
-        )
+        if feishu.get("configured"):
+            message_authorized = bool(
+                feishu.get("bound")
+                and str(runtime.get("last_open_id") or "")
+                == str(effective_feishu.get("bound_open_id") or "")
+            )
+        else:
+            message_authorized = bool(
+                feishu.get("allow_all")
+                or str(runtime.get("last_open_id") or "")
+                in set(feishu.get("allowed_open_ids") or [])
+                or str(runtime.get("last_chat_id") or "")
+                in set(feishu.get("allowed_chat_ids") or [])
+            )
         all_accounts_bound = bool(accounts) and (len(bound_accounts) == len(accounts))
         all_account_models_tested = all_accounts_bound and all(
             str(

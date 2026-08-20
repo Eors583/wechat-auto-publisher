@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
-from collections.abc import Callable
 from typing import Any
 
 from nicegui import ui
 
+from app.ui import desktop
 from app.ui.panels import feishu
+from app.ui.styles import APP_CSS
 
 
 class _FakeState:
@@ -17,15 +17,14 @@ class _FakeState:
 
     def __init__(self, models: dict[str, str] | None = None) -> None:
         self.models = dict(models or {})
-        self.model_option_calls: list[bool] = []
-        self.model_registrations: list[dict[str, Any]] = []
         self.reload_count = 0
+        self.model_registrations: list[dict[str, Any]] = []
 
     def reload_config(self) -> None:
         self.reload_count += 1
 
     def model_options(self, *, include_default: bool = True) -> dict[str, str]:
-        self.model_option_calls.append(include_default)
+        assert include_default is False
         return dict(self.models)
 
     def register_model_select(self, select: Any, **kwargs: Any) -> Any:
@@ -33,77 +32,16 @@ class _FakeState:
         return select
 
 
-class _FakeOnboardingService:
-    def __init__(
-        self,
-        readiness: dict[str, Any],
-        pairing: dict[str, Any] | None = None,
-    ) -> None:
-        self._readiness = dict(readiness)
-        self._pairing = dict(pairing or {"status": "none"})
+class _FakeIntegrationService:
+    def __init__(self, settings: dict[str, Any]) -> None:
+        self.settings = dict(settings)
 
-    def readiness(self) -> dict[str, Any]:
-        return dict(self._readiness)
-
-    def feishu_pairing_status(self) -> dict[str, Any]:
-        return dict(self._pairing)
+    def public(self) -> dict[str, Any]:
+        return dict(self.settings)
 
 
-def _render(
-    monkeypatch: Any,
-    *,
-    models: dict[str, str] | None = None,
-    accounts: list[dict[str, Any]] | None = None,
-    saved: dict[str, Any] | None = None,
-    readiness: dict[str, Any] | None = None,
-    runtime: dict[str, Any] | None = None,
-    pairing: dict[str, Any] | None = None,
-    restart_available: bool = True,
-    after_render: Callable[[], None] | None = None,
-) -> tuple[_FakeState, str]:
-    state = _FakeState(models)
-    service = _FakeOnboardingService(
-        readiness
-        or {
-            "feishu_saved": False,
-            "feishu_ready": False,
-            "feishu_runtime_status": "stopped",
-        },
-        pairing,
-    )
-    monkeypatch.setattr(
-        feishu,
-        "OnboardingService",
-        lambda _db, _config: service,
-    )
-    monkeypatch.setattr(
-        feishu,
-        "public_feishu_settings",
-        lambda _db: dict(saved or {}),
-    )
-    monkeypatch.setattr(
-        feishu,
-        "public_accounts",
-        lambda _db, *, enabled_only=True: list(accounts or []),
-    )
-    monkeypatch.setattr(
-        feishu,
-        "get_runtime",
-        lambda _db: dict(runtime or {"status": "stopped"}),
-    )
-    monkeypatch.setattr(
-        feishu,
-        "api_service_restart_available",
-        lambda: restart_available,
-    )
-    try:
-        feishu.build_feishu_panel(state)
-        if after_render is not None:
-            after_render()
-        snapshot = _snapshot()
-    finally:
-        ui.context.client.remove_all_elements()
-    return state, snapshot
+class _FakeOnboarding:
+    pass
 
 
 def _snapshot() -> str:
@@ -120,337 +58,201 @@ def _snapshot() -> str:
     return json.dumps(values, ensure_ascii=False, default=str)
 
 
-def _select_value(snapshot: str, label: str) -> Any:
-    return next(
-        item.get("value")
-        for item in json.loads(snapshot)
-        if item.get("type") == "Select"
-        and item.get("props", {}).get("label") == label
-    )
-
-
-def test_feishu_panel_renders_when_no_agent_models_exist(
+def _render(
     monkeypatch: Any,
-) -> None:
-    """A clean install must render before the first model or account is added."""
+    *,
+    settings: dict[str, Any] | None = None,
+    accounts: list[dict[str, Any]] | None = None,
+    models: dict[str, str] | None = None,
+) -> tuple[_FakeState, str]:
+    state = _FakeState(models)
+    service = _FakeIntegrationService(
+        settings
+        or {
+            "configured": False,
+            "status": "unconfigured",
+            "runtime": {},
+            "account_ids": [],
+        }
+    )
+    monkeypatch.setattr(
+        feishu,
+        "FeishuIntegrationService",
+        lambda _db, _config: service,
+    )
+    monkeypatch.setattr(
+        feishu,
+        "OnboardingService",
+        lambda _db, _config: _FakeOnboarding(),
+    )
+    monkeypatch.setattr(
+        feishu,
+        "public_accounts",
+        lambda _db: list(accounts or []),
+    )
+    monkeypatch.setattr(feishu, "client_timer", lambda *_args, **_kwargs: object())
+    try:
+        feishu.build_feishu_panel(state)
+        snapshot = _snapshot()
+    finally:
+        ui.context.client.remove_all_elements()
+    return state, snapshot
 
+
+def test_feishu_panel_is_a_per_user_webhook_configuration(monkeypatch: Any) -> None:
     state, snapshot = _render(monkeypatch)
 
     assert state.reload_count == 1
-    assert state.model_option_calls == [False]
-    assert "请先在“模型管理 → 文章模型”中添加并启用模型" in snapshot
-    assert "尚无可用公众号" in snapshot
-    assert "默认飞书智能体模型（从已有文本模型选择）" in snapshot
-    assert "刷新已有文本模型" in snapshot
-    assert "未启用（enabled=false）" in snapshot
-    assert "一键验证并保存" in snapshot
-    assert "enabled=true" in snapshot
-    assert "立即重启飞书服务" in snapshot
+    assert "我的飞书机器人" in snapshot
+    assert "用户独立 · Webhook" in snapshot
+    assert "App ID" in snapshot
+    assert "App Secret" in snapshot
+    assert "Verification Token" in snapshot
+    assert "Encrypt Key" in snapshot
+    assert "机器人允许操作的公众号" in snapshot
+    assert "唯一默认公众号" in snapshot
+    assert "保存并验证我的机器人" in snapshot
+    assert "飞书事件回调地址" in snapshot
+    assert "生成 10 分钟配对码" in snapshot
 
 
-def test_feishu_account_catalog_keeps_enabled_unbound_accounts_visible(
+def test_feishu_panel_never_renders_global_allowlists_or_restart(
+    monkeypatch: Any,
+) -> None:
+    _, snapshot = _render(monkeypatch)
+
+    for removed in (
+        "允许应用可用范围内的所有成员",
+        "允许的用户 Open ID",
+        "允许的群聊 Chat ID",
+        "立即重启飞书服务",
+        "长连接模式",
+    ):
+        assert removed not in snapshot
+    assert "群聊消息" not in feishu.PERMISSION_CODES
+    assert "im:message.group_at_msg:readonly" not in feishu.PERMISSION_CODES
+
+
+def test_saved_credentials_are_masked_and_binding_is_status_only(
+    monkeypatch: Any,
+) -> None:
+    secret = "must-never-render"
+    _, snapshot = _render(
+        monkeypatch,
+        models={"model-1": "运营文本模型"},
+        accounts=[
+            {
+                "id": "account-1",
+                "name": "蓝桥研究",
+                "enabled": True,
+                "has_model": True,
+            }
+        ],
+        settings={
+            "configured": True,
+            "enabled": True,
+            "status": "active",
+            "app_id": "cli_public",
+            "app_secret": secret,
+            "has_app_secret": True,
+            "has_verification_token": True,
+            "has_encrypt_key": True,
+            "agent_model_id": "model-1",
+            "account_ids": ["account-1"],
+            "default_account_id": "account-1",
+            "callback_path": "/api/feishu/events/random-callback",
+            "bound": True,
+            "bound_open_id_masked": "ou_a…0001",
+            "pairing": {"status": "used"},
+            "runtime": {"callback_verified_at": "2026-08-20T12:00:00Z"},
+        },
+    )
+
+    assert "运行正常" in snapshot
+    assert "已收到回调" in snapshot
+    assert "ou_a…0001" in snapshot
+    assert "https://你的系统域名/api/feishu/events/random-callback" in snapshot
+    assert "已加密保存；留空保持不变" in snapshot
+    assert "解除绑定" in snapshot
+    assert "停用我的机器人" in snapshot
+    assert secret not in snapshot
+
+
+def test_disabled_robot_has_a_visible_safe_reenable_action(
+    monkeypatch: Any,
+) -> None:
+    _, snapshot = _render(
+        monkeypatch,
+        models={"model-1": "运营文本模型"},
+        accounts=[
+            {
+                "id": "account-1",
+                "name": "蓝桥研究",
+                "enabled": True,
+                "has_model": True,
+            }
+        ],
+        settings={
+            "configured": True,
+            "enabled": False,
+            "status": "disabled",
+            "app_id": "cli_public",
+            "has_app_secret": True,
+            "has_verification_token": True,
+            "has_encrypt_key": True,
+            "agent_model_id": "model-1",
+            "account_ids": ["account-1"],
+            "default_account_id": "account-1",
+            "bound": False,
+            "pairing": {"status": "none"},
+            "runtime": {},
+        },
+    )
+
+    assert "启用我的机器人" in snapshot
+    assert "停用我的机器人" not in snapshot
+    assert "解除绑定" not in snapshot
+
+
+def test_account_catalog_only_exposes_the_current_users_enabled_accounts(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(
         feishu,
         "public_accounts",
         lambda _db: [
-            {
-                "id": "ready",
-                "name": "已就绪公众号",
-                "enabled": True,
-                "has_model": True,
-            },
-            {
-                "id": "unbound",
-                "name": "待绑定模型公众号",
-                "enabled": True,
-                "has_model": False,
-            },
-            {
-                "id": "disabled",
-                "name": "已停用公众号",
-                "enabled": False,
-                "has_model": True,
-            },
+            {"id": "ready", "name": "已就绪", "enabled": True, "has_model": True},
+            {"id": "unbound", "name": "待模型", "enabled": True, "has_model": False},
+            {"id": "disabled", "name": "已停用", "enabled": False},
         ],
     )
 
     options, disabled, unbound = feishu._feishu_account_catalog(object())
 
-    assert options == {
-        "ready": "已就绪公众号",
-        "unbound": "待绑定模型公众号 · 尚未绑定文章模型",
-    }
-    assert disabled == ["已停用公众号"]
-    assert unbound == ["待绑定模型公众号"]
+    assert options == {"ready": "已就绪", "unbound": "待模型 · 尚未绑定文章模型"}
+    assert disabled == ["已停用"]
+    assert unbound == ["待模型"]
 
 
-def test_feishu_account_selector_refreshes_without_leaving_page(
-    monkeypatch: Any,
-) -> None:
-    accounts = [
-        {
-            "id": "account-1",
-            "name": "公众号A",
-            "enabled": True,
-            "has_model": True,
-        }
-    ]
-    timer_callbacks: list[Callable[[], None]] = []
-
-    def capture_timer(
-        _interval: float,
-        callback: Callable[[], None],
-        **_kwargs: Any,
-    ) -> object:
-        timer_callbacks.append(callback)
-        return object()
-
-    monkeypatch.setattr(feishu, "client_timer", capture_timer)
-
-    def add_account_and_refresh() -> None:
-        accounts.append(
-            {
-                "id": "account-2",
-                "name": "公众号B",
-                "enabled": True,
-                "has_model": True,
-            }
-        )
-        timer_callbacks[0]()
-
-    _, snapshot = _render(
-        monkeypatch,
-        models={"model-1": "运营文本模型"},
-        accounts=accounts,
-        saved={
-            "agent_model_id": "model-1",
-            "default_account_ids": ["account-1"],
-        },
-        after_render=add_account_and_refresh,
-    )
-
-    assert "已实时载入 2 个已启用公众号" in snapshot
-    assert "公众号B" in snapshot
-    assert _select_value(
-        snapshot,
-        "机器人默认生成到哪些公众号？",
-    ) == ["account-1"]
+def test_feishu_layout_uses_shared_responsive_classes() -> None:
+    assert ".feishu-config-grid" in APP_CSS
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in APP_CSS
+    assert "@media (max-width: 600px)" in APP_CSS
+    assert ".feishu-break-anywhere" in APP_CSS
+    scroll_css = APP_CSS[APP_CSS.index(".ops-feishu-page .ops-page-host {") :]
+    assert "overflow-x: hidden" in scroll_css[:300]
+    assert "overflow-y: auto" in scroll_css[:300]
+    assert "scrollbar-gutter: stable" in scroll_css[:300]
 
 
-def test_invalid_saved_agent_model_is_not_silently_replaced(
-    monkeypatch: Any,
-) -> None:
-    _, snapshot = _render(
-        monkeypatch,
-        models={
-            "config:moonshot": "Kimi 配置模型",
-            "model-1": "运营文本模型",
-        },
-        accounts=[{"id": "account-1", "name": "蓝血研究"}],
-        saved={
-            "enabled": False,
-            "agent_model_id": "removed-model",
-            "default_account_ids": ["account-1"],
-        },
-    )
+def test_every_authenticated_user_has_a_real_feishu_settings_entry() -> None:
+    source = inspect.getsource(desktop.create_desktop_app)
 
-    assert _select_value(
-        snapshot,
-        "默认飞书智能体模型（从已有文本模型选择）",
-    ) is None
-    assert "原模型已停用/删除" in snapshot
-    assert "config:moonshot" not in inspect.getsource(
-        feishu.build_feishu_panel
-    )
-
-
-def test_feishu_tutorial_is_inline_and_follows_real_connection_order(
-    monkeypatch: Any,
-) -> None:
-    secret = "must-never-render-feishu-secret"
-    state, snapshot = _render(
-        monkeypatch,
-        models={"model-1": "运营文本模型"},
-        accounts=[{"id": "account-1", "name": "蓝血研究"}],
-        saved={
-            "enabled": True,
-            "app_id": "cli_public_id",
-            "has_app_secret": True,
-            "agent_model_id": "model-1",
-            "default_account_ids": ["account-1"],
-            "allow_all": False,
-            "allowed_open_ids": [],
-            "allowed_chat_ids": [],
-            "app_secret": secret,
-            "verification_token": "private-verification-token",
-            "encrypt_key": "private-encrypt-key",
-        },
-        readiness={
-            "feishu_saved": True,
-            "feishu_ready": False,
-            "feishu_runtime_status": "connecting",
-        },
-        runtime={
-            "status": "connecting",
-            "app_id": "cli_public_id",
-            "started_at": "2026-07-24T12:00:00+00:00",
-            "last_message_at": "",
-            "last_reply_at": "",
-        },
-    )
-
-    headings = [
-        "创建企业自建应用并复制凭证",
-        "在本页验证并保存",
-        "重启飞书服务",
-        "开通权限并设置长连接事件",
-        "创建版本并发布",
-        "生成并发送一次性绑定口令",
-    ]
-    positions = [snapshot.index(item) for item in headings]
-    assert positions == sorted(positions)
-    assert "默认采用一次性口令绑定，不需要查 Open ID" in snapshot
-    assert "im.message.receive_v1" in snapshot
-    assert feishu.PERMISSION_CODES in snapshot
-    assert "高风险：开启后" in snapshot
-    assert "当前使用长连接，这两项不需要填写" in snapshot
-    assert "服务已启动，等待测试消息" in snapshot
-    assert "已启用（enabled=true）" in snapshot
-    assert "不用退出桌面应用" in snapshot
-    assert "立即重启飞书服务" in snapshot
-    assert "刷新接入状态" in snapshot
-    assert "本次真实授权消息已收到并成功回复" not in snapshot
-    assert secret not in snapshot
-    assert "private-verification-token" not in snapshot
-    assert "private-encrypt-key" not in snapshot
-    assert state.model_option_calls == [False]
-
-
-def test_feishu_panel_only_marks_complete_after_current_authorized_reply(
-    monkeypatch: Any,
-) -> None:
-    _, snapshot = _render(
-        monkeypatch,
-        models={"model-1": "运营文本模型"},
-        accounts=[{"id": "account-1", "name": "蓝血研究"}],
-        saved={
-            "enabled": True,
-            "app_id": "cli_public_id",
-            "has_app_secret": True,
-            "agent_model_id": "model-1",
-            "default_account_ids": ["account-1"],
-            "allowed_open_ids": ["ou_bound"],
-        },
-        readiness={
-            "feishu_saved": True,
-            "feishu_ready": True,
-            "feishu_runtime_status": "running",
-        },
-        runtime={
-            "status": "running",
-            "app_id": "cli_public_id",
-            "started_at": "2026-07-24T12:00:00+00:00",
-            "last_message_at": "2026-07-24T12:01:00+00:00",
-            "last_reply_at": "2026-07-24T12:01:01+00:00",
-            "last_open_id": "ou_bound",
-        },
-        pairing={"status": "used", "bound_open_id": "ou_bound"},
-    )
-
-    assert "接入完成" in snapshot
-    assert "本次启动后已收到授权用户消息，并已成功回复" in snapshot
-    assert "本次真实授权消息已收到并成功回复" in snapshot
-
-
-def test_restart_button_calls_runtime_control_and_uses_io_bound(
-    monkeypatch: Any,
-) -> None:
-    calls: list[str] = []
-    callbacks: dict[str, Callable[[], Any]] = {}
-
-    def restart() -> dict[str, Any]:
-        calls.append("restart")
-        return {"ok": True, "message": "飞书服务已重新启动"}
-
-    async def io_bound(callback: Callable[[], Any]) -> Any:
-        calls.append("io_bound")
-        return callback()
-
-    monkeypatch.setattr(feishu, "restart_api_service", restart)
-    monkeypatch.setattr(feishu.run, "io_bound", io_bound)
-    monkeypatch.setattr(
-        feishu,
-        "set_button_loading",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        feishu.ui,
-        "notify",
-        lambda *_args, **_kwargs: None,
-    )
-    original_button = feishu.ui.button
-
-    def capture_button(
-        text: str,
-        *args: Any,
-        on_click: Callable[[], Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        if text == "立即重启飞书服务" and on_click is not None:
-            callbacks["restart"] = on_click
-        return original_button(
-            text,
-            *args,
-            on_click=on_click,
-            **kwargs,
-        )
-
-    monkeypatch.setattr(feishu.ui, "button", capture_button)
-
-    def trigger_restart() -> None:
-        callback = callbacks["restart"]
-        for cell in callback.__closure__ or ():
-            value = cell.cell_contents
-            if callable(getattr(value, "refresh", None)):
-                monkeypatch.setattr(value, "refresh", lambda: None)
-        asyncio.run(callback())
-
-    _, snapshot = _render(
-        monkeypatch,
-        models={"model-1": "运营文本模型"},
-        accounts=[{"id": "account-1", "name": "蓝血研究"}],
-        saved={
-            "enabled": True,
-            "app_id": "cli_public_id",
-            "has_app_secret": True,
-            "agent_model_id": "model-1",
-            "default_account_ids": ["account-1"],
-        },
-        readiness={
-            "feishu_saved": True,
-            "feishu_ready": False,
-            "feishu_runtime_status": "connecting",
-        },
-        runtime={"status": "connecting"},
-        after_render=trigger_restart,
-    )
-
-    assert calls == ["io_bound", "restart"]
-    assert "立即重启飞书服务" in snapshot
-
-
-def test_cloud_panel_hides_the_unavailable_process_restart_action(
-    monkeypatch: Any,
-) -> None:
-    _, snapshot = _render(monkeypatch, restart_available=False)
-    buttons = {
-        str(item.get("text") or "")
-        for item in json.loads(snapshot)
-        if item.get("type") == "Button"
-    }
-
-    assert "立即重启飞书服务" not in buttons
-    assert "当前为云端工作台，飞书服务由服务器自动管理" in snapshot
-    assert "刷新接入状态" in buttons
+    assert 'tab_feishu = ui.tab("飞书机器人", icon="forum")' in source
+    assert 'aria-label="飞书机器人" title="飞书机器人"' in source
+    assert '"我的飞书机器人"' in source
+    assert "on_click=lambda: tabs.set_value(tab_feishu)" in source
+    assert "def mount_feishu() -> None:" in source
+    assert "build_feishu_panel(page_state)" in source
+    assert 'str(tab_feishu.props["name"]): mount_feishu' in source
+    assert 'str(query_params.get("view") or "").strip().lower() == "feishu"' in source

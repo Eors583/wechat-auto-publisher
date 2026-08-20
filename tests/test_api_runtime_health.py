@@ -40,7 +40,7 @@ def test_health_identifies_the_exact_process_and_launcher_session(
     assert payload["instance_root"] == config["_root"]
 
 
-def test_disabled_feishu_lifespan_clears_stale_runtime_status(
+def test_legacy_global_feishu_runtime_is_not_used_by_multitenant_health(
     tmp_path,
 ) -> None:
     config, service = _service(tmp_path)
@@ -55,12 +55,14 @@ def test_disabled_feishu_lifespan_clears_stale_runtime_status(
         assert payload["feishu_enabled"] is False
         assert payload["feishu_status"] == "disabled"
 
-    runtime = get_runtime(service.db)
-    assert runtime["status"] == "disabled"
-    assert runtime["last_error"] == ""
+    assert payload["feishu_integrations"] == 0
+    assert payload["feishu_enabled_integrations"] == 0
+    # The dormant legacy value is preserved for recovery, but no longer owns
+    # API startup or unauthenticated health output.
+    assert get_runtime(service.db)["status"] == "running"
 
 
-def test_health_and_runtime_never_expose_connection_secrets(tmp_path) -> None:
+def test_global_config_cannot_enable_a_multitenant_feishu_robot(tmp_path) -> None:
     config, service = _service(tmp_path, enabled=True)
     update_runtime(
         service.db,
@@ -74,8 +76,9 @@ def test_health_and_runtime_never_expose_connection_secrets(tmp_path) -> None:
     with TestClient(app) as client:
         payload = client.get("/health").json()
 
-    assert payload["feishu_error"] == "飞书连接异常"
-    assert payload["feishu_error_code"] == "feishu.connection_failed"
+    assert payload["feishu_enabled"] is False
+    assert payload["feishu_error"] is None
+    assert payload["feishu_error_code"] is None
     assert "SECRET-RUNTIME-TOKEN" not in str(payload)
 
 

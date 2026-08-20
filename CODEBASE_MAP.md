@@ -1,6 +1,6 @@
 # WeChat Auto Publisher — AI development handoff and code map
 
-Last verified against the repository on **2026-08-18**. This document describes
+Last verified against the repository on **2026-08-20**. This document describes
 the current source tree; code is the final authority. When a symbol moves, update
 this file in the same change.
 
@@ -86,7 +86,7 @@ by NiceGUI from `app/ui/`. Do not edit bytecode or build a second frontend under
   `Database.set_owner_user(user_id)`. API requests use `customer_data_scope`.
 - `AppState.set_current_user` scopes its database handle to the logged-in user.
 - Customer data includes accounts, batches/jobs, prompts, plans, review data,
-  followed content, topic data and UI preferences.
+  followed content, topic data, per-user Feishu integrations and UI preferences.
 - `ai_models.owner_user_id == ''` means a platform/official model; a non-empty
   owner is a user's custom model. Official models are visible to users but may
   only be managed from the merchant admin path.
@@ -194,7 +194,7 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `settings_hub.py` | Merchant/user model-management composition and creation-plan panel composition. |
 | `onboarding_wizard.py` | First-run configuration wizard, readiness checks and persistent health banner. |
 | `overview.py` | Compact overview/metric cards used by older or secondary UI composition paths. |
-| `feishu.py` | Feishu configuration, pairing, runtime status and restart controls. |
+| `feishu.py` | “我的飞书机器人”: per-user encrypted app credentials, dedicated Webhook, model/account scope, callback status, one-time p2p pairing, unbind and disable controls. |
 | `wechat_relay.py` | Optional WeChat fixed-egress relay configuration and validation UI. |
 
 Primary tab ownership inside `desktop.py`:
@@ -205,6 +205,8 @@ Primary tab ownership inside `desktop.py`:
 | 选题雷达 | `panels.topics.build_topic_center` |
 | 任务队列 | `panels.tasks.build_tasks_panel` |
 | 公众号 | `_build_accounts_panel` → `_render_account_config_workspace` |
+| 模型配置 | `panels.models.build_models_panel` |
+| 飞书机器人 | `panels.feishu.build_feishu_panel` |
 | 文章审核 | hidden route/tab entered from a task row → `panels.tasks.build_review_page` |
 
 ### 4.4 Shared services (`app/services/`)
@@ -218,6 +220,7 @@ Primary tab ownership inside `desktop.py`:
 | `editorial_reviews.py` | AI review/rewrite state machine, guards, snapshots, prompt/schema building, incomplete-output recovery, issue resolution, numeric/fact safeguards and source-vs-candidate application. |
 | `article_revisions.py` | Paragraph-level AI revision with structural cleanup, inline-image preservation and version events. |
 | `configuration.py` | Safe public CRUD facade for accounts, models, prompts and layouts; recursively strips credentials. Prefer this over direct DB use from new management APIs. |
+| `feishu_integrations.py` | Per-user Feishu integration security boundary: encrypted credentials, globally unique App ID, dedicated callback key, account/model ownership checks, p2p identity binding, hashed expiring pairing codes and safe legacy migration. |
 | `local_agents.py` | One-time device pairing, Agent Token authentication, device management, fixed `chat.completions` claims, 60-second leases and idempotent result submission. |
 | `creation_plans.py` | Reusable plans combining prompts, layout, image/cover and review settings; account defaults and account-specific template bindings. |
 | `followed_content.py` | Followed-account CRUD and article discovery. Chooses available acquisition paths (Jizhile, WeChat backend state, RSS/manual) and persists articles per user. |
@@ -336,6 +339,8 @@ Endpoint map (handler names are searchable symbols):
 | Followed content | account CRUD/refresh and article list/add/state update under `/api/v1/followed-*` |
 | Batches/jobs | create/list/get, review inbox, attempts/retry, selection/view/confirm/needs-changes/content/rerender, paragraph/images/cover/version operations, draft/cancel/retry/copy/archive |
 | AI review | profiles/defaults, run/list/get review, generate candidate, list/get/apply/keep-source application, resolve issue |
+| My Feishu bot | authenticated owner-scoped `GET/PUT /api/v1/me/feishu-integration`, credential test, pairing-code, unbind, enable and disable |
+| Feishu events | unauthenticated callback-key lookup at `POST /api/feishu/events/{callback_key}`; the handler verifies/decrypts the event, binds the integration owner, then delegates to shared services |
 
 Run the AST endpoint inventory when routes change:
 
@@ -347,11 +352,12 @@ rg -n "@(app|router)\.(get|post|put|patch|delete)" app/api
 
 | File | Responsibility |
 |---|---|
-| `gateway.py` | Lark SDK/long-connection transport and message send. |
-| `events.py` | Parses raw Feishu events into `IncomingFeishuMessage`. |
-| `bot.py` | Orchestrates pairing/session/agent/tool execution/progress; redacts known sensitive values. |
+| `gateway.py` | Legacy/single-tenant long-connection transport plus SDK message sending; it is not the multi-user production ingress. |
+| `webhook.py` | Production multi-user event ingress: resolves a random callback key, verifies signature/token/App ID, decrypts SDK events and constructs an owner-bound bot/service. |
+| `events.py` | Parses raw Feishu events into `IncomingFeishuMessage`, preserving App ID and `chat_type`. |
+| `bot.py` | Orchestrates strict p2p pairing/session/agent/tool execution/progress for one pre-bound integration owner; redacts known sensitive values. |
 | `agent.py` | Uses the configured planning model to create `AgentPlan`; enforces explicit confirmations and secret redaction. |
-| `session.py` | User/chat conversation and current batch/job context. |
+| `session.py` | Integration/chat conversation and current batch/job context; legacy user/chat fallback remains for compatibility only. |
 | `tool_catalog.py` | Tool schemas, descriptions and confirmation requirements shown to the agent. |
 | `tool_executor.py` | Central validated dispatch; composes domain mixins. |
 | `tool_modules/discovery.py` | Account/topic/article discovery tools. |
@@ -363,9 +369,9 @@ rg -n "@(app|router)\.(get|post|put|patch|delete)" app/api
 | `capabilities.py` | Required support matrix for public `BatchService` operations. |
 | `progress.py` | Deduplicated proactive job progress reporting. |
 | `presenter.py` | Human-readable account/topic/status/article/review/draft messages. |
-| `settings.py` | Per-user persisted Feishu settings and effective config. |
-| `pairing.py` | One-time pairing code creation/consumption/status. |
-| `runtime.py` | Persisted Feishu runtime state. |
+| `settings.py` | Compatibility projection over the per-user integration service. |
+| `pairing.py` | Integration-scoped one-time pairing, with legacy compatibility helpers. |
+| `runtime.py` | Integration-scoped persisted runtime state, with legacy compatibility helpers. |
 | `media.py` | Safe WeChat-image download for Feishu delivery. |
 | `legacy.py` | Backward-compatible fixed command handler. |
 
@@ -406,7 +412,11 @@ is permitted solely when tests explicitly opt in.
 | `editorial_review_applications` | user | Rewrite candidates and source/candidate choice state |
 | `topic_sources`, `topic_items` | user | Persisted source definitions and fetched topics |
 | `followed_accounts`, `followed_articles` | user | Followed-public-account catalog and article states |
-| `bot_sessions`, `bot_contexts`, `processed_events` | user/event | Feishu conversation context and event deduplication |
+| `feishu_integrations` | user | One encrypted Feishu app per owner in v1; globally unique App ID and random callback key, exact p2p identity binding, pairing state and runtime |
+| `feishu_integration_accounts` | user/integration/account | Allowed owned accounts and the integration's single default account |
+| `feishu_sessions` | user/integration/chat | Conversation, batch/job and context isolated by `(integration_id, chat_id)` |
+| `feishu_processed_events` | user/integration/event | Event deduplication isolated by `(integration_id, event_id)` |
+| `bot_sessions`, `bot_contexts`, `processed_events` | legacy user/event | Compatibility-only Feishu state; new multi-user Webhook traffic must not use these tables |
 | `ads` | user/config-compatible | Advertisement pool and use tracking |
 | `token_cache` | ephemeral/account-compatible | WeChat access-token cache; excluded from legacy business migration |
 
@@ -448,6 +458,7 @@ Use this table before searching the whole repository.
 | Login persistence | `ui/panels/auth.py`, `ui/auth_persistence.py` | `services/auth.py`, DB sessions, production NiceGUI volume | `test_auth_persistence.py`, `test_auth_and_managed_models.py` |
 | API behavior | `api/server.py` or `api/editorial_reviews.py` | relevant shared service and public contract | `test_api_*.py`, `test_failure_preflight_contract.py` |
 | Feishu operation | `feishu/tool_catalog.py` | appropriate tool mixin, executor, capabilities, presenter/progress | `test_feishu_*.py`, especially capability alignment/security |
+| Per-user Feishu bot/integration | `ui/panels/feishu.py`, `services/feishu_integrations.py` | `api/server.py`, `feishu/webhook.py`, `feishu/bot.py`, integration DB tables | `test_feishu_multitenant.py`, `test_ui_feishu_panel.py`, `test_api_runtime_health.py` |
 | Production deployment/cleanup | `deploy/production/deploy-from-git.sh` | `compose.production.yaml`, cleanup script/systemd units | `test_production_*.py`, `test_packaging_smoke.py` |
 
 ## 7. End-to-end call chains
@@ -620,8 +631,8 @@ fixtures. Do not copy its SQLite opt-in into runtime code.
 |---|---|
 | `.env` from `.env.example` | Secrets and deployment/runtime toggles: PostgreSQL, auth storage, credential encryption, provider keys, Feishu and relay. Never commit. |
 | `config.yaml` from `config.example.yaml` | Non-secret/legacy functional defaults: WeChat, AI fallback, prompts, layout, images, cover, topics, benchmark, notification. Runtime user/account settings increasingly override it. |
-| PostgreSQL `user_settings` | Per-login settings such as UI preferences, Jizhile/backend state, onboarding and Feishu. |
-| PostgreSQL business tables | Accounts, models, prompts, plans, tasks, reviews, topics and followed content. |
+| PostgreSQL `user_settings` | Per-login settings such as UI preferences, Jizhile/backend state and onboarding. |
+| PostgreSQL business tables | Accounts, models, prompts, plans, tasks, reviews, topics, followed content and per-user Feishu integrations. |
 | production shared `.env.production` | Stable production DB/auth/encryption secrets; deployment script reuses it across immutable releases. |
 
 Important environment behavior:
@@ -850,6 +861,7 @@ unless noted.
 | `app/services/configuration.py` | Credential-safe account/model/prompt CRUD facade. |
 | `app/services/creation_plans.py` | Reusable creation plans. |
 | `app/services/editorial_reviews.py` | AI review/rewrite domain/state machine. |
+| `app/services/feishu_integrations.py` | Per-user Feishu app, ownership, credentials, pairing and callback boundary. |
 | `app/services/failures.py` | Sanitized/classified failures. |
 | `app/services/followed_content.py` | Followed accounts and recent articles. |
 | `app/services/image_prompts.py` | Article-level visual brief and argument-level image prompt agent orchestration. |
@@ -928,6 +940,7 @@ unless noted.
 | `app/feishu/__init__.py` | Feishu package boundary. |
 | `app/feishu/constants.py` | Shared Feishu constants. |
 | `app/feishu/gateway.py` | SDK/long-connection transport. |
+| `app/feishu/webhook.py` | Multi-user verified Webhook ingress. |
 | `app/feishu/events.py` | Incoming event parser. |
 | `app/feishu/bot.py` | Integration orchestrator/redaction. |
 | `app/feishu/agent.py` | Tool-planning model and confirmation guard. |
@@ -1006,7 +1019,7 @@ suite after every small edit.
   `tests/test_feishu_extended_tools.py`,
   `tests/test_feishu_media_gateway.py`, `tests/test_feishu_pairing.py`,
   `tests/test_feishu_security.py`, `tests/test_feishu_settings.py`,
-  `tests/test_ui_feishu_panel.py`.
+  `tests/test_feishu_multitenant.py`, `tests/test_ui_feishu_panel.py`.
 - API/integration/config: `tests/test_api_runtime_health.py`,
   `tests/test_config_feishu_env.py`, `tests/test_config_wechat_relay_env.py`,
   `tests/test_wechat_relay_settings.py`,

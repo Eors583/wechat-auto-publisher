@@ -362,6 +362,61 @@ class Database:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS feishu_integrations (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL UNIQUE,
+                    app_id TEXT NOT NULL UNIQUE,
+                    app_secret_encrypted TEXT NOT NULL,
+                    verification_token_encrypted TEXT NOT NULL,
+                    encrypt_key_encrypted TEXT NOT NULL,
+                    callback_key TEXT NOT NULL UNIQUE,
+                    bound_open_id TEXT,
+                    bound_chat_id TEXT,
+                    agent_model_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'waiting_pairing',
+                    pairing_salt TEXT,
+                    pairing_code_hash TEXT,
+                    pairing_iterations INTEGER,
+                    pairing_expires_at TEXT,
+                    pairing_used_at TEXT,
+                    pairing_failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    runtime_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS feishu_integration_accounts (
+                    integration_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (integration_id, account_id),
+                    FOREIGN KEY (integration_id) REFERENCES feishu_integrations(id) ON DELETE CASCADE,
+                    FOREIGN KEY (account_id) REFERENCES official_accounts(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS feishu_sessions (
+                    integration_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    batch_id TEXT,
+                    context_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (integration_id, chat_id),
+                    FOREIGN KEY (integration_id) REFERENCES feishu_integrations(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS feishu_processed_events (
+                    integration_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (integration_id, event_id),
+                    FOREIGN KEY (integration_id) REFERENCES feishu_integrations(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
@@ -719,6 +774,14 @@ class Database:
                     ON local_agent_pairings(status, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_local_agent_pairings_owner
                     ON local_agent_pairings(owner_user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_feishu_integrations_owner
+                    ON feishu_integrations(owner_user_id);
+                CREATE INDEX IF NOT EXISTS idx_feishu_integrations_callback
+                    ON feishu_integrations(callback_key);
+                CREATE INDEX IF NOT EXISTS idx_feishu_integration_accounts_owner
+                    ON feishu_integration_accounts(owner_user_id, account_id);
+                CREATE INDEX IF NOT EXISTS idx_feishu_sessions_owner
+                    ON feishu_sessions(owner_user_id, updated_at);
                 """
             )
             # Customer-owned records are scoped to the login account. Existing
@@ -980,6 +1043,7 @@ class Database:
                 "rewrite_intensity": "TEXT",
                 "parent_batch_id": "TEXT",
                 "archived_at": "TEXT",
+                "source_integration_id": "TEXT",
             }.items():
                 if name not in batch_columns:
                     conn.execute(f"ALTER TABLE batches ADD COLUMN {name} {declaration}")
@@ -1665,6 +1729,7 @@ class Database:
         requested_by: str | None = None,
         chat_id: str | None = None,
         parent_batch_id: str | None = None,
+        source_integration_id: str | None = None,
     ) -> None:
         now = _utc_now()
         local_day = business_date()
@@ -1696,8 +1761,8 @@ class Database:
                     reference_urls_json, required_facts, rewrite_intensity,
                     source_url, raw_content,
                     requested_by, chat_id, error, parent_batch_id,
-                    archived_at, created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
+                    source_integration_id, archived_at, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?)
                 """,
                 (
                     batch_id,
@@ -1713,6 +1778,7 @@ class Database:
                     requested_by,
                     chat_id,
                     parent_batch_id,
+                    source_integration_id,
                     now,
                     now,
                 ),
@@ -2566,6 +2632,421 @@ class Database:
             )
             if not cursor.rowcount:
                 raise KeyError(f"批次不存在：{batch_id}")
+
+    # ------------------------------------------------------------------
+    # Per-user Feishu integrations
+    # ------------------------------------------------------------------
+    def get_feishu_integration(self) -> dict[str, Any] | None:
+        """Return the current authenticated user's own Feishu integration."""
+
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM feishu_integrations WHERE owner_user_id = ?",
+                (owner_user_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_feishu_integration_by_callback_key(
+        self, callback_key: str
+    ) -> dict[str, Any] | None:
+        """Resolve the tenant before authentication of a Feishu webhook.
+
+        This is intentionally the only unscoped integration lookup. The random
+        callback key selects the credential set; signature/token verification
+        still happens before an event is trusted.
+        """
+
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM feishu_integrations WHERE callback_key = ?",
+                (str(callback_key),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def feishu_integration_health(self) -> dict[str, int]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errors
+                FROM feishu_integrations
+                """
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0) if row else 0,
+            "enabled": int(row["enabled"] or 0) if row else 0,
+            "errors": int(row["errors"] or 0) if row else 0,
+        }
+
+    def save_feishu_integration(
+        self,
+        *,
+        app_id: str,
+        app_secret_encrypted: str,
+        verification_token_encrypted: str,
+        encrypt_key_encrypted: str,
+        callback_key: str,
+        agent_model_id: str,
+        account_ids: list[str],
+        default_account_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            raise PermissionError("请先登录后再配置飞书机器人")
+        clean_account_ids = list(
+            dict.fromkeys(str(item).strip() for item in account_ids if str(item).strip())
+        )
+        if not clean_account_ids:
+            raise ValueError("请至少选择一个机器人可操作的公众号")
+        if default_account_id not in clean_account_ids:
+            raise ValueError("默认公众号必须包含在机器人可操作的公众号中")
+        now = _utc_now()
+        existing = self.get_feishu_integration()
+        integration_id = str(
+            (existing or {}).get("id") or f"feishu_{uuid.uuid4().hex}"
+        )
+        with self.connect() as conn:
+            placeholders = ",".join("?" for _ in clean_account_ids)
+            rows = conn.execute(
+                f"""
+                SELECT id FROM official_accounts
+                WHERE owner_user_id = ? AND enabled = 1
+                  AND id IN ({placeholders})
+                """,
+                (owner_user_id, *clean_account_ids),
+            ).fetchall()
+            available_ids = {str(row["id"]) for row in rows}
+            if available_ids != set(clean_account_ids):
+                raise ValueError("所选公众号不属于当前用户、已停用或不存在")
+            conn.execute(
+                """
+                INSERT INTO feishu_integrations (
+                    id, owner_user_id, app_id, app_secret_encrypted,
+                    verification_token_encrypted, encrypt_key_encrypted,
+                    callback_key, agent_model_id, enabled, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting_pairing', ?, ?)
+                ON CONFLICT(owner_user_id) DO UPDATE SET
+                    app_id=excluded.app_id,
+                    app_secret_encrypted=excluded.app_secret_encrypted,
+                    verification_token_encrypted=excluded.verification_token_encrypted,
+                    encrypt_key_encrypted=excluded.encrypt_key_encrypted,
+                    callback_key=excluded.callback_key,
+                    agent_model_id=excluded.agent_model_id,
+                    enabled=excluded.enabled,
+                    status=CASE
+                        WHEN feishu_integrations.bound_open_id IS NOT NULL
+                        THEN 'active' ELSE 'waiting_pairing' END,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    integration_id,
+                    owner_user_id,
+                    str(app_id),
+                    str(app_secret_encrypted),
+                    str(verification_token_encrypted),
+                    str(encrypt_key_encrypted),
+                    str(callback_key),
+                    str(agent_model_id),
+                    int(bool(enabled)),
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM feishu_integration_accounts WHERE integration_id = ?",
+                (integration_id,),
+            )
+            for account_id in clean_account_ids:
+                conn.execute(
+                    """
+                    INSERT INTO feishu_integration_accounts (
+                        integration_id, owner_user_id, account_id,
+                        is_default, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        integration_id,
+                        owner_user_id,
+                        account_id,
+                        int(account_id == default_account_id),
+                        now,
+                    ),
+                )
+        integration = self.get_feishu_integration()
+        if not integration:
+            raise RuntimeError("飞书机器人配置保存失败")
+        return integration
+
+    def list_feishu_integration_accounts(
+        self, integration_id: str
+    ) -> list[dict[str, Any]]:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT fia.account_id, fia.is_default, oa.name, oa.enabled
+                FROM feishu_integration_accounts fia
+                JOIN official_accounts oa ON oa.id = fia.account_id
+                WHERE fia.integration_id = ?
+                  AND fia.owner_user_id = ?
+                  AND oa.owner_user_id = ?
+                ORDER BY fia.is_default DESC, oa.name
+                """,
+                (str(integration_id), owner_user_id, owner_user_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_feishu_pairing(
+        self,
+        integration_id: str,
+        *,
+        salt: str,
+        code_hash: str,
+        iterations: int,
+        expires_at: str,
+    ) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            raise PermissionError("请先登录后再生成配对码")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE feishu_integrations
+                SET pairing_salt = ?, pairing_code_hash = ?,
+                    pairing_iterations = ?, pairing_expires_at = ?,
+                    pairing_used_at = NULL, pairing_failed_attempts = 0,
+                    status = 'waiting_pairing', updated_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (
+                    salt,
+                    code_hash,
+                    int(iterations),
+                    expires_at,
+                    _utc_now(),
+                    str(integration_id),
+                    owner_user_id,
+                ),
+            )
+            if not cursor.rowcount:
+                raise KeyError("飞书机器人配置不存在")
+
+    def consume_feishu_pairing(
+        self,
+        integration_id: str,
+        *,
+        expected_code_hash: str,
+        open_id: str,
+        chat_id: str,
+    ) -> bool:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return False
+        now = _utc_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE feishu_integrations
+                SET bound_open_id = ?, bound_chat_id = ?, pairing_used_at = ?,
+                    status = 'active', updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND enabled = 1
+                  AND pairing_code_hash = ?
+                  AND pairing_used_at IS NULL
+                  AND pairing_failed_attempts < 5
+                  AND pairing_expires_at > ?
+                """,
+                (
+                    str(open_id),
+                    str(chat_id),
+                    now,
+                    now,
+                    str(integration_id),
+                    owner_user_id,
+                    str(expected_code_hash),
+                    now,
+                ),
+            )
+            return bool(cursor.rowcount)
+
+    def fail_feishu_pairing(self, integration_id: str) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE feishu_integrations
+                SET pairing_failed_attempts = pairing_failed_attempts + 1,
+                    updated_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                  AND pairing_used_at IS NULL
+                  AND pairing_failed_attempts < 5
+                """,
+                (_utc_now(), str(integration_id), owner_user_id),
+            )
+
+    def unbind_feishu_integration(self) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            raise PermissionError("请先登录后再解除绑定")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE feishu_integrations
+                SET bound_open_id = NULL, bound_chat_id = NULL,
+                    pairing_salt = NULL, pairing_code_hash = NULL,
+                    pairing_expires_at = NULL, pairing_used_at = NULL,
+                    pairing_failed_attempts = 0,
+                    status = 'waiting_pairing', updated_at = ?
+                WHERE owner_user_id = ?
+                """,
+                (_utc_now(), owner_user_id),
+            )
+
+    def set_feishu_integration_enabled(self, enabled: bool) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            raise PermissionError("请先登录后再停用机器人")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE feishu_integrations
+                SET enabled = ?, status = CASE
+                    WHEN ? = 0 THEN 'disabled'
+                    WHEN bound_open_id IS NOT NULL THEN 'active'
+                    ELSE 'waiting_pairing' END,
+                    updated_at = ?
+                WHERE owner_user_id = ?
+                """,
+                (int(bool(enabled)), int(bool(enabled)), _utc_now(), owner_user_id),
+            )
+
+    def update_feishu_runtime(
+        self, integration_id: str, changes: dict[str, Any]
+    ) -> dict[str, Any]:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return {}
+        integration = self.get_feishu_integration()
+        if not integration or str(integration.get("id")) != str(integration_id):
+            return {}
+        try:
+            runtime = json.loads(str(integration.get("runtime_json") or "{}"))
+        except json.JSONDecodeError:
+            runtime = {}
+        runtime.update(dict(changes))
+        runtime["updated_at"] = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE feishu_integrations
+                SET runtime_json = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (
+                    json.dumps(runtime, ensure_ascii=False),
+                    _utc_now(),
+                    str(integration_id),
+                    owner_user_id,
+                ),
+            )
+        return runtime
+
+    def claim_feishu_event(self, integration_id: str, event_id: str) -> bool:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return False
+        integration = self.get_feishu_integration()
+        if not integration or str(integration.get("id")) != str(integration_id):
+            return False
+        try:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO feishu_processed_events (
+                        integration_id, owner_user_id, event_id, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (str(integration_id), owner_user_id, str(event_id), _utc_now()),
+                )
+            return True
+        except _INTEGRITY_ERRORS:
+            return False
+
+    def set_feishu_session(
+        self,
+        integration_id: str,
+        chat_id: str,
+        *,
+        batch_id: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            raise PermissionError("飞书会话缺少用户作用域")
+        integration = self.get_feishu_integration()
+        if not integration or str(integration.get("id")) != str(integration_id):
+            raise PermissionError("飞书会话不属于当前用户的机器人")
+        current = self.get_feishu_session(integration_id, chat_id)
+        effective_batch_id = batch_id if batch_id is not None else current.get("batch_id")
+        effective_context = context if context is not None else current.get("context", {})
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO feishu_sessions (
+                    integration_id, owner_user_id, chat_id, batch_id,
+                    context_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(integration_id, chat_id) DO UPDATE SET
+                    owner_user_id=excluded.owner_user_id,
+                    batch_id=excluded.batch_id,
+                    context_json=excluded.context_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    str(integration_id),
+                    owner_user_id,
+                    str(chat_id),
+                    effective_batch_id,
+                    json.dumps(effective_context or {}, ensure_ascii=False),
+                    _utc_now(),
+                ),
+            )
+
+    def get_feishu_session(
+        self, integration_id: str, chat_id: str
+    ) -> dict[str, Any]:
+        owner_user_id = self.owner_user_id
+        if not owner_user_id:
+            return {"batch_id": None, "context": {}}
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT batch_id, context_json
+                FROM feishu_sessions
+                WHERE integration_id = ? AND chat_id = ? AND owner_user_id = ?
+                """,
+                (str(integration_id), str(chat_id), owner_user_id),
+            ).fetchone()
+        if not row:
+            return {"batch_id": None, "context": {}}
+        try:
+            context = json.loads(str(row["context_json"] or "{}"))
+        except json.JSONDecodeError:
+            context = {}
+        return {
+            "batch_id": str(row["batch_id"]) if row["batch_id"] else None,
+            "context": context if isinstance(context, dict) else {},
+        }
 
     def set_bot_session(self, scope_id: str, batch_id: str) -> None:
         with self.connect() as conn:

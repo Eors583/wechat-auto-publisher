@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import hmac
 import json
 import logging
 import os
-import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -31,6 +29,7 @@ from app.services import (
 )
 from app.services.auth import AuthService
 from app.services.configuration import ConfigurationService
+from app.services.feishu_integrations import FeishuIntegrationService
 from app.services.failures import (
     classify_job_failure,
     public_failure,
@@ -110,40 +109,6 @@ def _failure_response(
         classify_job_failure(source, step=stage or "api", status="failed")
     )
     return {"detail": safe_detail, "failure": failure}
-
-
-def _run_feishu_bot(
-    config: dict[str, Any],
-    service: BatchService,
-    holder: dict[str, Any],
-) -> None:
-    """Run the Feishu SDK on its own event loop.
-
-    lark-oapi captures the current event loop when its websocket module is
-    imported.  Importing it from Uvicorn's lifespan thread makes it capture
-    Uvicorn's already-running loop, so ws.Client.start() fails with
-    ``This event loop is already running``.  Create and install a dedicated
-    loop before importing the bot module.
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    holder["status"] = "starting"
-    try:
-        from app.feishu.bot import FeishuBot
-
-        bot = FeishuBot(config, service)
-        holder["bot"] = bot
-        holder["status"] = "connecting"
-        bot.start()
-    except Exception as exc:  # noqa: BLE001
-        safe_error = sanitize_failure_text(exc)
-        holder["status"] = "failed"
-        holder["error"] = safe_error
-        logger.error("Feishu long connection stopped: %s", safe_error)
-    finally:
-        asyncio.set_event_loop(None)
-        if not loop.is_running() and not loop.is_closed():
-            loop.close()
 
 
 class CreateBatchRequest(BaseModel):
@@ -261,6 +226,22 @@ class AdminModelRequest(BaseModel):
     enabled: bool = True
 
 
+class FeishuIntegrationRequest(BaseModel):
+    app_id: str = Field(min_length=1, max_length=200)
+    app_secret: str | None = Field(default=None, max_length=500)
+    verification_token: str | None = Field(default=None, max_length=500)
+    encrypt_key: str | None = Field(default=None, max_length=500)
+    agent_model_id: str = Field(min_length=1, max_length=200)
+    account_ids: list[str] = Field(min_length=1)
+    default_account_id: str = Field(min_length=1, max_length=200)
+    enabled: bool = True
+
+
+class FeishuCredentialTestRequest(BaseModel):
+    app_id: str = ""
+    app_secret: str | None = None
+
+
 def create_api_app(
     config: dict[str, Any] | None = None,
     service: BatchService | None = None,
@@ -274,54 +255,20 @@ def create_api_app(
     logging.getLogger("Lark").setLevel(logging.WARNING)
     cfg = config or load_config()
     batch_service = service or get_batch_service(cfg)
-    from app.feishu.settings import effective_feishu_settings
-
     cfg = dict(cfg)
-    cfg["feishu"] = effective_feishu_settings(
-        batch_service.db, dict(cfg.get("feishu") or {})
-    )
     api_cfg = dict(cfg.get("api") or {})
     expected_token = str(api_cfg.get("token") or "").strip()
-    bot_holder: dict[str, Any] = {}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        from app.feishu.runtime import get_runtime, update_runtime
-
         default_admin = auth_service.ensure_default_admin()
         onboarding_service.migrate_legacy_state()
-        feishu_enabled = bool(
-            (cfg.get("feishu") or {}).get("enabled", False)
+        FeishuIntegrationService(batch_service.db, cfg).migrate_legacy_global(
+            str(default_admin["id"])
         )
-        if start_feishu and feishu_enabled:
-            threading.Thread(
-                target=_run_feishu_bot,
-                args=(
-                    cfg,
-                    batch_service._for_user(str(default_admin["id"])),
-                    bot_holder,
-                ),
-                name="feishu-long-connection",
-                daemon=True,
-            ).start()
-        elif start_feishu:
-            update_runtime(
-                batch_service.db,
-                status="disabled",
-                started_at="",
-                last_error="",
-            )
-        try:
-            yield
-        finally:
-            if start_feishu:
-                runtime = get_runtime(batch_service.db)
-                if str(runtime.get("status") or "") in {
-                    "starting",
-                    "connecting",
-                    "running",
-                }:
-                    update_runtime(batch_service.db, status="stopped")
+        # Multi-user Feishu uses per-integration HTTPS callbacks. Never bind a
+        # process-global bot to the default administrator here.
+        yield
 
     app = FastAPI(
         title="公众号改写助手 API",
@@ -335,6 +282,7 @@ def create_api_app(
     onboarding_service = OnboardingService(batch_service.db, cfg)
     auth_service = AuthService(batch_service.db)
     configuration_service = ConfigurationService(batch_service.db, cfg)
+    feishu_integration_service = FeishuIntegrationService(batch_service.db, cfg)
 
     @app.exception_handler(StarletteHTTPException)
     async def sanitized_http_error(
@@ -481,6 +429,72 @@ def create_api_app(
     ) -> dict[str, Any]:
         return principal
 
+    @app.get("/api/v1/me/feishu-integration")
+    def get_my_feishu_integration(
+        request: Request,
+        _principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        return feishu_integration_service.public(
+            callback_base_url=str(request.base_url).rstrip("/")
+        )
+
+    @app.put("/api/v1/me/feishu-integration")
+    def save_my_feishu_integration(
+        payload: FeishuIntegrationRequest,
+        request: Request,
+        _principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        try:
+            feishu_integration_service.save(**payload.model_dump())
+            return feishu_integration_service.public(
+                callback_base_url=str(request.base_url).rstrip("/")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/v1/me/feishu-integration/test")
+    def test_my_feishu_integration(
+        payload: FeishuCredentialTestRequest,
+        _principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        try:
+            return feishu_integration_service.test_credentials(
+                app_id=payload.app_id,
+                app_secret=payload.app_secret,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/v1/me/feishu-integration/pairing-code")
+    def create_my_feishu_pairing_code(
+        _principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        try:
+            return feishu_integration_service.create_pairing_code()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/v1/me/feishu-integration/unbind")
+    def unbind_my_feishu_integration(
+        _principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        return feishu_integration_service.unbind()
+
+    @app.post("/api/v1/me/feishu-integration/disable")
+    def disable_my_feishu_integration(
+        _principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        return feishu_integration_service.set_enabled(False)
+
+    @app.post("/api/v1/me/feishu-integration/enable")
+    def enable_my_feishu_integration(
+        _principal: dict[str, Any] = Depends(require_token),
+    ) -> dict[str, Any]:
+        try:
+            return feishu_integration_service.set_enabled(True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/v1/auth/logout")
     def logout_user(
         authorization: str | None = Header(default=None),
@@ -553,18 +567,34 @@ def create_api_app(
     )
     app.include_router(create_wechat_command_router(batch_service, cfg))
 
+    @app.post("/api/feishu/events/{callback_key}")
+    async def receive_feishu_event(
+        callback_key: str,
+        request: Request,
+    ) -> Response:
+        from app.feishu.webhook import FeishuWebhookProcessor
+
+        raw = FeishuWebhookProcessor(batch_service, cfg).handle(
+            callback_key,
+            uri=str(request.url.path),
+            headers=dict(request.headers),
+            body=await request.body(),
+        )
+        status_code = int(raw.status_code or 500)
+        content = raw.content or b'{}'
+        if status_code >= 400:
+            content = b'{"msg":"invalid event"}'
+        return Response(
+            content=content,
+            status_code=status_code,
+            headers=dict(raw.headers or {}),
+            media_type="application/json",
+        )
+
     @app.get("/health")
     def health() -> dict[str, Any]:
-        from app.feishu.runtime import get_runtime
-
-        feishu_enabled = bool(
-            (cfg.get("feishu") or {}).get("enabled", False)
-        )
-        feishu_runtime = (
-            get_runtime(batch_service.db)
-            if feishu_enabled
-            else {"status": "disabled"}
-        )
+        feishu_health = batch_service.db.feishu_integration_health()
+        feishu_enabled = feishu_health["enabled"] > 0
         return {
             "ok": True,
             "service": "wechat-auto-publisher",
@@ -575,25 +605,21 @@ def create_api_app(
                 os.getenv("WECHAT_PUBLISHER_LAUNCH_SESSION_ID") or ""
             ),
             "feishu_enabled": feishu_enabled,
-            "feishu_status": str(
-                feishu_runtime.get("status") or "unknown"
-            ),
+            "feishu_status": "error"
+            if feishu_health["errors"]
+            else ("running" if feishu_enabled else "disabled"),
+            "feishu_integrations": feishu_health["total"],
+            "feishu_enabled_integrations": feishu_health["enabled"],
             # Keep the compatibility field but never expose the raw runtime
             # exception from this unauthenticated endpoint.
             "feishu_error": (
-                "飞书连接异常"
-                if (
-                    feishu_runtime.get("last_error")
-                    or bot_holder.get("error")
-                )
+                "部分飞书机器人配置异常"
+                if feishu_health["errors"]
                 else None
             ),
             "feishu_error_code": (
-                "feishu.connection_failed"
-                if (
-                    feishu_runtime.get("last_error")
-                    or bot_holder.get("error")
-                )
+                "feishu.integration_error"
+                if feishu_health["errors"]
                 else None
             ),
         }

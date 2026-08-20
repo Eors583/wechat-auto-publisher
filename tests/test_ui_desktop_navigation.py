@@ -81,15 +81,16 @@ def _tab_labels(function: Any) -> list[str]:
     return [str(node.args[0].value) for node in calls]
 
 
-def test_primary_navigation_exposes_model_settings_below_accounts() -> None:
+def test_primary_navigation_exposes_personal_settings_below_accounts() -> None:
     labels = _tab_labels(desktop.create_desktop_app)
 
-    assert labels[:6] == [
+    assert labels[:7] == [
         "创作台",
         "选题雷达",
         "任务队列",
         "公众号",
         "模型配置",
+        "飞书机器人",
         "文章审核",
     ]
 

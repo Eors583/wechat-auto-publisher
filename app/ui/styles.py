@@ -49,6 +49,61 @@ body, .q-page, .nicegui-content {
 }
 .ui-gap-zero { gap: 0 !important; }
 
+.feishu-hero {
+  background: linear-gradient(135deg, var(--ui-color-surface) 0%, var(--ui-color-info-soft) 100%);
+}
+.feishu-heading-row,
+.feishu-actions {
+  gap: var(--ui-space-3);
+  min-width: 0;
+}
+.feishu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.feishu-config-grid,
+.feishu-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ui-space-3);
+  width: 100%;
+  min-width: 0;
+}
+.feishu-status-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.feishu-status-item {
+  min-width: 0;
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-color-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-color-bg-subtle);
+}
+.feishu-break-anywhere,
+.feishu-break-anywhere * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.feishu-config-grid :is(.q-field, .q-field__inner, .q-field__control, .q-field__native),
+.feishu-actions .q-btn {
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (max-width: 860px) {
+  .feishu-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 600px) {
+  .feishu-config-grid,
+  .feishu-status-grid { grid-template-columns: minmax(0, 1fr); }
+  .feishu-heading-row { align-items: flex-start; }
+  .feishu-actions .q-btn { width: 100%; }
+}
+
 .shell {
   width: min(100%, var(--ui-layout-content-max));
   margin: 0 auto;
@@ -1803,6 +1858,13 @@ APP_CSS += """
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+.ops-feishu-page .ops-page-host {
+  align-content: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .ops-page-heading {
   display: flex;

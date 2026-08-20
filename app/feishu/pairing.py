@@ -22,7 +22,17 @@ def create_pairing_code(
     db: Database,
     *,
     ttl_minutes: int = 30,
+    integration_id: str = "",
 ) -> dict[str, Any]:
+    if integration_id:
+        from app.services.feishu_integrations import FeishuIntegrationService
+
+        row = db.get_feishu_integration()
+        if not row or str(row.get("id") or "") != str(integration_id):
+            raise KeyError("飞书机器人配置不存在")
+        return FeishuIntegrationService(db).create_pairing_code(
+            ttl_minutes=min(10, int(ttl_minutes))
+        )
     with _PAIRING_LOCK:
         code = f"{secrets.randbelow(1_000_000):06d}"
         salt = secrets.token_hex(16)
@@ -59,7 +69,17 @@ def consume_pairing_code(
     text: str,
     open_id: str,
     chat_id: str = "",
+    integration_id: str = "",
 ) -> bool:
+    if integration_id:
+        from app.services.feishu_integrations import FeishuIntegrationService
+
+        return FeishuIntegrationService(db).consume_pairing_code(
+            integration_id,
+            text=text,
+            open_id=open_id,
+            chat_id=chat_id,
+        )
     # Message events are handled on independent threads. Keep verification,
     # allow-list persistence and invalidation in one process-wide critical
     # section so the same six-digit code cannot be consumed twice.
@@ -110,7 +130,14 @@ def consume_pairing_code(
         return True
 
 
-def pairing_status(db: Database) -> dict[str, Any]:
+def pairing_status(db: Database, *, integration_id: str = "") -> dict[str, Any]:
+    if integration_id:
+        from app.services.feishu_integrations import FeishuIntegrationService
+
+        row = db.get_feishu_integration()
+        if not row or str(row.get("id") or "") != str(integration_id):
+            return {"status": "none"}
+        return FeishuIntegrationService(db).pairing_status(row=row)
     value = _load(db)
     if not value:
         return {"status": "none"}

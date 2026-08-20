@@ -13,23 +13,45 @@ REVIEW_QUEUE_STATUSES = frozenset(
 
 
 class FeishuSessionStore:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, *, integration_id: str = "") -> None:
         self.db = db
+        self.integration_id = str(integration_id or "").strip()
 
     def current_batch_id(self, chat_id: str) -> str | None:
+        if self.integration_id:
+            return self.db.get_feishu_session(
+                self.integration_id, chat_id
+            ).get("batch_id")
         return self.db.get_bot_session(chat_id)
 
     def bind_batch(self, chat_id: str, batch_id: str) -> None:
-        self.db.set_bot_session(chat_id, batch_id)
+        if self.integration_id:
+            self.db.set_feishu_session(
+                self.integration_id, chat_id, batch_id=batch_id
+            )
+        else:
+            self.db.set_bot_session(chat_id, batch_id)
         self.update(chat_id, stage="generating", current_batch_id=batch_id)
 
     def get(self, chat_id: str) -> dict[str, Any]:
+        if self.integration_id:
+            return dict(
+                self.db.get_feishu_session(
+                    self.integration_id, chat_id
+                ).get("context")
+                or {}
+            )
         return self.db.get_bot_context(chat_id)
 
     def update(self, chat_id: str, **fields: Any) -> dict[str, Any]:
         context = self.get(chat_id)
         context.update(fields)
-        self.db.set_bot_context(chat_id, context)
+        if self.integration_id:
+            self.db.set_feishu_session(
+                self.integration_id, chat_id, context=context
+            )
+        else:
+            self.db.set_bot_context(chat_id, context)
         return context
 
     def save_hot_topics(self, chat_id: str, items: list[dict[str, Any]]) -> None:

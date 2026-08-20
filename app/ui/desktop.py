@@ -237,6 +237,9 @@ def create_desktop_app() -> None:
     open_requested_topics = (
         str(query_params.get("view") or "").strip().lower() == "topics"
     )
+    open_requested_feishu = (
+        str(query_params.get("view") or "").strip().lower() == "feishu"
+    )
     requested_topic_action = str(
         query_params.get("configure") or ""
     ).strip().lower()
@@ -370,6 +373,7 @@ def create_desktop_app() -> None:
         onboarding_service is not None
         and not open_requested_review
         and not open_requested_config
+        and not open_requested_feishu
         and not open_requested_admin
         and page_is_admin
         and (open_requested_onboarding or should_show_onboarding(onboarding_status))
@@ -453,6 +457,10 @@ def create_desktop_app() -> None:
                         ui.menu_item(
                             "公众号与创作规则",
                             on_click=lambda: tabs.set_value(tab_accounts),
+                        )
+                        ui.menu_item(
+                            "我的飞书机器人",
+                            on_click=lambda: tabs.set_value(tab_feishu),
                         )
 
         health_state = {"status": onboarding_status}
@@ -557,6 +565,9 @@ def create_desktop_app() -> None:
             tab_models = ui.tab("模型配置", icon="smart_toy").props(
                 'aria-label="模型配置" title="模型配置"'
             )
+            tab_feishu = ui.tab("飞书机器人", icon="forum").props(
+                'aria-label="飞书机器人" title="飞书机器人"'
+            )
             tab_review = ui.tab("文章审核", icon="rate_review").classes(
                 "ops-review-route-tab"
             )
@@ -593,6 +604,8 @@ def create_desktop_app() -> None:
             if open_requested_tasks
             else tab_topics
             if open_requested_topics
+            else tab_feishu
+            if open_requested_feishu
             else tab_accounts
             if open_requested_config or open_requested_admin
             else tab_wizard
@@ -615,6 +628,8 @@ def create_desktop_app() -> None:
                 accounts_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_models).classes("ops-page ops-models-page"):
                 models_host = ui.column().classes("w-full ops-page-host")
+            with ui.tab_panel(tab_feishu).classes("ops-page ops-feishu-page"):
+                feishu_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_review).classes("ops-page ops-review-page"):
                 review_host = ui.column().classes("w-full ops-page-host")
 
@@ -634,6 +649,7 @@ def create_desktop_app() -> None:
             jobs_host,
             accounts_host,
             models_host,
+            feishu_host,
             review_host,
         ):
             with host, ui.row().classes(
@@ -808,12 +824,23 @@ def create_desktop_app() -> None:
                 )
                 build_models_panel(page_state, purpose="text")
 
+        def mount_feishu() -> None:
+            feishu_host.clear()
+            with feishu_host:
+                render_page_heading(
+                    "PERSONAL FEISHU BOT",
+                    "飞书机器人",
+                    "配置只属于当前登录账号，机器人仅能操作你授权的公众号。",
+                )
+                build_feishu_panel(page_state)
+
         tab_mounts = {
             str(tab_wizard.props["name"]): mount_wizard,
             str(tab_topics.props["name"]): mount_topics,
             str(tab_jobs.props["name"]): mount_jobs,
             str(tab_accounts.props["name"]): mount_accounts,
             str(tab_models.props["name"]): mount_models,
+            str(tab_feishu.props["name"]): mount_feishu,
             str(tab_review.props["name"]): mount_review,
         }
 

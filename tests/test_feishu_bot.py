@@ -23,8 +23,8 @@ def test_current_lark_event_message_shape_is_dispatched() -> None:
     bot = FeishuBot.__new__(FeishuBot)
     bot.service = SimpleNamespace(db=_FakeDb())
     bot.app_id = "cli_test"
-    bot.allow_all = True
-    bot.allowed_open_ids = set()
+    bot.allow_all = False
+    bot.allowed_open_ids = {"open-1"}
     bot.allowed_chat_ids = set()
     dispatched: list[tuple[str, str, str, str]] = []
     replies: list[tuple[str, str]] = []

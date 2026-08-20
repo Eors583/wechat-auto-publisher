@@ -9,8 +9,10 @@ from typing import Any
 @dataclass(slots=True)
 class IncomingFeishuMessage:
     event_id: str
+    app_id: str
     message_id: str
     chat_id: str
+    chat_type: str
     open_id: str
     message_type: str
     text: str
@@ -36,8 +38,10 @@ def parse_message_event(data: Any) -> IncomingFeishuMessage:
         text = re.sub(r"@_user_\d+", "", str(payload.get("text") or "")).strip()
     return IncomingFeishuMessage(
         event_id=event_id,
+        app_id=str(getattr(getattr(data, "header", None), "app_id", "") or ""),
         message_id=message_id,
         chat_id=str(message.chat_id or ""),
+        chat_type=str(getattr(message, "chat_type", "") or ""),
         open_id=str(sender_id.open_id or ""),
         message_type=str(message_type or ""),
         text=text,
