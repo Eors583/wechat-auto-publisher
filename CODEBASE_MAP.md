@@ -852,6 +852,7 @@ unless noted.
 | `app/services/editorial_reviews.py` | AI review/rewrite domain/state machine. |
 | `app/services/failures.py` | Sanitized/classified failures. |
 | `app/services/followed_content.py` | Followed accounts and recent articles. |
+| `app/services/image_prompts.py` | Article-level visual brief and argument-level image prompt agent orchestration. |
 | `app/services/jizhile_settings.py` | Per-user Jizhile settings. |
 | `app/services/job_attempts.py` | Attempt heartbeat/lease/backoff. |
 | `app/services/model_readiness.py` | Model auth-failure readiness state. |

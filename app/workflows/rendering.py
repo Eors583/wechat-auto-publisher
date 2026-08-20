@@ -5,10 +5,11 @@ import logging
 from typing import Any
 
 from app.ads import render_ad_html, select_ad
+from app.ai import normalize_digest
+from app.ai.model_registry import build_text_client
 from app.ai.openai_compat import is_junk_title_or_subtitle
 from app.cover import generate_article_cover, pick_random_image_media_id, resolve_cover
 from app.inline_images import insert_inline_images, resolve_inline_images
-from app.ai import normalize_digest
 from app.render import finalize_article_html, make_digest
 from app.services.failures import sanitize_failure_text
 from app.wechat.template_snapshot import (
@@ -135,7 +136,24 @@ class RenderingStep:
         assets = list(meta.get("inline_images") or [])
         warnings = list(meta.get("inline_image_warnings") or [])
         if settings.get("enabled", False) and not meta.get("inline_images_resolved"):
-            assets, warnings = resolve_inline_images(
+            prompt_client = None
+            if str(settings.get("source_mode") or "generate") in {
+                "generate",
+                "hybrid",
+            }:
+                try:
+                    model_id = self.context.job_model_id(job)
+                    if model_id:
+                        prompt_client = build_text_client(
+                            self.context.db,
+                            self.context.config,
+                            model_id,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(
+                        f"图文提示词智能体不可用，已使用内置提示词：{exc}"
+                    )
+            assets, generated_warnings = resolve_inline_images(
                 body=job.get("body") or "",
                 settings=settings,
                 client=client,
@@ -143,7 +161,13 @@ class RenderingStep:
                 root=self.context.config.get("_root") or ".",
                 job_id=int(job["id"]),
                 source_images=list(meta.get("source_images") or []),
+                article_title=str(
+                    job.get("selected_title") or job.get("topic") or ""
+                ),
+                prompt_client=prompt_client,
             )
+            warnings.extend(generated_warnings)
+            warnings = list(dict.fromkeys(warnings))
             meta["inline_images_resolved"] = True
             meta["inline_images"] = assets
             meta["inline_image_warnings"] = warnings

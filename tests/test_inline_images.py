@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from app.inline_images import (
     ImagePlan,
     build_inline_image_revision_prompt,
     create_argument_card,
-    invalidate_inline_image_meta,
     insert_inline_images,
+    invalidate_inline_image_meta,
     is_useful_source_image_url,
     plan_inline_images,
     remove_inline_image,
+    resolve_inline_images,
 )
 
 
@@ -59,6 +63,8 @@ def test_single_image_revision_prompt_combines_feedback_and_hard_safeguards() ->
             "anchor": "关键结论是库存积压正在侵蚀现金流。",
             "keywords": ["库存", "现金流"],
             "prompt": "现代供应链业务现场，写实新闻摄影。",
+            "article_summary": "文章分析库存如何影响企业现金流。",
+            "primary_subject": "制造企业供应链团队",
         },
         "不要会议室，改成仓库盘点现场",
         article_title="库存管理为什么决定现金流",
@@ -66,6 +72,7 @@ def test_single_image_revision_prompt_combines_feedback_and_hard_safeguards() ->
 
     assert "库存管理为什么决定现金流" in prompt
     assert "库存积压正在侵蚀现金流" in prompt
+    assert "制造企业供应链团队" in prompt
     assert "不要会议室" in prompt
     assert "不得出现任何可读文字" in prompt
     assert "边框、留白" in prompt
@@ -268,3 +275,91 @@ def test_create_argument_card(tmp_path) -> None:
     )
     assert target.exists()
     assert target.stat().st_size > 10_000
+
+
+def test_generated_images_use_article_subject_and_argument_prompt_agent(
+    tmp_path, monkeypatch
+) -> None:
+    class FakeDb:
+        @staticmethod
+        def get_ai_model(model_id: str):
+            assert model_id == "image-model"
+            return {
+                "id": model_id,
+                "name": "测试生图模型",
+                "enabled": True,
+                "provider_type": "openai_image",
+                "api_key_encrypted": "encrypted",
+                "api_base": "https://image.example.test/v1",
+                "model": "image-test",
+            }
+
+    class PromptClient:
+        def __init__(self) -> None:
+            self.responses = iter(
+                [
+                    json.dumps(
+                        {
+                            "article_summary": "文章分析华为的研发投入。",
+                            "primary_subject": "华为",
+                            "subject_visual_direction": "统一使用科技研发纪实场景。",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        {
+                            "images": [
+                                {
+                                    "index": 1,
+                                    "argument_summary": "研发投入形成技术积累。",
+                                    "prompt": "华为研发人员在实验室验证通信设备。",
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                ]
+            )
+
+        def complete(self, prompt: str) -> str:
+            return next(self.responses)
+
+    generated_prompts: list[str] = []
+
+    def fake_generate_image(**kwargs) -> None:
+        generated_prompts.append(str(kwargs["prompt"]))
+        Path(kwargs["output_path"]).write_bytes(b"image")
+
+    monkeypatch.setattr("app.inline_images.decrypt_api_key", lambda value: value)
+    monkeypatch.setattr("app.inline_images.generate_image", fake_generate_image)
+    monkeypatch.setattr(
+        "app.inline_images.upload_article_image",
+        lambda client, target: "https://mmbiz.qpic.cn/generated.jpg",
+    )
+
+    assets, warnings = resolve_inline_images(
+        body="""## 长期研发投入
+
+华为持续投资通信技术研发，长期积累最终形成产品竞争力和组织能力。""",
+        settings={
+            "enabled": True,
+            "source_mode": "generate",
+            "image_model_id": "image-model",
+            "min_count": 1,
+            "max_count": 1,
+            "generation_concurrency": 1,
+        },
+        client=object(),
+        db=FakeDb(),
+        root=tmp_path,
+        job_id=9,
+        article_title="华为为什么坚持长期研发",
+        prompt_client=PromptClient(),
+    )
+
+    assert warnings == []
+    assert len(assets) == 1
+    assert assets[0]["primary_subject"] == "华为"
+    assert assets[0]["argument_summary"] == "研发投入形成技术积累。"
+    assert "核心主体必须围绕华为" in generated_prompts[0]
+    assert "不得出现任何可读的大段文字" in generated_prompts[0]

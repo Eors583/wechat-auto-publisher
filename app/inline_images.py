@@ -5,12 +5,12 @@ import re
 import textwrap
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from lxml import html as lxml_html
 import httpx
+from lxml import html as lxml_html
 from PIL import Image, ImageDraw, ImageFont
 
 from app.ai.image_generator import generate_image
@@ -89,6 +89,10 @@ class ImagePlan:
     keywords: list[str]
     caption: str
     prompt: str
+    context: str = ""
+    article_summary: str = ""
+    primary_subject: str = ""
+    argument_summary: str = ""
 
 
 def _visual_concept(context: str, fallback: str) -> str:
@@ -320,7 +324,17 @@ def plan_inline_images(
             f"{visual_style}。"
             "纯照片，所有屏幕、纸张和标牌内容均为不可辨认的虚化细节。"
         )
-        plans.append(ImagePlan(index, text[:100], pos, keywords, caption, prompt))
+        plans.append(
+            ImagePlan(
+                index,
+                text[:100],
+                pos,
+                keywords,
+                caption,
+                prompt,
+                context=context[:1200],
+            )
+        )
     return plans
 
 
@@ -368,6 +382,8 @@ def resolve_inline_images(
     root: str | Path,
     job_id: int,
     source_images: list[str] | None = None,
+    article_title: str = "",
+    prompt_client: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not settings.get("enabled", False):
         return [], []
@@ -397,6 +413,22 @@ def resolve_inline_images(
     assets: list[dict[str, Any]] = []
     if not plans:
         return [], ["没有识别到可插图的正文论点，请检查文章是否包含清晰的小标题和论述段落"]
+    if (
+        prompt_client is not None
+        and mode in {"generate", "hybrid"}
+        and model
+        and bool(model.get("enabled"))
+    ):
+        from app.services.image_prompts import enrich_inline_image_prompts
+
+        enriched, prompt_warnings = enrich_inline_image_prompts(
+            article_title=article_title,
+            body=body,
+            plans=[asdict(plan) for plan in plans],
+            client=prompt_client,
+        )
+        plans = [ImagePlan(**item) for item in enriched]
+        warnings.extend(prompt_warnings)
     if mode == "generate":
         if not model or not bool(model.get("enabled")):
             return [], ["正文生图已启用，但所选生图智能体不存在或已停用"]
@@ -562,10 +594,14 @@ def build_inline_image_revision_prompt(
     base_prompt = str(asset.get("base_prompt") or asset.get("prompt") or "").strip()
     caption = str(asset.get("caption") or "当前论点").strip()
     anchor = str(asset.get("anchor") or "").strip()
+    article_summary = str(asset.get("article_summary") or "").strip()
+    primary_subject = str(asset.get("primary_subject") or "").strip()
     keywords = "、".join(str(item) for item in (asset.get("keywords") or []) if str(item).strip())
     return (
         "你正在重新生成微信公众号正文中的一张论点配图。\n"
         f"文章标题：{article_title or '未确定'}。\n"
+        f"全文大意：{article_summary or '沿用原文章语境'}。\n"
+        f"全文核心主体：{primary_subject or '沿用原配图主体'}。\n"
         f"当前论点：{caption}。\n"
         f"论点收束内容：{anchor or caption}。\n"
         f"语义关键词：{keywords or caption}。\n"
