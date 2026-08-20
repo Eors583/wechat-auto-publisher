@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 
 from app.api.server import create_api_app
 from app.db import Database
-from app.feishu.events import parse_message_event
 from app.feishu.bot import FeishuBot
+from app.feishu.events import parse_message_event
 from app.feishu.session import FeishuSessionStore
 from app.feishu.settings import public_feishu_settings
 from app.feishu.tool_executor import FeishuToolExecutor
@@ -117,6 +117,43 @@ def test_each_user_has_an_independent_robot_and_app_id_is_unique(
         )
 
 
+def test_callback_url_only_uses_an_explicit_or_request_public_https_base(
+    tmp_path, monkeypatch
+) -> None:
+    _, _, _, _, alice_db, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("WECHAT_PUBLISHER_PUBLIC_UI_URL", raising=False)
+    integration = _save(
+        alice_db, app_id="cli_alice", account_id="account-alice"
+    )
+    service = FeishuIntegrationService(alice_db)
+
+    assert integration["callback_url"] == ""
+    unsafe = service.public(callback_base_url="http://127.0.0.1:8000")
+    assert unsafe["callback_ready"] is False
+    assert unsafe["callback_url"] == ""
+    assert "WECHAT_PUBLISHER_PUBLIC_UI_URL" in unsafe["callback_error"]
+
+    request_fallback = service.public(
+        callback_base_url="https://api.bluebloodlab.cn"
+    )
+    assert request_fallback["callback_ready"] is True
+    assert request_fallback["callback_url"] == (
+        "https://api.bluebloodlab.cn" + integration["callback_path"]
+    )
+
+    monkeypatch.setenv(
+        "WECHAT_PUBLISHER_PUBLIC_UI_URL",
+        "https://publisher.bluebloodlab.cn/publisher/",
+    )
+    configured = service.public(
+        callback_base_url="https://api.bluebloodlab.cn"
+    )
+    assert configured["callback_url"] == (
+        "https://publisher.bluebloodlab.cn/publisher"
+        + integration["callback_path"]
+    )
+
+
 def test_pairing_sessions_and_event_ids_are_scoped_by_integration(
     tmp_path, monkeypatch
 ) -> None:
@@ -165,6 +202,36 @@ def test_pairing_sessions_and_event_ids_are_scoped_by_integration(
             batch_id="batch-forged",
         )
     assert bob_sessions.current_batch_id("oc_shared") == "batch-bob"
+
+    notifications: list[tuple[str, str]] = []
+    bot = FeishuBot.__new__(FeishuBot)
+    bot.integration_id = str(alice["id"])
+    bot.bound_open_id = "ou_alice"
+    bot.service = SimpleNamespace(db=alice_db)
+    bot.progress_reporter = SimpleNamespace(
+        render_if_changed=lambda _chat_id, _batch: "Alice 专属进度"
+    )
+    bot._send_text = lambda chat_id, text: notifications.append((chat_id, text))
+    bot._on_batch_changed(
+        {
+            "id": "batch-bob",
+            "source_integration_id": str(bob["id"]),
+            "chat_id": "oc_shared",
+            "status": "processing",
+            "jobs": [],
+        }
+    )
+    assert notifications == []
+    bot._on_batch_changed(
+        {
+            "id": "batch-alice",
+            "source_integration_id": str(alice["id"]),
+            "chat_id": "oc_shared",
+            "status": "processing",
+            "jobs": [],
+        }
+    )
+    assert notifications == [("oc_shared", "Alice 专属进度")]
 
 
 def test_pairing_expires_locks_and_unbind_revokes_immediately(
@@ -298,7 +365,7 @@ def test_multiple_accounts_without_an_explicit_target_are_never_all_selected() -
 def test_cross_user_batch_and_job_ids_are_not_visible_to_the_other_robot(
     tmp_path, monkeypatch
 ) -> None:
-    _, _, _, _, alice_db, bob_db = _setup(tmp_path, monkeypatch)
+    _, service, alice, bob, alice_db, bob_db = _setup(tmp_path, monkeypatch)
     job_id = alice_db.create_job(topic="Alice 私有文章")
     alice_db.create_batch(
         "batch-alice",
@@ -308,11 +375,44 @@ def test_cross_user_batch_and_job_ids_are_not_visible_to_the_other_robot(
     alice_db.attach_batch_job(
         "batch-alice", job_id, "account-alice", "Alice公众号"
     )
+    alice_db.create_editorial_review(
+        {
+            "id": "review-alice",
+            "batch_id": "batch-alice",
+            "job_id": job_id,
+            "status": "completed",
+            "source_snapshot": {},
+            "result": {},
+        }
+    )
+    alice_db.create_editorial_review_application(
+        {
+            "id": "application-alice",
+            "review_id": "review-alice",
+            "status": "candidate_ready",
+            "candidate_snapshot": {"body": "Alice 候选稿"},
+        }
+    )
 
     assert alice_db.get_batch("batch-alice") is not None
     assert alice_db.get_job(job_id) is not None
     assert bob_db.get_batch("batch-alice") is None
     assert bob_db.get_job(job_id) is None
+    alice_service = service._for_user(str(alice["id"]))
+    bob_service = service._for_user(str(bob["id"]))
+    assert alice_service.get_editorial_review("review-alice")["id"] == (
+        "review-alice"
+    )
+    assert alice_service.get_editorial_review_application(
+        "application-alice"
+    )["id"] == "application-alice"
+    assert bob_service.list_editorial_reviews(
+        batch_id="batch-alice", job_id=job_id
+    ) == []
+    with pytest.raises(KeyError, match="AI 评审不存在"):
+        bob_service.get_editorial_review("review-alice")
+    with pytest.raises(KeyError, match="AI 修改稿不存在"):
+        bob_service.get_editorial_review_application("application-alice")
 
 
 def test_message_parser_keeps_app_and_chat_type() -> None:
@@ -402,6 +502,30 @@ def test_dedicated_webhook_challenge_signature_and_app_id(
         assert accepted.status_code == 200
         assert len(dispatched) == 1
 
+        wrong_app_payload = json.loads(json.dumps(payload))
+        wrong_app_payload["header"]["event_id"] = "event-wrong-app"
+        wrong_app_payload["header"]["app_id"] = "cli_bob"
+        wrong_app_body = json.dumps(
+            wrong_app_payload, separators=(",", ":")
+        ).encode()
+        wrong_app_nonce = "nonce-wrong-app"
+        wrong_app_signature = hashlib.sha256(
+            (timestamp + wrong_app_nonce + "encrypt-cli_alice").encode()
+            + wrong_app_body
+        ).hexdigest()
+        wrong_app = client.post(
+            f"/api/feishu/events/{callback_key}",
+            content=wrong_app_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Lark-Request-Timestamp": timestamp,
+                "X-Lark-Request-Nonce": wrong_app_nonce,
+                "X-Lark-Signature": wrong_app_signature,
+            },
+        )
+        assert wrong_app.status_code >= 400
+        assert len(dispatched) == 1
+
         rejected = client.post(
             f"/api/feishu/events/{callback_key}",
             content=body,
@@ -427,7 +551,8 @@ def test_user_level_api_returns_only_the_authenticated_users_robot(
     bob_token = auth.login("feishu-bob", "secret2")["token"]
     app = create_api_app(config, service, start_feishu=False)
 
-    with TestClient(app) as client:
+    monkeypatch.delenv("WECHAT_PUBLISHER_PUBLIC_UI_URL", raising=False)
+    with TestClient(app, base_url="https://api.bluebloodlab.cn") as client:
         alice_result = client.get(
             "/api/v1/me/feishu-integration",
             headers={"Authorization": f"Bearer {alice_token}"},
@@ -436,10 +561,24 @@ def test_user_level_api_returns_only_the_authenticated_users_robot(
             "/api/v1/me/feishu-integration",
             headers={"Authorization": f"Bearer {bob_token}"},
         )
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        unsafe_result = client.get(
+            "/api/v1/me/feishu-integration",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
 
     assert alice_result.json()["app_id"] == "cli_alice"
     assert bob_result.json()["app_id"] == "cli_bob"
     assert alice_result.json()["account_ids"] == ["account-alice"]
     assert bob_result.json()["account_ids"] == ["account-bob"]
     assert alice_result.json()["callback_url"] != bob_result.json()["callback_url"]
+    assert alice_result.json()["callback_url"].startswith(
+        "https://api.bluebloodlab.cn/api/feishu/events/"
+    )
+    assert alice_result.json()["callback_ready"] is True
+    assert unsafe_result.json()["callback_url"] == ""
+    assert unsafe_result.json()["callback_ready"] is False
+    assert "WECHAT_PUBLISHER_PUBLIC_UI_URL" in unsafe_result.json()[
+        "callback_error"
+    ]
     assert str(alice["id"]) != str(bob["id"])

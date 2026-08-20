@@ -10,7 +10,6 @@ from app.services.onboarding import OnboardingService
 from app.ui.lifecycle import client_timer
 from app.ui.state import AppState, set_button_loading
 
-
 PERMISSION_CODES = (
     "im:message.p2p_msg:readonly,"
     "im:message:send_as_bot,"
@@ -43,7 +42,12 @@ def build_feishu_panel(state: AppState) -> None:
     state.reload_config()
     integration_service = FeishuIntegrationService(state.db, state.config)
     onboarding = OnboardingService(state.db, state.config)
-    saved = integration_service.public()
+    callback_base_url = _request_callback_base()
+
+    def read_public() -> dict[str, Any]:
+        return integration_service.public(callback_base_url=callback_base_url)
+
+    saved = read_public()
     account_options, disabled_accounts, unbound_accounts = _feishu_account_catalog(
         state.db
     )
@@ -55,7 +59,10 @@ def build_feishu_panel(state: AppState) -> None:
         if str(item) in account_options
     ]
     selected_default = str(saved.get("default_account_id") or "")
-    page_state: dict[str, Any] = {"pairing": None}
+    page_state: dict[str, Any] = {
+        "pairing": None,
+        "callback_url": str(saved.get("callback_url") or ""),
+    }
 
     with ui.element("div").classes("card w-full feishu-hero"):
         with ui.row().classes("w-full items-center justify-between feishu-heading-row"):
@@ -71,7 +78,7 @@ def build_feishu_panel(state: AppState) -> None:
 
     @ui.refreshable
     def status_card() -> None:
-        current = integration_service.public()
+        current = read_public()
         status = str(current.get("status") or "unconfigured")
         runtime = dict(current.get("runtime") or {})
         status_label = {
@@ -203,7 +210,7 @@ def build_feishu_panel(state: AppState) -> None:
                         app_secret=str(app_secret_input.value or "") or None,
                     )
                 )
-                result = await run.io_bound(
+                await run.io_bound(
                     lambda: integration_service.save(
                         app_id=str(app_id_input.value or ""),
                         app_secret=str(app_secret_input.value or "") or None,
@@ -217,7 +224,7 @@ def build_feishu_panel(state: AppState) -> None:
                 )
                 for secret in (app_secret_input, verification_input, encrypt_key_input):
                     secret.value = ""
-                callback_input.value = _callback_display(result)
+                _update_callback_controls(await run.io_bound(read_public))
                 status_card.refresh()
                 pairing_card.refresh()
                 ui.notify("你的飞书机器人已验证并独立保存。", type="positive")
@@ -240,11 +247,28 @@ def build_feishu_panel(state: AppState) -> None:
             "飞书事件回调地址",
             value=_callback_display(saved),
         ).classes("w-full").props("outlined readonly stack-label")
+        callback_warning = ui.label(_callback_error(saved)).classes(
+            "text-warning feishu-break-anywhere"
+        )
+        callback_warning.visible = bool(_callback_error(saved))
+
+        def copy_callback_url() -> None:
+            callback_url = str(page_state.get("callback_url") or "")
+            if not callback_url:
+                ui.notify(
+                    "请先配置公网 HTTPS 基址，当前没有可复制的回调地址。",
+                    type="warning",
+                )
+                return
+            ui.clipboard.write(callback_url)
+
         with ui.row().classes("feishu-actions"):
-            ui.button(
+            callback_copy_button = ui.button(
                 "复制回调地址",
-                on_click=lambda: ui.clipboard.write(str(callback_input.value or "")),
+                on_click=copy_callback_url,
             ).props("outline color=primary no-caps icon=content_copy")
+            if not page_state["callback_url"]:
+                callback_copy_button.disable()
             ui.button(
                 "刷新接入状态",
                 on_click=lambda: (status_card.refresh(), pairing_card.refresh()),
@@ -260,6 +284,19 @@ def build_feishu_panel(state: AppState) -> None:
             """
         ).classes("w-full feishu-break-anywhere")
         ui.code(PERMISSION_CODES).classes("w-full feishu-break-anywhere")
+
+        def _update_callback_controls(settings: dict[str, Any]) -> None:
+            callback_url = str(settings.get("callback_url") or "")
+            callback_error = _callback_error(settings)
+            page_state["callback_url"] = callback_url
+            callback_input.value = _callback_display(settings)
+            callback_input.update()
+            callback_warning.text = callback_error
+            callback_warning.visible = bool(callback_error)
+            if callback_url:
+                callback_copy_button.enable()
+            else:
+                callback_copy_button.disable()
 
     with ui.element("div").classes("card w-full"):
         _section_heading(
@@ -286,7 +323,7 @@ def build_feishu_panel(state: AppState) -> None:
 
         @ui.refreshable
         def pairing_card() -> None:
-            current = integration_service.public()
+            current = read_public()
             pairing = dict(current.get("pairing") or {})
             generated = page_state.get("pairing")
             with ui.element("div").classes("soft-panel w-full"):
@@ -353,7 +390,7 @@ def build_feishu_panel(state: AppState) -> None:
 
         @ui.refreshable
         def integration_actions() -> None:
-            current = integration_service.public()
+            current = read_public()
             with ui.row().classes("feishu-actions"):
                 if current.get("bound"):
                     ui.button("解除绑定", on_click=unbind).props(
@@ -390,10 +427,26 @@ def _secret_input(label: str, configured: bool) -> Any:
 
 
 def _callback_display(settings: dict[str, Any]) -> str:
-    path = str(settings.get("callback_url") or settings.get("callback_path") or "")
-    if not path:
+    callback_url = str(settings.get("callback_url") or "").strip()
+    if callback_url:
+        return callback_url
+    if not settings.get("configured"):
         return "保存后自动生成专属回调地址"
-    return path if path.startswith("http") else "https://你的系统域名" + path
+    return "尚未配置公网 HTTPS 回调基址"
+
+
+def _callback_error(settings: dict[str, Any]) -> str:
+    if not settings.get("configured") or settings.get("callback_url"):
+        return ""
+    return str(settings.get("callback_error") or "请先配置公网 HTTPS 回调基址。")
+
+
+def _request_callback_base() -> str:
+    try:
+        request = ui.context.client.request
+    except RuntimeError:
+        return ""
+    return str(getattr(request, "base_url", "") or "").rstrip("/")
 
 
 def _section_heading(title: str, description: str) -> None:

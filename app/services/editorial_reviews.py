@@ -356,11 +356,12 @@ class EditorialReviewService:
                 batch_id=batch_id,
                 limit=limit,
             )
+            if self._review_in_owner_scope(row)
         ]
 
     def get_review(self, review_id: str) -> dict[str, Any]:
         row = self.db.get_editorial_review(str(review_id))
-        if not row:
+        if not row or not self._review_in_owner_scope(row):
             raise KeyError(f"AI 评审不存在：{review_id}")
         return self._public_review(row)
 
@@ -628,8 +629,7 @@ class EditorialReviewService:
     def list_applications(
         self, review_id: str, *, limit: int = 20
     ) -> list[dict[str, Any]]:
-        if not self.db.get_editorial_review(review_id):
-            raise KeyError(f"AI 评审不存在：{review_id}")
+        self.get_review(review_id)
         return [
             self._public_application(row)
             for row in self.db.list_editorial_review_applications(
@@ -641,7 +641,26 @@ class EditorialReviewService:
         row = self.db.get_editorial_review_application(str(application_id))
         if not row:
             raise KeyError(f"AI 修改稿不存在：{application_id}")
+        try:
+            self.get_review(str(row.get("review_id") or ""))
+        except KeyError as exc:
+            raise KeyError(f"AI 修改稿不存在：{application_id}") from exc
         return self._public_application(row)
+
+    def _review_in_owner_scope(self, row: dict[str, Any]) -> bool:
+        """Authorize legacy review rows through their owned batch and job."""
+
+        batch_id = str(row.get("batch_id") or "").strip()
+        try:
+            job_id = int(row.get("job_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            batch_id
+            and job_id > 0
+            and self.db.get_batch(batch_id)
+            and self.db.get_job(job_id)
+        )
 
     def resolve_issue(
         self,

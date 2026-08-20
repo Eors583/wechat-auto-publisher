@@ -36,7 +36,7 @@ class _FakeIntegrationService:
     def __init__(self, settings: dict[str, Any]) -> None:
         self.settings = dict(settings)
 
-    def public(self) -> dict[str, Any]:
+    def public(self, **_kwargs: Any) -> dict[str, Any]:
         return dict(self.settings)
 
 
@@ -161,6 +161,12 @@ def test_saved_credentials_are_masked_and_binding_is_status_only(
             "account_ids": ["account-1"],
             "default_account_id": "account-1",
             "callback_path": "/api/feishu/events/random-callback",
+            "callback_url": (
+                "https://publisher.bluebloodlab.cn/"
+                "api/feishu/events/random-callback"
+            ),
+            "callback_ready": True,
+            "callback_error": "",
             "bound": True,
             "bound_open_id_masked": "ou_a…0001",
             "pairing": {"status": "used"},
@@ -171,11 +177,47 @@ def test_saved_credentials_are_masked_and_binding_is_status_only(
     assert "运行正常" in snapshot
     assert "已收到回调" in snapshot
     assert "ou_a…0001" in snapshot
-    assert "https://你的系统域名/api/feishu/events/random-callback" in snapshot
+    assert (
+        "https://publisher.bluebloodlab.cn/api/feishu/events/random-callback"
+        in snapshot
+    )
     assert "已加密保存；留空保持不变" in snapshot
     assert "解除绑定" in snapshot
     assert "停用我的机器人" in snapshot
     assert secret not in snapshot
+
+
+def test_missing_public_https_base_is_explicit_and_cannot_be_copied(
+    monkeypatch: Any,
+) -> None:
+    _, snapshot = _render(
+        monkeypatch,
+        settings={
+            "configured": True,
+            "enabled": True,
+            "status": "waiting_pairing",
+            "app_id": "cli_public",
+            "account_ids": [],
+            "callback_path": "/api/feishu/events/random-callback",
+            "callback_url": "",
+            "callback_ready": False,
+            "callback_error": (
+                "请将 WECHAT_PUBLISHER_PUBLIC_UI_URL 配置为飞书可访问的"
+                "公网 HTTPS 基址，然后刷新本页。"
+            ),
+            "runtime": {},
+        },
+    )
+
+    assert "尚未配置公网 HTTPS 回调基址" in snapshot
+    assert "WECHAT_PUBLISHER_PUBLIC_UI_URL" in snapshot
+    assert "https://你的系统域名" not in snapshot
+    copy_button = next(
+        item
+        for item in json.loads(snapshot)
+        if item.get("text") == "复制回调地址"
+    )
+    assert "disable" in copy_button["props"]
 
 
 def test_disabled_robot_has_a_visible_safe_reenable_action(

@@ -2,25 +2,33 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
+import os
 import secrets
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from app.ai.model_registry import decrypt_api_key, encrypt_api_key
 from app.ai.image_providers import is_image_provider
+from app.ai.model_registry import decrypt_api_key, encrypt_api_key
 from app.db import Database
 from app.services.configuration import ConfigurationService
 from app.services.failures import sanitize_failure_text
-
 
 FEISHU_TOKEN_URL = (
     "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 )
 PAIRING_HASH_ITERATIONS = 120_000
 PAIRING_MAX_FAILURES = 5
+CALLBACK_BASE_ENV = "WECHAT_PUBLISHER_PUBLIC_UI_URL"
+CALLBACK_BASE_ERROR = (
+    "请将 WECHAT_PUBLISHER_PUBLIC_UI_URL 配置为飞书可访问的公网 HTTPS 基址，"
+    "然后刷新本页。"
+)
 
 
 def _utc_now() -> str:
@@ -34,6 +42,60 @@ def _hash_pairing_code(code: str, salt: str, iterations: int) -> str:
         bytes.fromhex(str(salt)),
         max(1, int(iterations)),
     ).hex()
+
+
+def _external_https_base(value: str) -> str:
+    """Return a normalized externally addressable HTTPS base, or empty."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+        host = str(parsed.hostname or "").strip().casefold()
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.netloc
+        or not host
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65_535)
+        or any(character.isspace() for character in raw)
+    ):
+        return ""
+    if (
+        host == "localhost"
+        or host.endswith((".localhost", ".local", ".test", ".invalid", ".example"))
+        or host == "你的系统域名"
+    ):
+        return ""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if "." not in host:
+            return ""
+    else:
+        if not address.is_global:
+            return ""
+    return urlunsplit(
+        ("https", parsed.netloc, parsed.path.rstrip("/"), "", "")
+    )
+
+
+def resolve_feishu_callback_base(*fallbacks: str) -> str:
+    """Resolve one safe callback base without persisting global user data."""
+
+    candidates = (os.getenv(CALLBACK_BASE_ENV, ""), *fallbacks)
+    for candidate in candidates:
+        resolved = _external_https_base(candidate)
+        if resolved:
+            return resolved
+    return ""
 
 
 class FeishuIntegrationService:
@@ -58,10 +120,14 @@ class FeishuIntegrationService:
                 "status": "unconfigured",
                 "account_ids": [],
                 "default_account_id": "",
+                "callback_url": "",
+                "callback_ready": False,
+                "callback_error": "",
                 "runtime": {"status": "stopped"},
             }
         accounts = self.db.list_feishu_integration_accounts(str(row["id"]))
         callback_path = f'/api/feishu/events/{row["callback_key"]}'
+        callback_base = resolve_feishu_callback_base(callback_base_url)
         try:
             runtime = json.loads(str(row.get("runtime_json") or "{}"))
         except json.JSONDecodeError:
@@ -77,9 +143,11 @@ class FeishuIntegrationService:
             "has_verification_token": bool(row.get("verification_token_encrypted")),
             "has_encrypt_key": bool(row.get("encrypt_key_encrypted")),
             "callback_path": callback_path,
-            "callback_url": f'{callback_base_url.rstrip("/")}{callback_path}'
-            if callback_base_url
-            else callback_path,
+            "callback_url": f"{callback_base}{callback_path}"
+            if callback_base
+            else "",
+            "callback_ready": bool(callback_base),
+            "callback_error": "" if callback_base else CALLBACK_BASE_ERROR,
             "agent_model_id": str(row.get("agent_model_id") or ""),
             "account_ids": [str(item["account_id"]) for item in accounts],
             "default_account_id": next(
