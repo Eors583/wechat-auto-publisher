@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
 from .errors import WeChatHTTPError
-
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,28 @@ class WeChatClient:
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._request_once(
-            method, path, params=params, json_body=json_body, files=files, data=data, refreshed=False
+            method,
+            path,
+            params=params,
+            json_body=json_body,
+            files=files,
+            data=data,
+            refreshed=False,
         )
+
+    def send_customer_service_text(self, open_id: str, text: str) -> None:
+        """Send a text reply to a user who recently messaged the account."""
+
+        for chunk in _utf8_chunks(str(text or ""), max_bytes=1800):
+            self.request(
+                "POST",
+                "/cgi-bin/message/custom/send",
+                json_body={
+                    "touser": str(open_id or "").strip(),
+                    "msgtype": "text",
+                    "text": {"content": chunk},
+                },
+            )
 
     def _request_once(
         self,
@@ -101,15 +121,10 @@ class WeChatClient:
                 break
             except httpx.HTTPStatusError as exc:
                 status_code = int(exc.response.status_code)
-                if (
-                    retry_safe
-                    and status_code in {502, 503, 504}
-                    and attempt < attempts
-                ):
+                if retry_safe and status_code in {502, 503, 504} and attempt < attempts:
                     delay = self._retry_backoff_seconds * (2 ** (attempt - 1))
                     logger.warning(
-                        "WeChat gateway HTTP %s, retrying %s %s "
-                        "(%s/%s) in %.1fs",
+                        "WeChat gateway HTTP %s, retrying %s %s (%s/%s) in %.1fs",
                         status_code,
                         method,
                         path,
@@ -151,3 +166,23 @@ class WeChatClient:
         if isinstance(payload, dict) and errcode not in (0, None):
             raise WeChatAPIError(int(errcode), str(payload.get("errmsg", "")), payload)
         return payload if isinstance(payload, dict) else {"data": payload}
+
+
+def _utf8_chunks(text: str, *, max_bytes: int) -> list[str]:
+    clean = str(text or "").strip()
+    if not clean:
+        return []
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+    for char in clean:
+        size = len(char.encode("utf-8"))
+        if current and current_size + size > max_bytes:
+            chunks.append("".join(current))
+            current = []
+            current_size = 0
+        current.append(char)
+        current_size += size
+    if current:
+        chunks.append("".join(current))
+    return chunks

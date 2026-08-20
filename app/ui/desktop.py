@@ -77,6 +77,7 @@ from app.ui.panels.settings_hub import (
 )
 from app.ui.panels.tasks import build_review_page, build_tasks_panel
 from app.ui.panels.topics import build_topic_center
+from app.ui.panels.wechat_commands import open_wechat_command_dialog
 from app.ui.state import (
     STATUS_LABEL,
     AppState,
@@ -5258,6 +5259,12 @@ def _render_account_config_workspace(
                                 "人工确认后允许写入",
                                 "verified_user",
                                 open_template,
+                            ),
+                            (
+                                "微信指挥",
+                                "在微信中发送链接和改写指令",
+                                "chat",
+                                lambda: open_wechat_command_dialog(state, account_id),
                             ),
                         )
                         for title, detail, icon, action in entries:

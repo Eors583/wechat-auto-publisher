@@ -185,6 +185,8 @@ class FeishuToolExecutor(
         send_text: Callable[[str, str], None],
         send_image: Callable[..., str] | None = None,
         admin_open_ids: set[str] | None = None,
+        source_channel: str = "feishu",
+        channel_settings_label: str = "飞书接入设置",
     ) -> None:
         self.service = service
         self.config = config
@@ -194,6 +196,10 @@ class FeishuToolExecutor(
         self.send_text = send_text
         self.send_image = send_image
         self.admin_open_ids = admin_open_ids
+        self.source_channel = str(source_channel or "feishu").strip()
+        self.channel_settings_label = str(
+            channel_settings_label or "飞书接入设置"
+        ).strip()
         db = getattr(service, "db", None)
         self.configuration = ConfigurationService(db, config) if db is not None else None
         self.creation_plans = (
@@ -238,7 +244,8 @@ class FeishuToolExecutor(
         ):
             self.reply_text(
                 message_id,
-                "该操作需要管理员权限。请在飞书接入设置中把你的 Open ID 加入允许用户列表。",
+                "该操作需要管理员权限。请在"
+                f"{self.channel_settings_label}中把你的 Open ID 加入允许用户列表。",
             )
             return
         confirmations = CONFIRMATION_REQUIREMENTS.get(plan.tool)
@@ -353,7 +360,7 @@ class FeishuToolExecutor(
         article = self.followed_content.add_article_url(
             source_url,
             followed_account_id=str(args.get("followed_account_id") or "").strip() or None,
-            source_channel="feishu",
+            source_channel=self.source_channel,
         )
         self.reply_text(
             message_id,
@@ -435,6 +442,7 @@ class FeishuToolExecutor(
             account_ids=self.resolve_accounts(args),
             requested_by=open_id,
             chat_id=chat_id,
+            source_channel=self.source_channel,
         )
         self.sessions.bind_batch(chat_id, str(batch["id"]))
         if followed_article_id and self.followed_content is not None:
@@ -450,7 +458,7 @@ class FeishuToolExecutor(
                 target=self._collect_silently,
                 args=(source_url,),
                 daemon=True,
-                name=f"feishu-collect-{batch['id']}",
+                name=f"{self.source_channel}-collect-{batch['id']}",
             ).start()
         names = "、".join(job["account_name"] for job in batch["jobs"])
         self.reply_text(
@@ -466,7 +474,7 @@ class FeishuToolExecutor(
         try:
             self.followed_content.add_article_url(
                 source_url,
-                source_channel="feishu",
+                source_channel=self.source_channel,
             )
         except Exception:
             # Collection is secondary and must never interrupt article generation.

@@ -19,6 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import __version__
 from app.api.editorial_reviews import create_editorial_review_router
 from app.api.local_agents import create_local_agent_router
+from app.api.wechat_commands import create_wechat_command_router
 from app.ai.image_providers import is_image_provider
 from app.config import load_config
 from app.db import customer_data_scope
@@ -550,6 +551,7 @@ def create_api_app(
     app.include_router(
         create_local_agent_router(batch_service.db, require_token)
     )
+    app.include_router(create_wechat_command_router(batch_service, cfg))
 
     @app.get("/health")
     def health() -> dict[str, Any]:

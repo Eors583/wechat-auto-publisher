@@ -537,3 +537,11 @@ def test_custom_prompt_template_manager_is_available_from_account_configuration(
     assert "build_prompt_templates_panel(" in source
     assert "on_templates_change=render_prompt_binding" in source
     assert '"保存当前公众号提示词"' in source
+
+
+def test_account_configuration_exposes_wechat_command_entry() -> None:
+    source = inspect.getsource(desktop._render_account_config_workspace)
+
+    assert '"微信指挥"' in source
+    assert '"在微信中发送链接和改写指令"' in source
+    assert "open_wechat_command_dialog(state, account_id)" in source

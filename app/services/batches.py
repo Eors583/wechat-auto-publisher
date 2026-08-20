@@ -528,6 +528,7 @@ class BatchService:
         requested_by: str | None = None,
         chat_id: str | None = None,
         parent_batch_id: str | None = None,
+        source_channel: str | None = None,
     ) -> dict[str, Any]:
         source_url = (source_url or "").strip() or None
         raw_content = (raw_content or "").strip() or None
@@ -583,7 +584,10 @@ class BatchService:
                 pipe = Pipeline(cfg, cancel_event=cancel_event)
                 job_id = self.db.create_job(
                     topic=topic,
-                    source="feishu" if requested_by else "api",
+                    source=(
+                        str(source_channel or "").strip()
+                        or ("feishu" if requested_by else "api")
+                    ),
                     source_url=source_url,
                     raw_content=raw_content,
                     mode="draft",
