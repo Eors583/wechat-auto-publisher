@@ -2693,7 +2693,7 @@ APP_CSS += """
 }
 .ops-task-row-card,
 .ops-batch-row-card {
-  grid-template-columns: 42px minmax(0, 1.5fr) minmax(0, .7fr) minmax(0, .7fr) 166px !important;
+  grid-template-columns: 42px minmax(0, 1.5fr) minmax(0, .7fr) minmax(0, .7fr) var(--ui-task-actions-column) !important;
   align-self: stretch;
   width: 100% !important;
   min-height: var(--ui-task-row-height) !important;
@@ -2704,7 +2704,11 @@ APP_CSS += """
 .ops-task-row-icon { position: relative; width: 38px; height: 38px; }
 .ops-task-row-actions .q-btn:last-child { display: none; }
 .ops-task-row-actions .q-btn { min-height: 38px; }
-.ops-task-row-archive-action { width: 74px; min-width: 74px; white-space: nowrap; }
+.ops-task-row-archive-action {
+  width: var(--ui-task-archive-action-width);
+  min-width: var(--ui-task-archive-action-width);
+  white-space: nowrap;
+}
 .ops-task-row-archive-action .q-btn__content { flex-wrap: nowrap; }
 .ops-task-row-primary-action {
   width: 84px;

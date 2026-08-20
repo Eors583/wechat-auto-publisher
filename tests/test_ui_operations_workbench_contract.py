@@ -160,7 +160,8 @@ def test_task_rows_expose_direct_batch_archive_actions() -> None:
     assert "service.archive_batch(batch_id, archived=archived)" in confirm_source
     assert '“待我处理”和“全部批次”' in confirm_source
     assert ".ops-task-row-archive-action" in APP_CSS
-    assert "width: 74px; min-width: 74px" in APP_CSS
+    assert "width: var(--ui-task-archive-action-width)" in APP_CSS
+    assert "var(--ui-task-actions-column)" in APP_CSS
     assert "font-size: 0 !important" in APP_CSS
 
 

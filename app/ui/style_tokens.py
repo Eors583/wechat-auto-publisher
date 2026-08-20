@@ -113,6 +113,8 @@ UI_STYLE_SPEC: dict[str, dict[str, StyleToken]] = {
         "field-gap": StyleToken("7px", "外置标签与输入控件间距"),
         "review-gap": StyleToken("14px", "全文审核栏间距"),
         "task-row-height": StyleToken("68px", "任务队列固定行高"),
+        "task-actions-column": StyleToken("208px", "任务队列操作列宽度"),
+        "task-archive-action-width": StyleToken("116px", "任务队列归档操作宽度"),
         "topic-row-height": StyleToken("52px", "选题列表固定行高"),
         "topic-source-column": StyleToken("136px", "选题列表来源列宽度"),
         "topic-actions-column": StyleToken("260px", "选题列表操作列宽度"),
