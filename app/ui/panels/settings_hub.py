@@ -33,7 +33,7 @@ def build_model_management_panel(state: AppState) -> None:
                 "text-h6 text-weight-bold text-negative"
             )
             ui.label(
-                "请回到主站右上角“设置 → 我的大模型”管理个人模型。"
+                "请回到主站左侧“模型配置”管理个人模型。"
             ).classes("muted")
         return
     platform_db = state.db.for_user("")

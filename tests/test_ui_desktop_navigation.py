@@ -81,10 +81,17 @@ def _tab_labels(function: Any) -> list[str]:
     return [str(node.args[0].value) for node in calls]
 
 
-def test_primary_navigation_exposes_the_five_confirmed_workbench_entries() -> None:
+def test_primary_navigation_exposes_model_settings_below_accounts() -> None:
     labels = _tab_labels(desktop.create_desktop_app)
 
-    assert labels[:5] == ["创作台", "选题雷达", "任务队列", "公众号", "文章审核"]
+    assert labels[:6] == [
+        "创作台",
+        "选题雷达",
+        "任务队列",
+        "公众号",
+        "模型配置",
+        "文章审核",
+    ]
 
 
 def test_internal_navigation_preserves_the_production_ui_root_path(

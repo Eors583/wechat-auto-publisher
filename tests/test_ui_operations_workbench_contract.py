@@ -519,10 +519,15 @@ def test_create_log_keeps_multiline_height_and_cannot_overlap_actions() -> None:
 def test_authenticated_user_can_open_personal_model_settings() -> None:
     source = inspect.getsource(desktop.create_desktop_app)
 
-    assert 'ui.label("我的大模型")' in source
-    assert 'ui.menu_item("我的大模型", on_click=open_user_models)' in source
+    account_tab = source.index('tab_accounts = ui.tab("公众号"')
+    model_tab = source.index('tab_models = ui.tab("模型配置"')
+
+    assert account_tab < model_tab
+    assert 'aria-label="模型配置" title="模型配置"' in source
+    assert 'def mount_models() -> None:' in source
     assert "build_models_panel(page_state, purpose=\"text\")" in source
     assert "配置只属于当前登录账号" in source
+    assert "我的大模型" not in source
 
 
 def test_custom_prompt_template_manager_is_available_from_account_configuration() -> None:

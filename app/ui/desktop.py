@@ -388,32 +388,6 @@ def create_desktop_app() -> None:
     ):
         install_local_model_bridge(page_state)
 
-    with ui.dialog().props("maximized").classes(
-        "fullscreen-editor-dialog"
-    ) as user_models_dialog:
-        with ui.card().classes("fullscreen-editor-card"):
-            with ui.row().classes("fullscreen-editor-header"):
-                with ui.column().classes("gap-0"):
-                    ui.label("我的大模型").classes("text-h6 text-weight-bold")
-                    ui.label(
-                        "配置只属于当前登录账号；远程 API Key 加密保存，"
-                        "本地模型密钥只保存在本机助手。"
-                    ).classes("muted")
-                ui.space()
-                ui.button(
-                    icon="close",
-                    on_click=user_models_dialog.close,
-                ).props("flat round color=grey-8 aria-label=关闭我的大模型")
-            user_models_host = ui.column().classes(
-                "ops-user-models-body w-full"
-            )
-
-    def open_user_models() -> None:
-        user_models_host.clear()
-        with user_models_host:
-            build_models_panel(page_state, purpose="text")
-        user_models_dialog.open()
-
     with ui.element("div").classes("shell ops-workbench-shell"):
         with ui.element("div").classes("ops-sidebar-brand"):
             with ui.element("span").classes("ops-sidebar-brand-mark"):
@@ -480,10 +454,6 @@ def create_desktop_app() -> None:
                         ui.menu_item(
                             "公众号与创作规则",
                             on_click=lambda: tabs.set_value(tab_accounts),
-                        )
-                        ui.menu_item(
-                            "我的大模型",
-                            on_click=open_user_models,
                         )
 
         health_state = {"status": onboarding_status}
@@ -585,6 +555,9 @@ def create_desktop_app() -> None:
             tab_accounts = ui.tab("公众号", icon="campaign").props(
                 'aria-label="公众号" title="公众号"'
             )
+            tab_models = ui.tab("模型配置", icon="smart_toy").props(
+                'aria-label="模型配置" title="模型配置"'
+            )
             tab_review = ui.tab("文章审核", icon="rate_review").classes(
                 "ops-review-route-tab"
             )
@@ -606,7 +579,6 @@ def create_desktop_app() -> None:
                     "flat round dense aria-label=用户菜单"
                 ):
                     with ui.menu():
-                        ui.menu_item("我的大模型", on_click=open_user_models)
                         ui.menu_item(
                             "退出登录",
                             on_click=lambda: (
@@ -642,10 +614,18 @@ def create_desktop_app() -> None:
                 jobs_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_accounts).classes("ops-page ops-accounts-page"):
                 accounts_host = ui.column().classes("w-full ops-page-host")
+            with ui.tab_panel(tab_models).classes("ops-page ops-models-page"):
+                models_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_review).classes("ops-page ops-review-page"):
                 review_host = ui.column().classes("w-full ops-page-host")
 
-        for host in (topics_host, jobs_host, accounts_host, review_host):
+        for host in (
+            topics_host,
+            jobs_host,
+            accounts_host,
+            models_host,
+            review_host,
+        ):
             with host, ui.row().classes(
                 "w-full items-center justify-center q-py-xl gap-2"
             ):
@@ -807,11 +787,23 @@ def create_desktop_app() -> None:
                     initial_action=requested_config_repair,
                 )
 
+        def mount_models() -> None:
+            models_host.clear()
+            with models_host:
+                render_page_heading(
+                    "MODEL SETTINGS",
+                    "模型配置",
+                    "配置只属于当前登录账号；远程 API Key 加密保存，"
+                    "本地模型密钥只保存在本机助手。",
+                )
+                build_models_panel(page_state, purpose="text")
+
         tab_mounts = {
             str(tab_wizard.props["name"]): mount_wizard,
             str(tab_topics.props["name"]): mount_topics,
             str(tab_jobs.props["name"]): mount_jobs,
             str(tab_accounts.props["name"]): mount_accounts,
+            str(tab_models.props["name"]): mount_models,
             str(tab_review.props["name"]): mount_review,
         }
 
@@ -5341,7 +5333,7 @@ def _build_help_panel() -> None:
             """
 **第一次使用**
 
-每个用户都可以在右上角“设置 → 我的大模型”中保存自己的 API Key、接口地址和模型名称；这些配置只跟随当前登录账号。平台公共模型仍可直接选择，但只能由管理员维护。
+每个用户都可以在左侧“模型配置”中保存自己的 API Key、接口地址和模型名称；这些配置只跟随当前登录账号。平台公共模型仍可直接选择，但只能由管理员维护。
 
 1. **选择内容**：在工作台直接粘贴链接、正文或输入话题；需要找热点和关注文章时，点击“从选题库选择”  
 2. **选择公众号**：系统会自动使用每个公众号已经保存的模型、创作规则、排版和图片配置  
