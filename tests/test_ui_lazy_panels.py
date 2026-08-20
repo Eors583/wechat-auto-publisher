@@ -37,6 +37,9 @@ def test_inactive_workspaces_are_mounted_from_tab_changes() -> None:
 
     assert "tabs.on_value_change(lambda event: schedule_tab(event.value))" in source
     assert "scheduled_tabs.add(tab_name)" in source
+    assert "page_loading_overlay.set_visibility(True)" in source
+    assert "page_loading_overlay.set_visibility(False)" in source
+    assert '"正在切换页面"' not in source
     schedule_source = source[
         source.index("def schedule_tab(tab: Any) -> None:") :
         source.index("# Only the requested panel contributes")
@@ -50,6 +53,26 @@ def test_inactive_workspaces_are_mounted_from_tab_changes() -> None:
     assert 'str(tab_accounts.props["name"]): mount_accounts' in source
     assert 'str(tab_models.props["name"]): mount_models' in source
     assert 'str(tab_review.props["name"]): mount_review' in source
+
+
+def test_page_navigation_uses_spinner_mask_only_for_lazy_mounts() -> None:
+    source = DESKTOP.read_text(encoding="utf-8")
+    schedule_source = source[
+        source.index("def schedule_tab(tab: Any) -> None:") :
+        source.index("# Only the requested panel contributes")
+    ]
+    mounted_guard = schedule_source.index(
+        "if tab_name in mounted_tabs or tab_name in scheduled_tabs:"
+    )
+    overlay_show = schedule_source.index("page_loading_overlay.set_visibility(True)")
+
+    assert mounted_guard < overlay_show
+    assert 'ui.spinner("oval", size="42px", color="primary")' in source
+    assert "attach_interaction_feedback(\n            tabs," not in source
+    assert "finally:" in source[
+        source.index("def mount_tab(tab: Any) -> None:") :
+        source.index("def schedule_tab(tab: Any) -> None:")
+    ]
 
 
 def test_account_configuration_uses_one_unified_scrollable_panel() -> None:

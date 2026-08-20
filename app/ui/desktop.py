@@ -49,8 +49,6 @@ from app.ui import image_proxy as _image_proxy  # noqa: F401
 from app.ui.auth_persistence import auth_session_middleware_kwargs
 from app.ui.background_activity import build_global_activity_dock
 from app.ui.interaction_feedback import (
-    attach_interaction_feedback,
-    hide_interaction_feedback,
     install_interaction_feedback,
 )
 from app.ui.lifecycle import client_timer
@@ -619,6 +617,17 @@ def create_desktop_app() -> None:
             with ui.tab_panel(tab_review).classes("ops-page ops-review-page"):
                 review_host = ui.column().classes("w-full ops-page-host")
 
+        with ui.element("div").classes(
+            "ops-page-loading-overlay"
+        ) as page_loading_overlay:
+            ui.spinner("oval", size="42px", color="primary").props(
+                'aria-label="页面加载中"'
+            )
+        page_loading_overlay.props(
+            'role="status" aria-live="polite" aria-label="页面加载中"'
+        )
+        page_loading_overlay.set_visibility(False)
+
         for host in (
             topics_host,
             jobs_host,
@@ -810,18 +819,20 @@ def create_desktop_app() -> None:
         def mount_tab(tab: Any) -> None:
             tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
             if tab_name in mounted_tabs:
-                hide_interaction_feedback()
                 return
-            tab_mounts[tab_name]()
-            mounted_tabs.add(tab_name)
-            scheduled_tabs.discard(tab_name)
-            hide_interaction_feedback()
+            try:
+                tab_mounts[tab_name]()
+                mounted_tabs.add(tab_name)
+            finally:
+                scheduled_tabs.discard(tab_name)
+                page_loading_overlay.set_visibility(False)
 
         def schedule_tab(tab: Any) -> None:
             tab_name = str(tab.props["name"] if hasattr(tab, "props") else tab)
             if tab_name in mounted_tabs or tab_name in scheduled_tabs:
                 return
             scheduled_tabs.add(tab_name)
+            page_loading_overlay.set_visibility(True)
 
             # Let Quasar paint the newly selected sidebar item and the loading
             # skeleton before constructing a data-heavy page.  Calling
@@ -837,11 +848,6 @@ def create_desktop_app() -> None:
         # Only the requested panel contributes elements to the initial
         # NiceGUI payload. Hidden workspaces are built on their first visit.
         mount_tab(initial_tab)
-        attach_interaction_feedback(
-            tabs,
-            "正在切换页面",
-            event="update:model-value",
-        )
         tabs.on_value_change(lambda event: schedule_tab(event.value))
 
 

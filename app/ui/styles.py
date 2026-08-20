@@ -453,6 +453,20 @@ body, .q-page, .nicegui-content {
 .ops-interaction-feedback-copy { display: grid; gap: 2px; min-width: 0; }
 .ops-interaction-feedback-copy strong { font-size: var(--ui-font-size-sm); font-weight: var(--ui-font-weight-medium); }
 .ops-interaction-feedback-copy span { color: var(--ui-color-text-secondary); font-size: var(--ui-font-size-xs); }
+.ops-page-loading-overlay {
+  position: fixed;
+  z-index: 2100;
+  top: var(--ui-layout-topbar-height);
+  right: 0;
+  bottom: 0;
+  left: var(--ui-layout-sidebar-width);
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--ui-color-surface) 72%, transparent);
+}
 .preview-article-title {
   width: min(100%, 677px);
   margin-left: auto;
@@ -1586,6 +1600,7 @@ body,
 
 @media (max-width: 1100px) {
   .ops-workbench-shell { padding-left: var(--ui-layout-sidebar-compact); }
+  .ops-page-loading-overlay { left: var(--ui-layout-sidebar-compact); }
   .ops-sidebar-brand,
   .ops-main-nav,
   .ops-sidebar-footer { width: var(--ui-layout-sidebar-compact) !important; }
