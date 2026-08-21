@@ -3050,9 +3050,20 @@ def _build_accounts_panel(
                     color_field("body", "color", "文字颜色")
                     text_field("body", "line_height", "行高（如 2 或 32px）")
                     text_field("body", "spacing_after", "段后间距")
-                    text_field("body", "first_line_indent", "首行缩进（0em / 2em）")
-                    text_field("body", "horizontal_padding", "左右留白")
+                    text_field(
+                        "body",
+                        "first_line_indent",
+                        "首行缩进（0em = 不缩进）",
+                    )
+                    text_field(
+                        "body",
+                        "horizontal_padding",
+                        "正文左右留白（0px = 不留白）",
+                    )
                     align_field("body")
+                ui.label(
+                    "首行缩进只影响每段第一行；正文左右留白会让整段所有行同时向内收。"
+                ).classes("muted text-caption ops-wrap-anywhere")
 
             with ui.expansion("正文一级标题", icon="title").classes("w-full"):
                 with ui.grid(columns=2).classes("w-full gap-3"):
@@ -3513,14 +3524,56 @@ def _build_accounts_panel(
                     with ui.element("div").classes("preview-frame w-full"):
                         ui.html(prepare_preview_html(finalized.html), sanitize=False)
 
-            def save_layout() -> None:
+            async def save_layout() -> None:
+                _set_button_loading(
+                    layout_save_button,
+                    True,
+                    "正在保存排版并刷新待审核文章…",
+                )
                 try:
-                    save_account_layout(state.db, account_id, collect_layout())
+                    current_layout = collect_layout()
+
+                    def persist_and_refresh() -> dict[str, Any]:
+                        save_account_layout(state.db, account_id, current_layout)
+                        return review_service.rerender_pending_account_jobs(
+                            account_id
+                        )
+
+                    result = await run.io_bound(persist_and_refresh)
                     dialog.close()
                     render_accounts()
-                    ui.notify("该公众号的排版方案已保存", type="positive")
-                except Exception as exc:
-                    ui.notify(f"保存失败：{exc}", type="negative")
+                    rerendered = int(result.get("rerendered") or 0)
+                    failed = int(result.get("failed") or 0)
+                    if failed:
+                        failures = list(result.get("failures") or [])
+                        reason = str(
+                            (failures[0] if failures else {}).get("reason") or ""
+                        )
+                        ui.notify(
+                            f"排版已保存，已刷新 {rerendered} 篇；"
+                            f"另有 {failed} 篇刷新失败"
+                            + (f"：{reason}" if reason else ""),
+                            type="warning",
+                            timeout=12000,
+                        )
+                    elif rerendered:
+                        ui.notify(
+                            f"排版已保存，并自动刷新 {rerendered} 篇待审核文章",
+                            type="positive",
+                        )
+                    else:
+                        ui.notify(
+                            "排版已保存，后续新文章会直接使用该设置",
+                            type="positive",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(
+                        f"保存失败：{sanitize_failure_text(exc)}",
+                        type="negative",
+                        timeout=10000,
+                    )
+                finally:
+                    _set_button_loading(layout_save_button, False)
 
             with ui.row().classes("w-full justify-between q-mt-md"):
                 ui.button("刷新预览", on_click=refresh_preview).props(
@@ -3528,7 +3581,10 @@ def _build_accounts_panel(
                 )
                 with ui.row():
                     ui.button("取消", on_click=dialog.close).props("flat no-caps")
-                    ui.button("保存排版", on_click=save_layout).props(
+                    layout_save_button = ui.button(
+                        "保存排版",
+                        on_click=save_layout,
+                    ).props(
                         "unelevated color=teal-9 no-caps"
                     )
             refresh_preview()

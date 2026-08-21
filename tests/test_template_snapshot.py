@@ -4,13 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.render import TemplateRenderer
+from app.render.finalize import finalize_article_html, inspect_wechat_html
 from app.wechat.template_snapshot import (
     list_template_draft_candidates,
     load_template_snapshot,
     merge_template_html,
     save_template_draft_candidate,
 )
-from app.render.finalize import finalize_article_html, inspect_wechat_html
 
 
 class TemplateSnapshotTests(unittest.TestCase):
@@ -65,6 +66,32 @@ class TemplateSnapshotTests(unittest.TestCase):
             self.assertNotIn("max-width:100% !important", result.html)
             self.assertTrue(result.report.ok)
             self.assertEqual(result.report.image_count, 1)
+
+    def test_zero_first_line_indent_survives_template_merge(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        generated = TemplateRenderer(
+            {
+                "_root": str(root),
+                "template": {
+                    "path": "app/render/templates/article.html.j2",
+                    "body_first_line_indent": "0em",
+                },
+            }
+        ).render(body="第一段正文。\n\n第二段正文。", show_byline=False)
+
+        result = finalize_article_html(
+            generated,
+            {"enabled": True, "placeholder": "正文"},
+            snapshot=type(
+                "Snapshot",
+                (),
+                {"content": "<section><p>页眉</p><p>正文</p><p>页尾</p></section>"},
+            )(),
+            load_local_snapshot=False,
+        )
+
+        self.assertEqual(result.html.count("text-indent:0em"), 2)
+        self.assertTrue(result.report.ok)
 
     def test_template_preserves_video_and_decorations_around_placeholder(self) -> None:
         template = (

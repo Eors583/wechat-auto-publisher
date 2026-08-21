@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from nicegui import ui
@@ -273,3 +274,12 @@ def test_account_can_be_added_before_a_model_is_configured(
             ),
         }
     ]
+
+
+def test_layout_editor_distinguishes_indent_from_padding_and_refreshes_reviews() -> None:
+    source = inspect.getsource(desktop._build_accounts_panel)
+
+    assert "首行缩进（0em = 不缩进）" in source
+    assert "正文左右留白（0px = 不留白）" in source
+    assert "首行缩进只影响每段第一行" in source
+    assert "rerender_pending_account_jobs" in source

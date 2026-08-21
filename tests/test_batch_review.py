@@ -92,6 +92,90 @@ def test_needs_changes_job_can_be_confirmed_without_fake_save(tmp_path) -> None:
     assert service.get_batch(batch_id)["progress"]["ready_for_draft"] == 1
 
 
+def test_account_layout_refresh_only_rerenders_unconfirmed_review_jobs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service, batch_id, job_id = _service_with_ready_job(tmp_path)
+    confirmed_batch = "batch-confirmed"
+    confirmed_job = service.db.create_job(topic="已确认", source="test")
+    service.db.update_job(confirmed_job, status="ready_for_review", body="正文")
+    service.db.create_batch(confirmed_batch, topic="已确认")
+    service.db.attach_batch_job(
+        confirmed_batch,
+        confirmed_job,
+        "account-a",
+        "公众号A",
+    )
+    service.db.update_batch_job_review(confirmed_batch, confirmed_job, "confirmed")
+
+    other_batch = "batch-other-account"
+    other_job = service.db.create_job(topic="其他账号", source="test")
+    service.db.update_job(other_job, status="ready_for_review", body="正文")
+    service.db.create_batch(other_batch, topic="其他账号")
+    service.db.attach_batch_job(
+        other_batch,
+        other_job,
+        "account-b",
+        "公众号B",
+    )
+
+    calls: list[tuple[str, int, bool]] = []
+
+    def fake_rerender(
+        selected_batch_id: str,
+        selected_job_id: int,
+        *,
+        mark_viewed: bool = True,
+    ) -> dict:
+        calls.append((selected_batch_id, selected_job_id, mark_viewed))
+        return {}
+
+    monkeypatch.setattr(service, "rerender_job", fake_rerender)
+
+    result = service.rerender_pending_account_jobs("account-a")
+
+    assert calls == [(batch_id, job_id, False)]
+    assert result == {
+        "account_id": "account-a",
+        "requested": 1,
+        "rerendered": 1,
+        "failed": 0,
+        "failures": [],
+    }
+    assert service.get_batch(batch_id)["jobs"][0]["review_status"] == "unviewed"
+
+
+def test_rerender_job_reuses_scoped_database_and_can_preserve_review_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service, batch_id, job_id = _service_with_ready_job(tmp_path)
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, _config, db=None) -> None:
+            captured["db"] = db
+
+        def run_job(self, selected_job_id, **kwargs) -> None:
+            captured["run"] = (selected_job_id, kwargs)
+
+    monkeypatch.setattr(
+        "app.services.batches.apply_account_selection",
+        lambda *_args, **_kwargs: ({}, {}),
+    )
+    monkeypatch.setattr("app.services.batches.Pipeline", FakePipeline)
+
+    result = service.rerender_job(batch_id, job_id, mark_viewed=False)
+
+    assert captured["db"] is service.db
+    assert captured["run"] == (
+        job_id,
+        {"review": True, "from_step": "render"},
+    )
+    assert result["review_status"] == "unviewed"
+
+
 def test_cancel_preserves_terminal_review_jobs(tmp_path) -> None:
     service, batch_id, ready_job_id = _service_with_ready_job(tmp_path)
     active_job_id = service.db.create_job(

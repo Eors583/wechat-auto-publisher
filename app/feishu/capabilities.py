@@ -251,6 +251,12 @@ BATCH_SERVICE_CAPABILITIES: tuple[FeishuCapability, ...] = (
         ("rerender_article",),
     ),
     FeishuCapability(
+        "rerender_pending_account_jobs",
+        "保存网页排版后刷新同一公众号的待审核文章",
+        FeishuSupportStatus.NOT_APPLICABLE,
+        note="网页排版设置的内部联动；飞书仍可按文章单独重新套用排版。",
+    ),
+    FeishuCapability(
         "regenerate_inline_images",
         "重新生成全部正文论点配图",
         FeishuSupportStatus.SUPPORTED,

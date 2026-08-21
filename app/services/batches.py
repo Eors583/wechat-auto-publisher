@@ -1150,7 +1150,58 @@ class BatchService:
             self._batch_job(batch_id, job_id), include_content=True
         )
 
-    def rerender_job(self, batch_id: str, job_id: int) -> dict[str, Any]:
+    def rerender_pending_account_jobs(self, account_id: str) -> dict[str, Any]:
+        """Apply current layout to every unconfirmed review job for one account."""
+
+        clean_account_id = str(account_id or "").strip()
+        if not clean_account_id:
+            raise ValueError("公众号 ID 不能为空")
+        jobs: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            page = self.list_review_inbox(
+                bucket="review",
+                account_id=clean_account_id,
+                limit=100,
+                cursor=cursor,
+            )
+            jobs.extend(page["items"])
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
+
+        failures: list[dict[str, Any]] = []
+        rerendered = 0
+        for job in jobs:
+            try:
+                self.rerender_job(
+                    str(job["batch_id"]),
+                    int(job["job_id"]),
+                    mark_viewed=False,
+                )
+                rerendered += 1
+            except Exception as exc:  # noqa: BLE001
+                failures.append(
+                    {
+                        "job_id": int(job["job_id"]),
+                        "reason": sanitize_failure_text(exc),
+                    }
+                )
+        return {
+            "account_id": clean_account_id,
+            "requested": len(jobs),
+            "rerendered": rerendered,
+            "failed": len(failures),
+            "failures": failures,
+        }
+
+    def rerender_job(
+        self,
+        batch_id: str,
+        job_id: int,
+        *,
+        mark_viewed: bool = True,
+    ) -> dict[str, Any]:
         job = self._batch_job(batch_id, job_id)
         if job.get("status") != "ready_for_review":
             raise ValueError("只有待审核文章可以重新排版")
@@ -1160,8 +1211,13 @@ class BatchService:
             or ""
         )
         cfg, _ = apply_account_selection(load_config(), self.db, account_id)
-        Pipeline(cfg).run_job(job_id, review=True, from_step="render")
-        self.db.update_batch_job_review(batch_id, job_id, "viewed")
+        Pipeline(cfg, db=self.db).run_job(
+            job_id,
+            review=True,
+            from_step="render",
+        )
+        if mark_viewed:
+            self.db.update_batch_job_review(batch_id, job_id, "viewed")
         return self._public_job(
             self._batch_job(batch_id, job_id), include_content=True
         )
