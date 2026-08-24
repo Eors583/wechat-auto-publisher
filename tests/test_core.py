@@ -64,6 +64,13 @@ class ParseTests(unittest.TestCase):
         restored = normalize_model_body(r"第一段\n第二段")
         self.assertEqual(restored, "第一段\n第二段")
 
+    def test_mixed_real_and_escaped_heading_breaks_are_restored(self) -> None:
+        restored = normalize_model_body(
+            "第一段真实换行。\n第二段继续说明。" + r"\n\n## 观点二：边界与权力"
+        )
+        self.assertIn("第二段继续说明。\n\n## 观点二：边界与权力", restored)
+        self.assertNotIn(r"\n\n##", restored)
+
     def test_parse_rewrite_json(self) -> None:
         body = "这是一篇足够长的正文内容，用于测试解析与质检逻辑是否正常工作。" * 5
         payload = {
@@ -262,6 +269,16 @@ class AdCoverRenderTests(unittest.TestCase):
         self.assertIn("color:#595959;font-weight:bold", html)
         self.assertIn("组织能力决定执行上限", html)
         self.assertIn("这里是论点说明。", html)
+        self.assertNotIn(r"\n", html)
+
+    def test_renderer_handles_mixed_real_and_escaped_heading_breaks(self) -> None:
+        cfg = load_config()
+        html = TemplateRenderer(cfg).render(
+            body="第一段。\n第二段。" + r"\n\n## 观点二：权力与边界\n\n后续说明。"
+        )
+        self.assertIn("观点二：权力与边界", html)
+        self.assertIn("color:#595959;font-weight:bold", html)
+        self.assertIn("后续说明。", html)
         self.assertNotIn(r"\n", html)
 
     def test_legacy_default_blue_argument_inherits_body_color(self) -> None:

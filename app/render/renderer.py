@@ -123,6 +123,11 @@ def _split_paragraphs(body: str, break_mode: str = "blank_line") -> list[str]:
     """逐行拆分正文，确保 Markdown 标题不会吞掉紧随其后的整段正文。"""
     # 某些结构化输出服务会把换行二次转义为字面量 ``\n``。
     # 渲染层再次兜底，保证历史任务也能恢复段落和论点样式。
+    body = re.sub(
+        r"(?:\\r?\\n){2,}",
+        "\n\n",
+        body,
+    )
     literal_breaks = body.count(r"\n") + body.count(r"\r\n")
     actual_breaks = body.count("\n")
     if literal_breaks >= 2 and literal_breaks >= max(2, actual_breaks * 2):

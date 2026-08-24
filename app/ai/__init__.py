@@ -110,6 +110,14 @@ def normalize_digest(value: Any, *, limit: int = 120) -> str:
 def normalize_model_body(text: str) -> str:
     """Restore line breaks when a provider double-escapes structured text."""
     value = (text or "").strip()
+    # Mixed provider output can contain real line breaks plus escaped paragraph
+    # breaks. A doubled literal break is structural; a single literal ``\n`` in
+    # ordinary prose remains untouched unless the whole response is escaped.
+    value = re.sub(
+        r"(?:\\r?\\n){2,}",
+        "\n\n",
+        value,
+    )
     literal_breaks = value.count(r"\n") + value.count(r"\r\n")
     actual_breaks = value.count("\n")
     if literal_breaks and (
