@@ -58,6 +58,60 @@ def test_shadow_operation_records_actual_usage_without_charging(tmp_path) -> Non
     assert rows[0]["estimated_points"] > 0
 
 
+def test_generation_receipt_aggregates_current_jobs_and_flags_missing_prices(
+    tmp_path,
+) -> None:
+    root, db, _user_id = _scoped_db(tmp_path)
+    root.upsert_model_price_card(
+        {
+            "id": "priced-model",
+            "provider": "openai",
+            "provider_model": "priced",
+            "modality": "text",
+            "input_micro_cny_per_million": 1_000_000,
+            "output_micro_cny_per_million": 2_000_000,
+            "points_per_cny": 100,
+        }
+    )
+    service = BillingService(db)
+    job_ids = [db.create_job(topic=f"测试文章 {index}") for index in range(3)]
+    for job_id, model, input_tokens, output_tokens in zip(
+        job_ids,
+        ("priced", "missing", "priced"),
+        (1_000_000, 500_000, 9_000_000),
+        (100_000, 50_000, 900_000),
+        strict=True,
+    ):
+        with service.operation(
+            scene="article_generation",
+            subject_type="job",
+            subject_id=str(job_id),
+            idempotency_key=f"generation:{job_id}",
+            job_id=job_id,
+        ):
+            emit_usage(
+                provider="openai",
+                provider_model=model,
+                usage=NormalizedUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    source="provider_actual",
+                ),
+                funding_source="platform",
+            )
+
+    receipt = service.generation_receipt(job_ids[:2])
+
+    assert receipt["available"] is True
+    assert receipt["operation_count"] == 2
+    assert receipt["article_count"] == 2
+    assert receipt["input_tokens"] == 1_500_000
+    assert receipt["output_tokens"] == 150_000
+    assert receipt["estimated_points"] > 0
+    assert receipt["charged_points"] == 0
+    assert receipt["pricing_pending"] is True
+
+
 def test_customer_funded_usage_has_zero_platform_cost() -> None:
     priced = calculate_shadow_price(
         record=UsageRecord(

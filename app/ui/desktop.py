@@ -36,6 +36,7 @@ from app.prompt_templates import (
 )
 from app.render import TemplateRenderer, finalize_article_html, prepare_preview_html
 from app.services.batches import BatchService
+from app.services.billing import BillingService
 from app.services.configuration import ConfigurationService
 from app.services.creation_plans import CreationPlanService
 from app.services.failures import sanitize_failure_text
@@ -61,7 +62,10 @@ from app.ui.panels.auth import (
     current_desktop_user,
     logout_desktop_user,
 )
-from app.ui.panels.billing import build_billing_panel
+from app.ui.panels.billing import (
+    build_billing_panel,
+    show_generation_usage_receipt,
+)
 from app.ui.panels.feishu import build_feishu_panel
 from app.ui.panels.models import build_models_panel
 from app.ui.panels.onboarding_wizard import (
@@ -2351,6 +2355,12 @@ def _build_wizard(
                 results = list(completed_batch.get("jobs") or [])
                 if not results:
                     raise RuntimeError("批次没有生成任何公众号文章")
+                assert active_batch_service is not None
+                generation_receipt = await run.io_bound(
+                    lambda: BillingService(active_batch_service.db).generation_receipt(
+                        [int(result["id"]) for result in results]
+                    )
+                )
                 job = results[0]
                 state.wizard_job_id = int(job["id"])
                 st = str(completed_batch.get("status") or job.get("status"))
@@ -2432,6 +2442,12 @@ def _build_wizard(
                         "entry_mode": "completion",
                     }
                 tabs.set_value(tab_jobs)
+                show_generation_usage_receipt(
+                    generation_receipt,
+                    completed_articles=review_count + drafted_count,
+                    failed_articles=failed_count,
+                    stopped_articles=cancelled_count,
+                )
             except asyncio.CancelledError:
                 logger.info(
                     "rewrite UI callback for batch %s was cancelled; "

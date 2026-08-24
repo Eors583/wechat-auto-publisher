@@ -1970,6 +1970,86 @@ APP_CSS += """
   text-align: center;
   overflow-wrap: anywhere;
 }
+.ops-usage-receipt {
+  min-width: 0;
+  gap: var(--ui-space-4) !important;
+  padding: var(--ui-space-6) !important;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+.ops-usage-receipt-heading {
+  width: 100%;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--ui-space-3);
+  flex-wrap: nowrap;
+}
+.ops-usage-receipt-icon {
+  display: flex;
+  flex: 0 0 42px;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  color: var(--ui-color-brand-dark);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-color-brand-soft);
+}
+.ops-usage-receipt-icon-glyph { font-size: 24px; }
+.ops-usage-receipt-heading-copy { min-width: 0; gap: var(--ui-space-1) !important; }
+.ops-usage-receipt-title {
+  color: var(--ui-color-text-primary);
+  font-size: var(--ui-font-size-lg);
+  font-weight: var(--ui-font-weight-bold);
+}
+.ops-usage-receipt-context,
+.ops-usage-receipt-explanation,
+.ops-usage-receipt-metric-label {
+  min-width: 0;
+  color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-xs);
+  overflow-wrap: anywhere;
+}
+.ops-usage-receipt-points {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--ui-color-brand-dark);
+  font-size: var(--ui-font-size-xl);
+  font-weight: var(--ui-font-weight-bold);
+  line-height: var(--ui-line-height-tight);
+  overflow-wrap: anywhere;
+}
+.ops-usage-receipt-explanation { line-height: var(--ui-line-height-relaxed); }
+.ops-usage-receipt-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--ui-space-2);
+  width: 100%;
+  min-width: 0;
+}
+.ops-usage-receipt-metric {
+  min-width: 0;
+  gap: var(--ui-space-1) !important;
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-color-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-color-bg-subtle);
+}
+.ops-usage-receipt-metric-value {
+  min-width: 0;
+  color: var(--ui-color-text-primary);
+  font-size: var(--ui-font-size-base);
+  font-weight: var(--ui-font-weight-bold);
+  overflow-wrap: anywhere;
+}
+.ops-usage-receipt-actions {
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-end;
+  gap: var(--ui-space-2);
+  flex-wrap: wrap;
+}
+.ops-usage-receipt-actions .q-btn { min-width: 0; max-width: 100%; }
 .ops-page-heading {
   display: flex;
   align-items: flex-end;
@@ -3560,6 +3640,9 @@ APP_CSS += """
 @media (max-width: 600px) {
   .ops-billing-metrics { grid-template-columns: minmax(0, 1fr); }
   .ops-billing-section { padding: var(--ui-space-3); }
+  .ops-usage-receipt { padding: var(--ui-space-4) !important; }
+  .ops-usage-receipt-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ops-usage-receipt-actions .q-btn { width: 100%; }
 }
 
 /* Generated Quasar internals must participate in the workbench's width

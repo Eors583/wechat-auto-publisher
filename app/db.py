@@ -6915,7 +6915,16 @@ class Database:
                        COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
                        COALESCE(SUM(e.cached_input_tokens), 0) AS cached_input_tokens,
                        COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
-                       COALESCE(SUM(e.image_count), 0) AS image_count
+                       COALESCE(SUM(e.image_count), 0) AS image_count,
+                       COALESCE(SUM(
+                           CASE
+                               WHEN e.pricing_status = 'price_missing'
+                                AND e.funding_source = 'platform'
+                                AND e.status = 'succeeded'
+                                AND e.contributes_to_result = 1
+                               THEN 1 ELSE 0
+                           END
+                       ), 0) AS price_missing_events
                 FROM usage_operations AS o
                 LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
                 WHERE o.owner_user_id = ?

@@ -5,6 +5,7 @@ from typing import Any
 from nicegui import ui
 
 from app.services.billing import BillingService, MICRO_CNY_PER_CNY
+from app.ui.navigation import ui_root_url
 
 
 _SCENE_LABELS = {
@@ -27,6 +28,81 @@ def _metric(label: str, value: str, hint: str) -> None:
         ui.label(label).classes("ops-billing-metric-label")
         ui.label(value).classes("ops-billing-metric-value")
         ui.label(hint).classes("ops-billing-metric-hint")
+
+
+def _receipt_metric(label: str, value: Any) -> None:
+    with ui.column().classes("ops-usage-receipt-metric"):
+        ui.label(label).classes("ops-usage-receipt-metric-label")
+        ui.label(_integer(value)).classes("ops-usage-receipt-metric-value")
+
+
+def show_generation_usage_receipt(
+    receipt: dict[str, Any],
+    *,
+    completed_articles: int,
+    failed_articles: int,
+    stopped_articles: int = 0,
+) -> Any:
+    """Open a durable receipt after the creation workflow reaches a terminal state."""
+
+    available = bool(receipt.get("available"))
+    pricing_pending = bool(receipt.get("pricing_pending"))
+    estimated_points = int(receipt.get("estimated_points") or 0)
+    charged_points = int(receipt.get("charged_points") or 0)
+    if not available:
+        headline = "本次用量暂未生成"
+        explanation = "计量记录暂不可用，文章结果不受影响。可稍后到套餐与用量中查看。"
+    elif pricing_pending:
+        headline = "本次积分待计价"
+        explanation = "Token 已记录，但当前模型尚未配置价格卡；本次实际扣除 0 积分。"
+    else:
+        headline = f"本次预计消耗 {_integer(estimated_points)} 积分"
+        explanation = (
+            f"当前为影子计量，本次实际扣除 {_integer(charged_points)} 积分，"
+            "不会影响现有功能。"
+        )
+    terminal_title = (
+        "文章生成完成"
+        if completed_articles > 0
+        else "本次生成已停止"
+        if stopped_articles > 0 and failed_articles == 0
+        else "本次生成未完成"
+    )
+
+    with (
+        ui.dialog() as dialog,
+        ui.card().classes("ops-dialog-md ops-dialog-scroll ops-usage-receipt"),
+    ):
+        with ui.row().classes("ops-usage-receipt-heading"):
+            with ui.element("div").classes("ops-usage-receipt-icon"):
+                ui.icon("toll").classes("ops-usage-receipt-icon-glyph")
+            with ui.column().classes("ops-usage-receipt-heading-copy"):
+                ui.label(terminal_title).classes("ops-usage-receipt-title")
+                ui.label(
+                    f"完成 {_integer(completed_articles)} 篇"
+                    f" · 失败 {_integer(failed_articles)} 篇"
+                    f" · 已停止 {_integer(stopped_articles)} 篇"
+                ).classes("ops-usage-receipt-context")
+        ui.label(headline).classes("ops-usage-receipt-points")
+        ui.label(explanation).classes("ops-usage-receipt-explanation")
+        with ui.element("div").classes("ops-usage-receipt-metrics"):
+            _receipt_metric("输入 Token", receipt.get("input_tokens"))
+            _receipt_metric("缓存输入", receipt.get("cached_input_tokens"))
+            _receipt_metric("输出 Token", receipt.get("output_tokens"))
+            _receipt_metric("生成图片", receipt.get("image_count"))
+        with ui.row().classes("ops-usage-receipt-actions"):
+            ui.button(
+                "查看用量明细",
+                icon="query_stats",
+                on_click=lambda: ui.navigate.to(ui_root_url({"view": "billing"})),
+            ).props("outline color=primary no-caps")
+            ui.button(
+                "继续审核文章",
+                icon="rate_review",
+                on_click=dialog.close,
+            ).props("unelevated color=primary no-caps")
+    dialog.open()
+    return dialog
 
 
 def build_billing_panel(state: Any) -> None:
@@ -170,4 +246,8 @@ def build_admin_billing_panel(state: Any) -> None:
                 .classes("muted")
 
 
-__all__ = ["build_admin_billing_panel", "build_billing_panel"]
+__all__ = [
+    "build_admin_billing_panel",
+    "build_billing_panel",
+    "show_generation_usage_receipt",
+]
