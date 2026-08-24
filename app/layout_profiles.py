@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import re
+from copy import deepcopy
 from typing import Any
 
 from app.prompt_templates import (
@@ -95,6 +95,15 @@ DEFAULT_LAYOUT: dict[str, Any] = {
         "prompt_template_id": "",
         "prompt_style": DEFAULT_IMAGE_PROMPT_STYLE,
     },
+    "benchmark": {
+        "configured": False,
+        "enabled": False,
+        "source_account_id": "",
+        "image_match_threshold": 0.90,
+        "matched_only": False,
+        "follow_source_order": True,
+        "deduplicate_by_image": True,
+    },
 }
 
 
@@ -106,7 +115,7 @@ def normalize_layout(value: Any) -> dict[str, Any]:
         result["paragraph_break_mode"] = value["paragraph_break_mode"]
     for section in (
         "body", "title", "argument", "quote", "list", "meta",
-        "editor_template", "article_prompt", "inline_images",
+        "editor_template", "article_prompt", "inline_images", "benchmark",
     ):
         incoming = value.get(section)
         if isinstance(incoming, dict):
@@ -190,6 +199,27 @@ def validate_layout(value: Any) -> dict[str, Any]:
         errors.append("启用生图后必须选择一个生图智能体")
     if len(str(images.get("prompt_style") or "")) > 600:
         errors.append("生图视觉风格提示词不能超过 600 个字符")
+    benchmark = layout["benchmark"]
+    benchmark["configured"] = bool(benchmark.get("configured"))
+    benchmark["enabled"] = bool(benchmark.get("enabled"))
+    benchmark["source_account_id"] = str(
+        benchmark.get("source_account_id") or ""
+    ).strip()
+    for key in ("matched_only", "follow_source_order", "deduplicate_by_image"):
+        benchmark[key] = bool(benchmark.get(key))
+    try:
+        benchmark["image_match_threshold"] = float(
+            benchmark.get("image_match_threshold", 0.90)
+        )
+    except (TypeError, ValueError):
+        errors.append("广告图片匹配阈值必须是 0.50 到 1.00 之间的数字")
+    else:
+        if not 0.50 <= benchmark["image_match_threshold"] <= 1.00:
+            errors.append("广告图片匹配阈值必须在 0.50 到 1.00 之间")
+    if benchmark["configured"] and benchmark["enabled"] and not benchmark[
+        "source_account_id"
+    ]:
+        errors.append("启用广告栏同步后必须选择对标公众号")
     if layout["paragraph_break_mode"] not in {"blank_line", "each_line"}:
         errors.append("段落换行规则无效")
     for section, keys in _DIMENSION_FIELDS.items():

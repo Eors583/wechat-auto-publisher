@@ -219,7 +219,7 @@ Primary tab ownership inside `desktop.py`:
 | `job_attempts.py` | Stage leases, heartbeat, completion and retry backoff. Diagnose stuck/running jobs here with DB attempt records. |
 | `editorial_reviews.py` | AI review/rewrite state machine, guards, snapshots, prompt/schema building, incomplete-output recovery, issue resolution, numeric/fact safeguards and source-vs-candidate application. |
 | `article_revisions.py` | Paragraph-level AI revision with structural cleanup, inline-image preservation and version events. |
-| `configuration.py` | Safe public CRUD facade for accounts, models, prompts and layouts; recursively strips credentials. Prefer this over direct DB use from new management APIs. |
+| `configuration.py` | Safe public CRUD facade for accounts, models, prompts, layouts and per-account benchmark-ad settings; recursively strips credentials. Prefer this over direct DB use from new management APIs. |
 | `feishu_integrations.py` | Per-user Feishu integration security boundary: encrypted credentials, globally unique App ID, dedicated callback key, public-HTTPS callback resolution, account/model ownership checks, p2p identity binding, hashed expiring pairing codes and safe legacy migration. |
 | `local_agents.py` | One-time device pairing, Agent Token authentication, device management, fixed `chat.completions` claims, 60-second leases and idempotent result submission. |
 | `creation_plans.py` | Reusable plans combining prompts, layout, image/cover and review settings; account defaults and account-specific template bindings. |

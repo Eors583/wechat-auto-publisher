@@ -35,6 +35,7 @@ from app.prompt_templates import (
 )
 from app.render import TemplateRenderer, finalize_article_html, prepare_preview_html
 from app.services.batches import BatchService
+from app.services.configuration import ConfigurationService
 from app.services.creation_plans import CreationPlanService
 from app.services.failures import sanitize_failure_text
 from app.services.followed_content import FollowedContentService
@@ -2656,6 +2657,7 @@ def _build_accounts_panel(
         recover_stale_work=False,
     )
     creation_plan_service = CreationPlanService(state.db, current_config)
+    configuration_service = ConfigurationService(state.db, current_config)
     remembered_config_account_id = ""
     get_user_setting = getattr(state.db, "get_user_setting", None)
     if callable(get_user_setting):
@@ -4088,6 +4090,20 @@ def _build_accounts_panel(
             ui.notify(f"应用创作方案失败：{exc}", type="negative", timeout=10000)
             render_accounts()
 
+    def set_account_benchmark_settings(
+        account_id: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        return configuration_service.save_account_benchmark_settings(
+            account_id,
+            settings,
+        )
+
+    def preview_account_benchmark(source_account_id: str) -> dict[str, Any]:
+        return configuration_service.preview_account_benchmark(
+            source_account_id
+        )
+
     async def test_account_connection(account_id: str, button: Any) -> None:
         _set_button_loading(button, True, "正在验证公众号凭证、草稿箱和素材接口…")
         try:
@@ -4155,6 +4171,8 @@ def _build_accounts_panel(
                 on_prompt=set_account_prompt_template,
                 on_review=set_account_review_profile,
                 on_plan=set_account_creation_plan,
+                on_benchmark=set_account_benchmark_settings,
+                on_benchmark_preview=preview_account_benchmark,
                 on_enabled=set_enabled,
                 on_delete=confirm_delete,
                 model_option_actions=model_option_actions,
@@ -4614,6 +4632,8 @@ def _render_account_config_workspace(
     on_prompt: Callable[[str, str, str], None],
     on_review: Callable[[str, str], None],
     on_plan: Callable[[str, str], None],
+    on_benchmark: Callable[[str, dict[str, Any]], dict[str, Any]],
+    on_benchmark_preview: Callable[[str], dict[str, Any]],
     on_enabled: Callable[[str, bool], None],
     on_delete: Callable[[str, str], None],
     model_option_actions: dict[str, Callable[[Any], None]],
@@ -4709,6 +4729,59 @@ def _render_account_config_workspace(
         review_default = {}
 
     account_layout = dict(selected.get("layout") or {})
+    benchmark_settings = dict(account_layout.get("benchmark") or {})
+    benchmark_configured = bool(benchmark_settings.get("configured"))
+    benchmark_enabled = bool(benchmark_settings.get("enabled"))
+    benchmark_source_id = str(
+        benchmark_settings.get("source_account_id") or ""
+    ).strip()
+    legacy_benchmark = dict(
+        (getattr(state, "config", {}) or {}).get("benchmark") or {}
+    )
+    if not benchmark_configured and bool(legacy_benchmark.get("enabled")):
+        legacy_app_id = str(legacy_benchmark.get("app_id") or "").strip()
+        legacy_source = next(
+            (
+                item
+                for item in all_accounts
+                if str(item.get("app_id") or "").strip() == legacy_app_id
+                and str(item.get("id") or "") != account_id
+            ),
+            None,
+        )
+        if legacy_source:
+            benchmark_enabled = True
+            benchmark_source_id = str(legacy_source["id"])
+            benchmark_settings.update(
+                image_match_threshold=float(
+                    legacy_benchmark.get("image_match_threshold") or 0.90
+                ),
+                matched_only=bool(legacy_benchmark.get("matched_only", False)),
+                follow_source_order=bool(
+                    legacy_benchmark.get("follow_source_order", True)
+                ),
+                deduplicate_by_image=bool(
+                    legacy_benchmark.get("deduplicate_by_image", True)
+                ),
+            )
+    benchmark_source_options = {
+        str(item["id"]): (
+            f'{item["name"]} · {(item.get("app_id") or "")!s}'
+        )
+        for item in all_accounts
+        if str(item["id"]) != account_id
+    }
+    benchmark_source_name = str(
+        next(
+            (
+                item.get("name")
+                for item in all_accounts
+                if str(item["id"]) == benchmark_source_id
+            ),
+            "",
+        )
+        or ""
+    )
     article_prompt_settings = dict(account_layout.get("article_prompt") or {})
     image_prompt_settings = dict(account_layout.get("inline_images") or {})
     article_prompt_value = (
@@ -4863,6 +4936,182 @@ def _render_account_config_workspace(
                 ui.button("保存评审方案", on_click=save_review_profile).props(
                     "unelevated color=primary no-caps"
                 )
+        dialog.open()
+
+    def open_benchmark_dialog() -> None:
+        with ui.dialog() as dialog, ui.card().classes(
+            "ops-dialog-md ops-dialog-scroll"
+        ):
+            with ui.row().classes("w-full items-center justify-between"):
+                with ui.column().classes("gap-0 ops-flex-copy"):
+                    ui.label("广告栏同步").classes("ops-review-page-title")
+                    ui.label(
+                        "按图片匹配对标公众号最新广告位，只同步标题和顺序，不复制对方正文或图片。"
+                    ).classes("ops-panel-subtitle ops-wrap-anywhere")
+                ui.button(icon="close", on_click=dialog.close).props(
+                    "flat round dense aria-label=关闭广告栏同步配置"
+                )
+
+            enabled_switch = ui.switch(
+                "启用广告标题同步",
+                value=benchmark_enabled,
+            )
+            with ui.element("div").classes("ops-config-form"):
+                with ui.element("div").classes("ops-config-field"):
+                    ui.label("对标公众号").classes("ops-config-field-label")
+                    source_select = ui.select(
+                        benchmark_source_options,
+                        value=benchmark_source_id or None,
+                        label="广告标题来源公众号",
+                    ).classes("w-full").props(
+                        "outlined dense options-dense hide-bottom-space"
+                    )
+                with ui.element("div").classes("ops-config-field"):
+                    ui.label("图片匹配阈值").classes("ops-config-field-label")
+                    threshold_input = ui.number(
+                        "图片相似度（%）",
+                        value=round(
+                            float(
+                                benchmark_settings.get(
+                                    "image_match_threshold",
+                                    0.90,
+                                )
+                                or 0.90
+                            )
+                            * 100
+                        ),
+                        min=50,
+                        max=100,
+                        step=1,
+                    ).classes("w-full").props(
+                        "outlined dense hide-bottom-space"
+                    )
+
+            follow_order_switch = ui.switch(
+                "按对标公众号中的广告位顺序排列",
+                value=bool(
+                    benchmark_settings.get("follow_source_order", True)
+                ),
+            )
+            matched_only_switch = ui.switch(
+                "仅写入图片匹配成功的广告",
+                value=bool(benchmark_settings.get("matched_only", False)),
+            )
+            deduplicate_switch = ui.switch(
+                "自动去除重复广告图片",
+                value=bool(
+                    benchmark_settings.get("deduplicate_by_image", True)
+                ),
+            )
+            ui.label(
+                "未勾选“仅写入匹配成功的广告”时，匹配失败的本地广告会保留原标题并排在后面。"
+            ).classes("ops-panel-subtitle ops-wrap-anywhere")
+            preview_host = ui.column().classes("w-full gap-1")
+
+            if not benchmark_source_options:
+                ui.label(
+                    "还没有其他公众号可作为来源。请先添加对标公众号；只需配置 AppID 和 AppSecret，模型可以暂不绑定。"
+                ).classes("ops-callout ops-wrap-anywhere")
+
+                def add_source_account() -> None:
+                    dialog.close()
+                    on_add()
+
+                ui.button(
+                    "添加对标公众号",
+                    icon="add",
+                    on_click=add_source_account,
+                ).props("outline color=primary no-caps")
+
+            def save_benchmark() -> None:
+                try:
+                    on_benchmark(
+                        account_id,
+                        {
+                            "enabled": bool(enabled_switch.value),
+                            "source_account_id": str(
+                                source_select.value or ""
+                            ),
+                            "image_match_threshold": float(
+                                threshold_input.value or 90
+                            )
+                            / 100.0,
+                            "matched_only": bool(matched_only_switch.value),
+                            "follow_source_order": bool(
+                                follow_order_switch.value
+                            ),
+                            "deduplicate_by_image": bool(
+                                deduplicate_switch.value
+                            ),
+                        },
+                    )
+                    dialog.close()
+                    ui.notify("广告栏同步配置已保存", type="positive")
+                    on_refresh()
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(
+                        f"保存广告栏配置失败：{sanitize_failure_text(exc)}",
+                        type="negative",
+                        timeout=10000,
+                    )
+
+            async def preview_benchmark() -> None:
+                source_account_id = str(source_select.value or "").strip()
+                if not source_account_id:
+                    ui.notify("请先选择对标公众号", type="warning")
+                    return
+                _set_button_loading(
+                    preview_button,
+                    True,
+                    "正在获取最新广告栏…",
+                )
+                preview_host.clear()
+                with preview_host:
+                    ui.label("正在读取对标公众号最新发表记录…").classes(
+                        "ops-panel-subtitle"
+                    )
+                try:
+                    result = await run.io_bound(
+                        on_benchmark_preview,
+                        source_account_id,
+                    )
+                    articles = [
+                        dict(item)
+                        for item in list(result.get("articles") or [])
+                    ]
+                    preview_host.clear()
+                    with preview_host:
+                        ui.label(
+                            f"获取成功：1 篇头条，{max(0, len(articles) - 1)} 个广告位"
+                        ).classes("ops-badge ops-badge-green")
+                        for index, article in enumerate(articles):
+                            prefix = "头条" if index == 0 else f"广告位 {index}"
+                            ui.label(
+                                f"{prefix}：{article.get('title') or '未命名'}"
+                            ).classes(
+                                "ops-panel-subtitle ops-wrap-anywhere"
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    preview_host.clear()
+                    with preview_host:
+                        ui.label(
+                            "获取失败：" + sanitize_failure_text(exc)
+                        ).classes("text-negative ops-wrap-anywhere")
+                finally:
+                    _set_button_loading(preview_button, False)
+
+            with ui.row().classes("w-full justify-end q-mt-md"):
+                ui.button("取消", on_click=dialog.close).props("flat no-caps")
+                preview_button = ui.button(
+                    "测试获取最新广告栏",
+                    icon="sync",
+                    on_click=preview_benchmark,
+                ).props("outline color=primary no-caps")
+                ui.button(
+                    "保存广告栏配置",
+                    icon="save",
+                    on_click=save_benchmark,
+                ).props("unelevated color=primary no-caps")
         dialog.open()
 
     with host, ui.element("div").classes("ops-account-workspace"):
@@ -5366,6 +5615,84 @@ def _render_account_config_workspace(
                                     )
                                     ui.label(detail).classes(
                                         "ops-config-entry-detail"
+                                    )
+
+                benchmark_config_section = ui.element("section").classes(
+                    "ops-config-section ops-config-section-wide"
+                )
+                with benchmark_config_section:
+                    with ui.element("div").classes("ops-config-section-heading"):
+                        ui.label("广告栏同步").classes("ops-panel-title")
+                        if benchmark_enabled and benchmark_source_id:
+                            ui.badge(
+                                "继承旧配置"
+                                if not benchmark_configured
+                                else "已启用"
+                            ).classes("ops-badge ops-badge-green")
+                        elif benchmark_configured:
+                            ui.badge("已关闭").classes("ops-badge")
+                        else:
+                            ui.badge("未配置").classes("ops-badge ops-badge-warm")
+                    threshold_percent = round(
+                        float(
+                            benchmark_settings.get(
+                                "image_match_threshold",
+                                0.90,
+                            )
+                            or 0.90
+                        )
+                        * 100
+                    )
+                    entries = (
+                        (
+                            "广告标题来源",
+                            benchmark_source_name or "选择对标公众号",
+                            "campaign",
+                        ),
+                        (
+                            "图片匹配规则",
+                            f"相似度 ≥ {threshold_percent}% · "
+                            + (
+                                "跟随对标顺序"
+                                if bool(
+                                    benchmark_settings.get(
+                                        "follow_source_order",
+                                        True,
+                                    )
+                                )
+                                else "保留本地顺序"
+                            ),
+                            "image_search",
+                        ),
+                        (
+                            "未匹配广告",
+                            "不写入本次多图文"
+                            if bool(benchmark_settings.get("matched_only"))
+                            else "保留本地原标题",
+                            "rule",
+                        ),
+                    )
+                    with ui.element("div").classes("ops-config-entry-grid"):
+                        for title, detail, icon in entries:
+                            with ui.element("button").classes(
+                                "ops-config-entry"
+                            ).props("type=button").on(
+                                "click", open_benchmark_dialog
+                            ):
+                                with ui.element("span").classes(
+                                    "ops-config-entry-icon"
+                                ):
+                                    ui.icon(icon, size="17px").classes(
+                                        "ops-semantic-icon"
+                                    )
+                                with ui.column().classes(
+                                    "ops-flex-copy gap-0 min-w-0"
+                                ):
+                                    ui.label(title).classes(
+                                        "ops-config-entry-title"
+                                    )
+                                    ui.label(detail).classes(
+                                        "ops-config-entry-detail ops-wrap-anywhere"
                                     )
 
             def save_current_configuration() -> None:

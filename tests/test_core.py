@@ -358,6 +358,30 @@ class AdCoverRenderTests(unittest.TestCase):
         )
         self.assertEqual(layout["inline_images"]["generation_concurrency"], 4)
 
+    def test_layout_validation_requires_valid_benchmark_source_and_threshold(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "必须选择对标公众号"):
+            validate_layout(
+                {
+                    "benchmark": {
+                        "configured": True,
+                        "enabled": True,
+                        "source_account_id": "",
+                    }
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "匹配阈值"):
+            validate_layout(
+                {
+                    "benchmark": {
+                        "configured": True,
+                        "enabled": False,
+                        "image_match_threshold": 1.2,
+                    }
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

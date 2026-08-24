@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from app.accounts import apply_account_selection
 from app.ai.image_providers import IMAGE_MINIMAX
 from app.ai.model_registry import OPENAI_COMPATIBLE, decrypt_api_key
 from app.db import Database
@@ -228,6 +229,224 @@ def test_prompt_bindings_layout_and_image_settings_reuse_domain_validation(
         item["id"]
         for item in service.list_prompt_templates(purpose=IMAGE_PROMPT_PURPOSE)
     ] == [image_prompt["id"]]
+
+
+def test_account_benchmark_settings_use_selected_scoped_account_credentials(
+    tmp_path,
+) -> None:
+    db = Database(tmp_path / "configuration-benchmark.db")
+    config = {
+        "ai": {},
+        "benchmark": {
+            "enabled": True,
+            "admin_cookie": "legacy-cookie-must-not-win",
+            "admin_token": "123456",
+            "cache_path": "data/benchmark_latest.json",
+        },
+    }
+    service = ConfigurationService(db, config)
+    text_model = _save_text_model(service)
+    publishing = service.save_account(
+        name="发布公众号",
+        app_id="wx-publisher",
+        app_secret="publisher-secret",
+        model_id=str(text_model["id"]),
+    )
+    benchmark = service.save_account(
+        name="广告对标公众号",
+        app_id="wx-benchmark",
+        app_secret="benchmark-secret",
+        model_id="",
+    )
+
+    saved = service.save_account_benchmark_settings(
+        str(publishing["id"]),
+        {
+            "enabled": True,
+            "source_account_id": str(benchmark["id"]),
+            "image_match_threshold": 0.93,
+            "matched_only": True,
+            "follow_source_order": True,
+            "deduplicate_by_image": True,
+        },
+    )
+
+    settings = saved["layout"]["benchmark"]
+    assert settings == {
+        "configured": True,
+        "enabled": True,
+        "source_account_id": benchmark["id"],
+        "image_match_threshold": 0.93,
+        "matched_only": True,
+        "follow_source_order": True,
+        "deduplicate_by_image": True,
+    }
+    _assert_no_credentials(saved)
+
+    effective, _ = apply_account_selection(
+        config,
+        db,
+        str(publishing["id"]),
+    )
+    assert effective["benchmark"]["enabled"] is True
+    assert effective["benchmark"]["name"] == "广告对标公众号"
+    assert effective["benchmark"]["source_account_id"] == benchmark["id"]
+    assert effective["benchmark"]["app_id"] == "wx-benchmark"
+    assert effective["benchmark"]["app_secret"] == "benchmark-secret"
+    assert effective["benchmark"]["admin_cookie"] == ""
+    assert effective["benchmark"]["admin_token"] == ""
+    assert effective["benchmark"]["official_fallback_enabled"] is True
+    assert effective["benchmark"]["image_match_threshold"] == 0.93
+    assert effective["benchmark"]["matched_only"] is True
+    assert effective["benchmark"]["cache_path"].startswith(
+        "data/benchmark/account-"
+    )
+
+    with pytest.raises(ValueError, match="不能与当前发布公众号相同"):
+        service.save_account_benchmark_settings(
+            str(publishing["id"]),
+            {
+                "enabled": True,
+                "source_account_id": str(publishing["id"]),
+            },
+        )
+
+
+def test_unconfigured_account_keeps_legacy_benchmark_config(tmp_path) -> None:
+    db = Database(tmp_path / "configuration-benchmark-legacy.db")
+    config = {
+        "ai": {},
+        "benchmark": {
+            "enabled": True,
+            "app_id": "legacy-benchmark",
+            "app_secret": "legacy-secret",
+        },
+    }
+    service = ConfigurationService(db, config)
+    text_model = _save_text_model(service)
+    publishing = service.save_account(
+        name="旧配置发布公众号",
+        app_id="wx-publisher-legacy",
+        app_secret="publisher-secret",
+        model_id=str(text_model["id"]),
+    )
+
+    effective, _ = apply_account_selection(
+        config,
+        db,
+        str(publishing["id"]),
+    )
+
+    assert effective["benchmark"] == config["benchmark"]
+
+
+def test_layout_updates_preserve_explicit_account_benchmark_settings(tmp_path) -> None:
+    db = Database(tmp_path / "configuration-benchmark-layout-update.db")
+    service = ConfigurationService(db, {"ai": {}})
+    publishing = service.save_account(
+        name="发布公众号",
+        app_id="wx-publisher-layout-update",
+        app_secret="publisher-secret",
+        model_id="",
+    )
+    source = service.save_account(
+        name="对标公众号",
+        app_id="wx-source-layout-update",
+        app_secret="source-secret",
+        model_id="",
+    )
+    service.save_account_benchmark_settings(
+        str(publishing["id"]),
+        {
+            "enabled": True,
+            "source_account_id": str(source["id"]),
+            "image_match_threshold": 0.91,
+            "matched_only": True,
+        },
+    )
+
+    saved = service.save_account_layout(
+        str(publishing["id"]),
+        {"body": {"font_size": "18px"}},
+    )
+
+    assert saved["layout"]["body"]["font_size"] == "18px"
+    assert saved["layout"]["benchmark"] == {
+        "configured": True,
+        "enabled": True,
+        "source_account_id": source["id"],
+        "image_match_threshold": 0.91,
+        "matched_only": True,
+        "follow_source_order": True,
+        "deduplicate_by_image": True,
+    }
+
+
+def test_benchmark_preview_reads_selected_account_without_exposing_secret(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db = Database(tmp_path / "configuration-benchmark-preview.db")
+    service = ConfigurationService(db, {"ai": {}})
+    source = service.save_account(
+        name="预览对标公众号",
+        app_id="wx-preview-source",
+        app_secret="preview-secret",
+        model_id="",
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_client(_config, _db, app_id, app_secret):
+        captured.update(app_id=app_id, app_secret=app_secret)
+        return object()
+
+    monkeypatch.setattr(
+        "app.services.configuration.build_wechat_client",
+        fake_client,
+    )
+    monkeypatch.setattr(
+        "app.services.configuration.fetch_official_publish_record",
+        lambda _client: type(
+            "Record",
+            (),
+            {
+                "published_at": 1787500800,
+                "source": "official_freepublish",
+                "articles": [
+                    type(
+                        "Article",
+                        (),
+                        {
+                            "title": "最新头条",
+                            "cover_url": "main.jpg",
+                            "url": "https://example.test/main",
+                        },
+                    )(),
+                    type(
+                        "Article",
+                        (),
+                        {
+                            "title": "最新广告标题",
+                            "cover_url": "ad.jpg",
+                            "url": "https://example.test/ad",
+                        },
+                    )(),
+                ],
+            },
+        )(),
+    )
+
+    result = service.preview_account_benchmark(str(source["id"]))
+
+    assert captured == {
+        "app_id": "wx-preview-source",
+        "app_secret": "preview-secret",
+    }
+    assert [item["title"] for item in result["articles"]] == [
+        "最新头条",
+        "最新广告标题",
+    ]
+    _assert_no_credentials(result)
 
 
 def test_model_lifecycle_and_connection_test_are_wrapped(tmp_path, monkeypatch) -> None:

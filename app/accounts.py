@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import uuid
+import hashlib
 import json
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -242,7 +243,21 @@ def save_account_layout(db: Database, account_id: str, layout: dict[str, Any]) -
     account = db.get_official_account(account_id)
     if not account:
         raise ValueError("公众号不存在")
-    account["layout"] = validate_layout(layout)
+    try:
+        stored_layout = json.loads(str(account.get("layout_json") or "{}"))
+    except json.JSONDecodeError:
+        stored_layout = {}
+    incoming_layout = dict(layout or {})
+    stored_benchmark = dict(stored_layout.get("benchmark") or {})
+    incoming_benchmark = dict(incoming_layout.get("benchmark") or {})
+    if bool(stored_benchmark.get("configured")) and not bool(
+        incoming_benchmark.get("configured")
+    ):
+        # Layout imports and creation plans predate account-scoped benchmark
+        # settings. Keep an explicit ad-column configuration unless that
+        # dedicated settings form is the caller changing it.
+        incoming_layout["benchmark"] = stored_benchmark
+    account["layout"] = validate_layout(incoming_layout)
     db.upsert_official_account(account)
 
 
@@ -410,4 +425,47 @@ def apply_account_selection(
         result["inline_images"]["prompt_style"] = prompt_style
         result["inline_images"]["prompt_mode"] = prompt_mode
         result["inline_images"]["prompt_template_name"] = prompt_name
+    account_benchmark = dict(layout.get("benchmark") or {})
+    if bool(account_benchmark.get("configured")):
+        benchmark = dict(result.get("benchmark") or {})
+        if not bool(account_benchmark.get("enabled")):
+            benchmark["enabled"] = False
+        else:
+            source_account_id = str(
+                account_benchmark.get("source_account_id") or ""
+            ).strip()
+            source = db.get_official_account(source_account_id)
+            if not source or source_account_id == account_id:
+                raise ValueError("广告栏同步的对标公众号不存在或不可用")
+            cache_scope = hashlib.sha256(
+                (
+                    f"{getattr(db, 'owner_user_id', '')}|"
+                    f"{account_id}|{source_account_id}"
+                ).encode()
+            ).hexdigest()[:20]
+            benchmark.update(
+                enabled=True,
+                name=str(source.get("name") or "对标公众号"),
+                source_account_id=source_account_id,
+                app_id=str(source.get("app_id") or ""),
+                app_secret=decrypt_api_key(
+                    str(source.get("app_secret_encrypted") or "")
+                ),
+                admin_url="",
+                admin_token="",
+                admin_cookie="",
+                official_fallback_enabled=True,
+                cache_path=f"data/benchmark/account-{cache_scope}.json",
+                image_match_threshold=float(
+                    account_benchmark.get("image_match_threshold") or 0.90
+                ),
+                matched_only=bool(account_benchmark.get("matched_only")),
+                follow_source_order=bool(
+                    account_benchmark.get("follow_source_order", True)
+                ),
+                deduplicate_by_image=bool(
+                    account_benchmark.get("deduplicate_by_image", True)
+                ),
+            )
+        result["benchmark"] = benchmark
     return result, record

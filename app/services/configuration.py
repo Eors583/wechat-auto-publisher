@@ -16,10 +16,12 @@ from app.ai.model_registry import (
     CONFIG_MODEL_PREFIX,
     build_text_client,
     configured_models,
+    decrypt_api_key,
     public_models,
     save_model as persist_model,
     test_model_connection,
 )
+from app.benchmark import fetch_official_publish_record
 from app.config import load_config
 from app.db import Database
 from app.layout_profiles import normalize_layout
@@ -31,6 +33,7 @@ from app.prompt_templates import (
     public_prompt_templates,
     save_prompt_template as persist_prompt_template,
 )
+from app.wechat.factory import build_wechat_client
 
 
 _SENSITIVE_KEYS = {
@@ -233,6 +236,62 @@ class ConfigurationService:
         layout["inline_images"].update(dict(settings or {}))
         persist_account_layout(self.db, str(record["id"]), layout)
         return self.get_account(str(record["id"]))
+
+    def save_account_benchmark_settings(
+        self, account_id: str, settings: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Save one publishing account's benchmark-ad source and match rules."""
+
+        record = self._account_record(account_id)
+        layout = self._record_layout(record)
+        allowed = set(normalize_layout({})["benchmark"]) - {"configured"}
+        unknown = set(settings or {}) - allowed
+        if unknown:
+            raise ValueError(
+                "不支持的广告栏配置项："
+                + "、".join(sorted(str(item) for item in unknown))
+            )
+        benchmark = dict(layout["benchmark"])
+        benchmark.update(dict(settings or {}))
+        benchmark["configured"] = True
+        source_account_id = str(
+            benchmark.get("source_account_id") or ""
+        ).strip()
+        if bool(benchmark.get("enabled")):
+            source = self._account_record(source_account_id)
+            if str(source["id"]) == str(record["id"]):
+                raise ValueError("对标公众号不能与当前发布公众号相同")
+        layout["benchmark"] = benchmark
+        persist_account_layout(self.db, str(record["id"]), layout)
+        return self.get_account(str(record["id"]))
+
+    def preview_account_benchmark(self, source_account_id: str) -> dict[str, Any]:
+        """Read the selected source's latest published group without caching."""
+
+        source = self._account_record(source_account_id)
+        client = build_wechat_client(
+            self.config,
+            self.db,
+            str(source.get("app_id") or ""),
+            decrypt_api_key(str(source.get("app_secret_encrypted") or "")),
+        )
+        record = fetch_official_publish_record(client)
+        if record is None or not record.articles:
+            raise ValueError("对标公众号暂未返回可识别的发表记录")
+        return {
+            "source_account_id": str(source["id"]),
+            "source_account_name": str(source.get("name") or "对标公众号"),
+            "published_at": record.published_at,
+            "source": record.source,
+            "articles": [
+                {
+                    "title": article.title,
+                    "cover_url": article.cover_url,
+                    "url": article.url,
+                }
+                for article in record.articles[:8]
+            ],
+        }
 
     # ------------------------------------------------------------------
     # Models
