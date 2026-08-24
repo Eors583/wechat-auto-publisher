@@ -90,9 +90,9 @@ class TemplateSnapshotTests(unittest.TestCase):
             load_local_snapshot=False,
         )
 
-        self.assertEqual(result.html.count("text-indent:0em"), 2)
+        self.assertEqual(result.html.count("text-indent:0em !important"), 2)
         self.assertIn('class="article-preview"', result.html)
-        self.assertIn("margin:0;padding:0;text-indent:0;", result.html)
+        self.assertIn("margin:0;padding:0;text-indent:0 !important;", result.html)
         self.assertTrue(result.report.ok)
 
     def test_zero_first_line_indent_resets_inherited_template_indent(self) -> None:
@@ -126,8 +126,8 @@ class TemplateSnapshotTests(unittest.TestCase):
 
         self.assertIn('<section style="text-indent:2em">', result.html)
         self.assertIn('class="article-preview"', result.html)
-        self.assertIn("margin:0;padding:0;text-indent:0;", result.html)
-        self.assertEqual(result.html.count("text-indent:0em"), 2)
+        self.assertIn("margin:0;padding:0;text-indent:0 !important;", result.html)
+        self.assertEqual(result.html.count("text-indent:0em !important"), 2)
         self.assertTrue(result.report.ok)
 
     def test_template_preserves_video_and_decorations_around_placeholder(self) -> None:

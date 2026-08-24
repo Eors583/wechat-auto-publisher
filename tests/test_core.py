@@ -298,7 +298,7 @@ class AdCoverRenderTests(unittest.TestCase):
         html = TemplateRenderer(cfg).render(
             body="第一行\n第二行\n\n## 核心论点\n\n- 无序项\n1. 有序项"
         )
-        self.assertEqual(html.count("text-indent:2em"), 2)
+        self.assertEqual(html.count("text-indent:2em !important"), 2)
         self.assertIn("font-size:18px;color:#595959", html)
         self.assertIn("text-align:justify", html)
         self.assertIn("color:#123456;font-weight:bold", html)
