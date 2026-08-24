@@ -5,6 +5,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from lxml import html as lxml_html
+
 from app.ads.scheduler import render_ad_html, select_ad
 from app.ai import (
     ARTICLE_DIGEST_PROMPT,
@@ -299,6 +301,16 @@ class AdCoverRenderTests(unittest.TestCase):
             body="第一行\n第二行\n\n## 核心论点\n\n- 无序项\n1. 有序项"
         )
         self.assertEqual(html.count("text-indent:2em !important"), 2)
+        root = lxml_html.fragment_fromstring(html, create_parent="div")
+        visible_blocks = root.xpath(".//p[normalize-space()] | .//blockquote[normalize-space()]")
+        self.assertTrue(visible_blocks)
+        self.assertTrue(
+            all(
+                not str(block.text or "").startswith((" ", "\n", "\r", "\t"))
+                for block in visible_blocks
+                if block.text
+            )
+        )
         self.assertIn("font-size:18px;color:#595959", html)
         self.assertIn("text-align:justify", html)
         self.assertIn("color:#123456;font-weight:bold", html)
