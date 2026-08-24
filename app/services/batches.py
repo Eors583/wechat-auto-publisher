@@ -715,6 +715,11 @@ class BatchService:
             self._review_inbox_item(row)
             for row in rows[:page_size]
         ]
+        token_usage = BillingService(self.db).article_generation_tokens(
+            [int(item["job_id"]) for item in items]
+        )
+        for item in items:
+            item["generation_token_usage"] = token_usage.get(int(item["job_id"]))
         return {
             "bucket": str(bucket or "review"),
             "counts": self.db.review_inbox_counts(

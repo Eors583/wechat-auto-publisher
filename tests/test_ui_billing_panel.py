@@ -37,31 +37,9 @@ def test_billing_layout_has_explicit_scroll_and_long_content_containment() -> No
     assert "@media (max-width: 600px)" in billing_css
 
 
-def test_generation_completion_opens_a_durable_usage_receipt() -> None:
-    receipt_source = inspect.getsource(billing.show_generation_usage_receipt)
+def test_generation_completion_does_not_interrupt_with_a_usage_receipt() -> None:
     wizard_source = inspect.getsource(desktop._build_wizard)  # noqa: SLF001
 
-    assert '"文章生成完成"' in receipt_source
-    assert '"本次生成已停止"' in receipt_source
-    assert '"本次生成未完成"' in receipt_source
-    assert "本次预计消耗" in receipt_source
-    assert "本次积分待计价" in receipt_source
-    assert "本次实际扣除" in receipt_source
-    assert "输入 Token" in receipt_source
-    assert "输出 Token" in receipt_source
-    assert 'ui_root_url({"view": "billing"})' in receipt_source
-    assert "dialog.open()" in receipt_source
-    assert "generation_receipt" in wizard_source
-    assert "show_generation_usage_receipt(" in wizard_source
-
-
-def test_generation_receipt_contains_long_values_and_reflows_on_mobile() -> None:
-    receipt_css = APP_CSS[APP_CSS.index(".ops-usage-receipt {") :]
-
-    assert "overflow-x: hidden" in receipt_css[:400]
-    assert "overflow-wrap: anywhere" in receipt_css
-    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in receipt_css
-    assert ".ops-usage-receipt-actions .q-btn" in receipt_css
-    mobile_css = receipt_css[receipt_css.index("@media (max-width: 600px)") :]
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in mobile_css
-    assert "width: 100%" in mobile_css
+    assert not hasattr(billing, "show_generation_usage_receipt")
+    assert "generation_receipt" not in wizard_source
+    assert "show_generation_usage_receipt" not in wizard_source

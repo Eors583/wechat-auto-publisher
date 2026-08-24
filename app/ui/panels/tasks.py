@@ -1433,6 +1433,12 @@ def _render_inbox_article_card(
     source_url = str(item.get("source_url") or "")
     body_chars = int(item.get("body_chars") or 0)
     priority_reason = str(item.get("priority_reason") or "")
+    generation_token_usage = item.get("generation_token_usage")
+    generation_token_text = (
+        f"{int(generation_token_usage):,} Token"
+        if generation_token_usage is not None
+        else "Token 待统计"
+    )
     latest_review_summary = item.get("latest_review_summary")
     if isinstance(latest_review_summary, dict):
         latest_review_summary = (
@@ -1974,6 +1980,9 @@ def _render_inbox_article_card(
             recommended_action
             or (failure_recommendation if failure else "状态已同步")
         ).classes("ops-task-row-state")
+        ui.label(generation_token_text).classes("ops-task-row-token").tooltip(
+            "本篇文章生成累计 Token（输入 + 输出）"
+        )
         with ui.row().classes("ops-task-row-actions"):
             ui.button(
                 primary_label,

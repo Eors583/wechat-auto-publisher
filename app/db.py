@@ -6939,6 +6939,33 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def article_generation_token_usage_by_jobs(
+        self,
+        job_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        """Return owner-scoped generation Token totals for the requested jobs."""
+
+        owner_user_id = str(self.owner_user_id or "").strip()
+        wanted = sorted({int(job_id) for job_id in job_ids if int(job_id) > 0})
+        if not owner_user_id or not wanted:
+            return []
+        placeholders = ", ".join("?" for _ in wanted)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT o.job_id,
+                       COALESCE(SUM(e.total_tokens), 0) AS total_tokens
+                FROM usage_operations AS o
+                LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
+                WHERE o.owner_user_id = ?
+                  AND o.scene = 'article_generation'
+                  AND o.job_id IN ({placeholders})
+                GROUP BY o.job_id
+                """,
+                (owner_user_id, *wanted),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def admin_billing_usage_summary(self) -> dict[str, int]:
         if self.owner_user_id:
             raise ValueError("平台成本汇总仅管理员可读")

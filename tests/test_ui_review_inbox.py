@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.db import Database
+from app.services.batches import BatchService
 from app.ui.panels import tasks
+from app.ui.styles import APP_CSS
 
 ROOT = Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "app" / "ui" / "desktop.py"
@@ -355,6 +357,25 @@ def test_inbox_review_action_opens_the_deep_workbench_directly() -> None:
     assert '"打开审核"' in source
     assert '"快速审核"' not in source
     assert '"深度编辑"' not in source
+
+
+def test_inbox_row_shows_per_article_token_usage_in_gold_without_hiding_it() -> None:
+    card_source = inspect.getsource(tasks._render_inbox_article_card)  # noqa: SLF001
+    service_source = inspect.getsource(BatchService.list_review_inbox)
+    token_css = APP_CSS[APP_CSS.index(".ops-task-row-token {") :]
+
+    assert 'item.get("generation_token_usage")' in card_source
+    assert 'f"{int(generation_token_usage):,} Token"' in card_source
+    assert 'else "Token 待统计"' in card_source
+    assert 'classes("ops-task-row-token")' in card_source
+    assert "article_generation_tokens(" in service_source
+    assert 'item["generation_token_usage"]' in service_source
+    assert "color: var(--ui-color-warning)" in token_css[:500]
+    assert "text-overflow: ellipsis" in token_css[:500]
+    assert "@container (max-width: 720px)" in token_css
+    narrow_css = token_css[token_css.index("@container (max-width: 720px)") :]
+    assert ".ops-task-row-token" in narrow_css
+    assert "display: none" not in narrow_css[narrow_css.index(".ops-task-row-token") :][:250]
 
 
 def test_legacy_review_entry_redirects_to_the_full_page_route() -> None:

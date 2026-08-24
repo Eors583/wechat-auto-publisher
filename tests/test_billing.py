@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.ai.usage import NormalizedUsage, UsageRecord, emit_usage
 from app.db import Database
 from app.services.auth import AuthService
+from app.services.batches import BatchService
 from app.services.billing import BillingService, calculate_shadow_price
 
 
@@ -58,7 +59,7 @@ def test_shadow_operation_records_actual_usage_without_charging(tmp_path) -> Non
     assert rows[0]["estimated_points"] > 0
 
 
-def test_generation_receipt_aggregates_current_jobs_and_flags_missing_prices(
+def test_article_generation_tokens_are_projected_to_each_review_inbox_job(
     tmp_path,
 ) -> None:
     root, db, _user_id = _scoped_db(tmp_path)
@@ -100,16 +101,37 @@ def test_generation_receipt_aggregates_current_jobs_and_flags_missing_prices(
                 funding_source="platform",
             )
 
-    receipt = service.generation_receipt(job_ids[:2])
+    usage = service.article_generation_tokens(job_ids[:2])
 
-    assert receipt["available"] is True
-    assert receipt["operation_count"] == 2
-    assert receipt["article_count"] == 2
-    assert receipt["input_tokens"] == 1_500_000
-    assert receipt["output_tokens"] == 150_000
-    assert receipt["estimated_points"] > 0
-    assert receipt["charged_points"] == 0
-    assert receipt["pricing_pending"] is True
+    assert usage == {
+        job_ids[0]: 1_100_000,
+        job_ids[1]: 550_000,
+    }
+
+    db.create_batch("batch-token-usage", topic="Token 展示")
+    for job_id in job_ids[:2]:
+        db.update_job(
+            job_id,
+            status="ready_for_review",
+            step="inject",
+            selected_title=f"文章 {job_id}",
+            body="正文",
+        )
+        db.attach_batch_job(
+            "batch-token-usage",
+            job_id,
+            f"account-{job_id}",
+            f"公众号 {job_id}",
+        )
+    batch_service = BatchService.__new__(BatchService)
+    batch_service.db = db
+
+    inbox = batch_service.list_review_inbox(limit=10)
+    inbox_usage = {
+        int(item["job_id"]): item["generation_token_usage"]
+        for item in inbox["items"]
+    }
+    assert inbox_usage == usage
 
 
 def test_customer_funded_usage_has_zero_platform_cost() -> None:

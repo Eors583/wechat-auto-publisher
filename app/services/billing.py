@@ -270,34 +270,17 @@ class BillingService:
             logger.exception("shadow usage list unavailable")
             return []
 
-    def generation_receipt(self, job_ids: list[int]) -> dict[str, Any]:
-        """Aggregate the just-finished article jobs for a customer receipt."""
+    def article_generation_tokens(self, job_ids: list[int]) -> dict[int, int]:
+        """Return total generation Tokens keyed by article job id."""
 
-        wanted = {int(job_id) for job_id in job_ids if int(job_id) > 0}
-        rows = [
-            row
-            for row in self.list_usage(limit=500)
-            if str(row.get("scene") or "") == "article_generation"
-            and int(row.get("job_id") or 0) in wanted
-        ]
+        try:
+            rows = self.db.article_generation_token_usage_by_jobs(job_ids)
+        except Exception:  # noqa: BLE001
+            logger.exception("article generation token usage unavailable")
+            return {}
         return {
-            "available": bool(rows),
-            "mode": billing_mode(),
-            "operation_count": len(rows),
-            "article_count": len(wanted),
-            "input_tokens": sum(int(row.get("input_tokens") or 0) for row in rows),
-            "cached_input_tokens": sum(
-                int(row.get("cached_input_tokens") or 0) for row in rows
-            ),
-            "output_tokens": sum(int(row.get("output_tokens") or 0) for row in rows),
-            "image_count": sum(int(row.get("image_count") or 0) for row in rows),
-            "estimated_points": sum(
-                int(row.get("estimated_points") or 0) for row in rows
-            ),
-            "charged_points": sum(int(row.get("charged_points") or 0) for row in rows),
-            "pricing_pending": any(
-                int(row.get("price_missing_events") or 0) > 0 for row in rows
-            ),
+            int(row["job_id"]): int(row.get("total_tokens") or 0)
+            for row in rows
         }
 
     def list_ledger(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
