@@ -15,20 +15,21 @@ from app.services.batches import BatchService
 from app.services.failures import sanitize_failure_text
 from app.time_utils import business_date, format_business_datetime
 from app.ui.image_proxy import wechat_image_proxy_url
+from app.ui.interaction_feedback import (
+    attach_interaction_feedback,
+    hide_interaction_feedback,
+)
 from app.ui.ip_whitelist_guide import (
     has_ip_whitelist_issue,
     show_ip_whitelist_guide,
 )
 from app.ui.lifecycle import client_timer
 from app.ui.navigation import ui_root_url
-from app.ui.interaction_feedback import (
-    attach_interaction_feedback,
-    hide_interaction_feedback,
-)
 from app.ui.panels.review_jury import (
     build_review_jury_panel,
     editorial_review_progress,
 )
+from app.ui.preflight_repair import show_preflight_repair_dialog
 from app.ui.state import (
     STATUS_LABEL,
     AppState,
@@ -1489,16 +1490,34 @@ def _render_inbox_article_card(
                         )
                     )
                 except Exception as exc:  # noqa: BLE001
-                    if has_ip_whitelist_issue(exc) and _ui_client_alive(
-                        owner_client
-                    ):
-                        show_ip_whitelist_guide([account_name])
-                        return
+                    if _ui_client_alive(owner_client):
+                        if has_ip_whitelist_issue(exc):
+                            show_ip_whitelist_guide([account_name])
+                        else:
+                            ui.notify(
+                                "发布环境检查失败："
+                                + sanitize_failure_text(exc),
+                                type="negative",
+                                timeout=10000,
+                            )
+                    return
                 else:
+                    if not _ui_client_alive(owner_client):
+                        return
                     if has_ip_whitelist_issue(reports) and _ui_client_alive(
                         owner_client
                     ):
                         show_ip_whitelist_guide([account_name])
+                        return
+                    if not all(bool(report.get("can_write")) for report in reports):
+                        show_preflight_repair_dialog(
+                            [dict(report) for report in reports],
+                            title="当前配置无法重新写入草稿",
+                            summary=(
+                                "系统已停止本次重试；修复下面的配置后再重新提交，"
+                                "不会重复写入已有草稿。"
+                            ),
+                        )
                         return
         try:
             await _retry_job_with_loading(
@@ -1544,19 +1563,13 @@ def _render_inbox_article_card(
             if has_ip_whitelist_issue(report):
                 show_ip_whitelist_guide([account_name])
                 return
-            failed_checks = [
-                str(check.get("message") or check.get("label") or "")
-                for check in list(report.get("checks") or [])
-                if not bool(check.get("ok"))
-            ]
             if bool(report.get("can_write")):
                 ui.notify("云端连接与公众号写入接口检测正常", type="positive")
             else:
-                ui.notify(
-                    "连接检测未通过："
-                    + ("；".join(failed_checks) or "请检查公众号或中转配置"),
-                    type="warning",
-                    timeout=12000,
+                show_preflight_repair_dialog(
+                    [report],
+                    title="云端连接检测未通过",
+                    summary="下面的配置问题会阻止草稿写入，请修复后重新检测。",
                 )
         except Exception as exc:  # noqa: BLE001
             if _ui_client_alive(owner_client):
@@ -5051,6 +5064,16 @@ def confirm_batch_write(
                     if has_ip_whitelist_issue(reports):
                         dialog.close()
                         show_ip_whitelist_guide(names)
+                        return
+                    if not all(bool(report.get("can_write")) for report in reports):
+                        dialog.close()
+                        show_preflight_repair_dialog(
+                            [dict(report) for report in reports],
+                            title="当前配置无法写入公众号草稿",
+                            summary=(
+                                "系统尚未提交任何草稿；请修复下面的配置后再确认写入。"
+                            ),
+                        )
                         return
                 result = await run.io_bound(
                     lambda: service.inject_batch(str(batch["id"]))

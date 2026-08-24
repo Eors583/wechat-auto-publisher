@@ -1498,6 +1498,29 @@ body,
 .ops-dialog-lg { width: min(var(--ui-layout-dialog-lg), calc(100vw - var(--ui-space-8))) !important; max-width: var(--ui-layout-dialog-lg) !important; }
 .ops-dialog-xl { width: min(var(--ui-layout-dialog-xl), calc(100vw - var(--ui-space-8))) !important; max-width: var(--ui-layout-dialog-xl) !important; }
 .ops-dialog-scroll { max-height: calc(100vh - var(--ui-space-8)); overflow-y: auto; }
+.ops-preflight-dialog { min-width: 0; overflow-x: hidden; }
+.ops-preflight-issue {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--ui-space-3);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-color-warning);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-color-warning-soft);
+  box-sizing: border-box;
+}
+.ops-preflight-issue-copy { min-width: 0; max-width: 100%; }
+.ops-preflight-reason {
+  min-width: 0;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .ops-dialog-model-editor {
   width: min(var(--ui-layout-dialog-md), calc(100vw - var(--ui-space-8))) !important;
   max-width: var(--ui-layout-dialog-md) !important;
@@ -1681,6 +1704,8 @@ body,
   .ops-account-directory-panel,
   .ops-account-config-card { grid-column: 1; }
   .ops-account-directory-panel { position: static; max-height: none; }
+  .ops-preflight-issue { grid-template-columns: minmax(0, 1fr); }
+  .ops-preflight-issue > .q-btn { width: 100%; max-width: 100%; }
 }
 
 @media (max-height: 820px) {

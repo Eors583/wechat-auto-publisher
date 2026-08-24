@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
+
 from nicegui import run, ui
 
 from app.accounts import (
@@ -61,6 +62,7 @@ from app.ui.panels.auth import (
     logout_desktop_user,
 )
 from app.ui.panels.feishu import build_feishu_panel
+from app.ui.panels.models import build_models_panel
 from app.ui.panels.onboarding_wizard import (
     build_configuration_health_banner,
     build_onboarding_settings,
@@ -68,7 +70,6 @@ from app.ui.panels.onboarding_wizard import (
     configuration_health_needs_refresh,
     should_show_onboarding,
 )
-from app.ui.panels.models import build_models_panel
 from app.ui.panels.overview import build_overview_cards
 from app.ui.panels.prompts import build_prompt_templates_panel
 from app.ui.panels.review_jury import enabled_profile_options
@@ -79,6 +80,14 @@ from app.ui.panels.settings_hub import (
 from app.ui.panels.tasks import build_review_page, build_tasks_panel
 from app.ui.panels.topics import build_topic_center
 from app.ui.panels.wechat_commands import open_wechat_command_dialog
+from app.ui.preflight_repair import (
+    preflight_failures,
+    render_preflight_failures,
+    show_preflight_repair_dialog,
+)
+from app.ui.preflight_repair import (
+    preflight_repair_url as _preflight_repair_url,
+)
 from app.ui.state import (
     STATUS_LABEL,
     AppState,
@@ -179,36 +188,6 @@ logger = logging.getLogger(__name__)
 # so desktop, browser and reconnecting clients never share element references.
 state: AppState | None = None
 ADD_CUSTOM_MODEL_VALUE = "__add_custom_model__"
-
-
-_PREFLIGHT_REPAIR_ACTIONS: dict[str, tuple[str, str]] = {
-    "account": ("account", "配置公众号"),
-    "model": ("account", "绑定文章模型"),
-    "wechat": ("account", "检查公众号凭证"),
-    "draft": ("account", "检查草稿权限"),
-    "material": ("images", "配置封面素材"),
-    "cover": ("images", "选择有效封面"),
-    "template": ("template", "打开模板管理"),
-    "inline_images": ("images", "配置正文生图"),
-}
-
-
-def _preflight_repair_action(check_key: str) -> tuple[str, str]:
-    return _PREFLIGHT_REPAIR_ACTIONS.get(
-        str(check_key or "").strip(),
-        ("account", "打开公众号配置"),
-    )
-
-
-def _preflight_repair_url(account_id: str, check_key: str) -> str:
-    action, _ = _preflight_repair_action(check_key)
-    return ui_root_url(
-        {
-            "view": "config",
-            "repair": action,
-            "account_id": str(account_id or "").strip(),
-        }
-    )
 
 
 def create_desktop_app() -> None:
@@ -1923,7 +1902,15 @@ def _build_wizard(
                 return True
 
             repair_target: dict[str, str] = {}
-            first_failed_check: tuple[str, str] | None = None
+            failures = preflight_failures(reports)
+            first_failed_check = (
+                (
+                    failures[0]["account_id"],
+                    failures[0]["check_key"],
+                )
+                if failures
+                else None
+            )
 
             with (
                 ui.dialog() as dialog,
@@ -1937,46 +1924,7 @@ def _build_wizard(
                     dialog.submit(False)
 
                 ui.label("发布环境检查发现问题").classes("text-h6 text-weight-bold")
-                for report in reports:
-                    report_account_id = str(report.get("account_id") or "")
-                    with ui.element("div").classes("card w-full"):
-                        ui.label(str(report.get("account_name") or "公众号")).classes(
-                            "text-weight-bold"
-                        )
-                        for check in report.get("checks") or []:
-                            check_ok = bool(check.get("ok"))
-                            check_key = str(check.get("key") or "account")
-                            if not check_ok and first_failed_check is None:
-                                first_failed_check = (
-                                    report_account_id,
-                                    check_key,
-                                )
-                            with ui.row().classes(
-                                "w-full items-center justify-between gap-3"
-                            ):
-                                ui.label(
-                                    ("✓ " if check_ok else "✕ ")
-                                    + str(check.get("name") or "")
-                                    + "："
-                                    + str(check.get("message") or "")
-                                ).classes(
-                                    "text-positive"
-                                    if check_ok
-                                    else "text-negative"
-                                ).classes("ops-flex-copy")
-                                if not check_ok:
-                                    _, repair_label = _preflight_repair_action(
-                                        check_key
-                                    )
-                                    ui.button(
-                                        repair_label,
-                                        on_click=lambda _=None,
-                                        aid=report_account_id,
-                                        key=check_key: request_repair(aid, key),
-                                    ).props(
-                                        "outline dense color=teal-9 no-caps "
-                                        "icon=build"
-                                    )
+                render_preflight_failures(reports, request_repair)
                 can_generate = all(item.get("can_generate") for item in reports)
                 ui.label(
                     "可以仅生成文章并进入审核，但配置修复前无法写入草稿箱。"
@@ -4116,34 +4064,28 @@ def _build_accounts_panel(
             result = dict(results[0] if results else {})
             can_generate = bool(result.get("can_generate"))
             can_write = bool(result.get("can_write"))
-            checks = [
-                dict(item)
-                for item in list(result.get("checks") or [])
-                if not bool(item.get("ok"))
-            ]
             if can_generate and can_write:
                 ui.notify(
                     "连接检测通过：可生成文章，也可写入公众号草稿箱",
                     type="positive",
                 )
+                render_accounts()
             elif can_generate:
-                detail = "；".join(
-                    str(item.get("detail") or item.get("label") or "")
-                    for item in checks
-                    if str(item.get("key") or "") in {"wechat", "draft", "material"}
-                )
-                ui.notify(
-                    "当前仅可生成，暂不可写草稿" + (f"：{detail}" if detail else ""),
-                    type="warning",
-                    timeout=12000,
+                render_accounts()
+                show_preflight_repair_dialog(
+                    [result],
+                    title="当前仅可生成，暂不可写草稿",
+                    summary=(
+                        "文章仍可生成和审核；修复下面的配置后，才能写入公众号草稿箱。"
+                    ),
                 )
             else:
-                detail = "；".join(
-                    str(item.get("detail") or item.get("label") or "")
-                    for item in checks
+                render_accounts()
+                show_preflight_repair_dialog(
+                    [result],
+                    title="当前配置无法生成文章",
+                    summary="请修复下面的配置后重新检测。",
                 )
-                raise RuntimeError(detail or "公众号或模型配置尚未就绪")
-            render_accounts()
         except Exception as exc:
             ui.notify(f"公众号连接失败：{exc}", type="negative", timeout=12000)
         finally:

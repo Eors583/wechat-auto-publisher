@@ -18,6 +18,10 @@ from app.services.wechat_relay_settings import (
     save_wechat_relay_settings,
 )
 from app.ui.navigation import ui_root_url
+from app.ui.preflight_repair import (
+    preflight_repair_action,
+    preflight_repair_url,
+)
 from app.ui.state import AppState, set_button_loading
 
 WIZARD_STEPS = ("welcome", "ai", "account", "wechat", "complete")
@@ -1624,23 +1628,38 @@ class _WizardController:
 
     def _render_check_results(self, reports: list[dict[str, Any]]) -> None:
         report = reports[0] if reports else {}
+        account_id = str(report.get("account_id") or "").strip()
         with ui.element("div").classes("onboarding-summary"):
             for check in list(report.get("checks") or []):
                 if not isinstance(check, dict):
                     continue
                 ok = bool(check.get("ok"))
+                check_key = str(check.get("key") or "account").strip()
                 with ui.element("div").classes("onboarding-check"):
                     ui.label("✓" if ok else "!").classes(
                         "onboarding-check-icon "
                         + ("text-positive" if ok else "text-warning")
                     )
-                    with ui.column().classes("gap-0"):
+                    with ui.column().classes("gap-0 min-w-0"):
                         ui.label(str(check.get("name") or "配置检查")).classes(
                             "text-weight-bold"
                         )
                         ui.label(
                             sanitize_failure_text(check.get("message") or "")
-                        ).classes("text-caption text-grey-7")
+                        ).classes(
+                            "text-caption text-grey-7 ops-preflight-reason"
+                        )
+                        if not ok:
+                            _, repair_label = preflight_repair_action(check_key)
+                            ui.button(
+                                repair_label,
+                                icon="build",
+                                on_click=lambda _=None,
+                                aid=account_id,
+                                key=check_key: ui.navigate.to(
+                                    preflight_repair_url(aid, key)
+                                ),
+                            ).props("flat dense color=teal-9 no-caps")
 
     def _render_complete(
         self,
