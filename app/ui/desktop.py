@@ -4952,59 +4952,17 @@ def _render_account_config_workspace(
                     "flat round dense aria-label=关闭广告栏同步配置"
                 )
 
-            enabled_switch = ui.switch(
-                "启用广告标题同步",
-                value=benchmark_enabled,
-            )
-            with ui.element("div").classes("ops-config-form"):
-                with ui.element("div").classes("ops-config-field"):
-                    ui.label("对标公众号").classes("ops-config-field-label")
-                    source_select = ui.select(
-                        benchmark_source_options,
-                        value=benchmark_source_id or None,
-                        label="广告标题来源公众号",
-                    ).classes("w-full").props(
-                        "outlined dense options-dense hide-bottom-space"
-                    )
-                with ui.element("div").classes("ops-config-field"):
-                    ui.label("图片匹配阈值").classes("ops-config-field-label")
-                    threshold_input = ui.number(
-                        "图片相似度（%）",
-                        value=round(
-                            float(
-                                benchmark_settings.get(
-                                    "image_match_threshold",
-                                    0.90,
-                                )
-                                or 0.90
-                            )
-                            * 100
-                        ),
-                        min=50,
-                        max=100,
-                        step=1,
-                    ).classes("w-full").props(
-                        "outlined dense hide-bottom-space"
-                    )
-
-            follow_order_switch = ui.switch(
-                "按对标公众号中的广告位顺序排列",
-                value=bool(
-                    benchmark_settings.get("follow_source_order", True)
-                ),
-            )
-            matched_only_switch = ui.switch(
-                "仅写入图片匹配成功的广告",
-                value=bool(benchmark_settings.get("matched_only", False)),
-            )
-            deduplicate_switch = ui.switch(
-                "自动去除重复广告图片",
-                value=bool(
-                    benchmark_settings.get("deduplicate_by_image", True)
-                ),
-            )
+            with ui.element("div").classes("ops-config-field w-full"):
+                ui.label("对标公众号").classes("ops-config-field-label")
+                source_select = ui.select(
+                    benchmark_source_options,
+                    value=benchmark_source_id or None,
+                    label="广告标题来源公众号",
+                ).classes("w-full").props(
+                    "outlined dense clearable options-dense hide-bottom-space"
+                )
             ui.label(
-                "未勾选“仅写入匹配成功的广告”时，匹配失败的本地广告会保留原标题并排在后面。"
+                "选择后自动匹配并同步对标公众号的广告标题；不选择则不处理广告标题。"
             ).classes("ops-panel-subtitle ops-wrap-anywhere")
             preview_host = ui.column().classes("w-full gap-1")
 
@@ -5025,24 +4983,12 @@ def _render_account_config_workspace(
 
             def save_benchmark() -> None:
                 try:
+                    source_account_id = str(source_select.value or "").strip()
                     on_benchmark(
                         account_id,
                         {
-                            "enabled": bool(enabled_switch.value),
-                            "source_account_id": str(
-                                source_select.value or ""
-                            ),
-                            "image_match_threshold": float(
-                                threshold_input.value or 90
-                            )
-                            / 100.0,
-                            "matched_only": bool(matched_only_switch.value),
-                            "follow_source_order": bool(
-                                follow_order_switch.value
-                            ),
-                            "deduplicate_by_image": bool(
-                                deduplicate_switch.value
-                            ),
+                            "enabled": bool(source_account_id),
+                            "source_account_id": source_account_id,
                         },
                     )
                     dialog.close()
@@ -5627,73 +5573,38 @@ def _render_account_config_workspace(
                             ui.badge(
                                 "继承旧配置"
                                 if not benchmark_configured
-                                else "已启用"
+                                else "已选择"
                             ).classes("ops-badge ops-badge-green")
                         elif benchmark_configured:
-                            ui.badge("已关闭").classes("ops-badge")
+                            ui.badge("不处理").classes("ops-badge")
                         else:
-                            ui.badge("未配置").classes("ops-badge ops-badge-warm")
-                    threshold_percent = round(
-                        float(
-                            benchmark_settings.get(
-                                "image_match_threshold",
-                                0.90,
-                            )
-                            or 0.90
-                        )
-                        * 100
-                    )
-                    entries = (
-                        (
-                            "广告标题来源",
-                            benchmark_source_name or "选择对标公众号",
-                            "campaign",
-                        ),
-                        (
-                            "图片匹配规则",
-                            f"相似度 ≥ {threshold_percent}% · "
-                            + (
-                                "跟随对标顺序"
-                                if bool(
-                                    benchmark_settings.get(
-                                        "follow_source_order",
-                                        True,
-                                    )
-                                )
-                                else "保留本地顺序"
-                            ),
-                            "image_search",
-                        ),
-                        (
-                            "未匹配广告",
-                            "不写入本次多图文"
-                            if bool(benchmark_settings.get("matched_only"))
-                            else "保留本地原标题",
-                            "rule",
-                        ),
-                    )
-                    with ui.element("div").classes("ops-config-entry-grid"):
-                        for title, detail, icon in entries:
-                            with ui.element("button").classes(
-                                "ops-config-entry"
-                            ).props("type=button").on(
-                                "click", open_benchmark_dialog
+                            ui.badge("未选择").classes("ops-badge ops-badge-warm")
+                    with ui.element("div").classes(
+                        "ops-config-entry-grid ops-config-entry-grid-single"
+                    ):
+                        with ui.element("button").classes(
+                            "ops-config-entry"
+                        ).props("type=button").on(
+                            "click", open_benchmark_dialog
+                        ):
+                            with ui.element("span").classes(
+                                "ops-config-entry-icon"
                             ):
-                                with ui.element("span").classes(
-                                    "ops-config-entry-icon"
-                                ):
-                                    ui.icon(icon, size="17px").classes(
-                                        "ops-semantic-icon"
-                                    )
-                                with ui.column().classes(
-                                    "ops-flex-copy gap-0 min-w-0"
-                                ):
-                                    ui.label(title).classes(
-                                        "ops-config-entry-title"
-                                    )
-                                    ui.label(detail).classes(
-                                        "ops-config-entry-detail ops-wrap-anywhere"
-                                    )
+                                ui.icon("campaign", size="17px").classes(
+                                    "ops-semantic-icon"
+                                )
+                            with ui.column().classes(
+                                "ops-flex-copy gap-0 min-w-0"
+                            ):
+                                ui.label("对标公众号").classes(
+                                    "ops-config-entry-title"
+                                )
+                                ui.label(
+                                    benchmark_source_name
+                                    or "未选择，不处理广告标题"
+                                ).classes(
+                                    "ops-config-entry-detail ops-wrap-anywhere"
+                                )
 
             def save_current_configuration() -> None:
                 try:

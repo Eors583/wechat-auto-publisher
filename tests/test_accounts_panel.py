@@ -201,9 +201,7 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
                 "提示词配置",
                 "AI 评审方案",
                 "草稿写入规则",
-                "广告标题来源",
-                "图片匹配规则",
-                "未匹配广告",
+                "对标公众号",
             }
         }
         assert structured_rule_labels == {
@@ -213,15 +211,13 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
             "提示词配置",
             "AI 评审方案",
             "草稿写入规则",
-            "广告标题来源",
-            "图片匹配规则",
-            "未匹配广告",
+            "对标公众号",
         }
 
         benchmark_label = next(
             element
             for element in elements
-            if getattr(element, "text", None) == "广告标题来源"
+            if getattr(element, "text", None) == "对标公众号"
         )
         benchmark_entry = benchmark_label.parent_slot.parent.parent_slot.parent
         listener = next(
@@ -235,12 +231,6 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
             type(element).__name__ == "Select"
             and str(getattr(element, "_props", {}).get("label") or "")
             == "广告标题来源公众号"
-            for element in dialog_elements
-        )
-        assert any(
-            type(element).__name__ == "Number"
-            and str(getattr(element, "_props", {}).get("label") or "")
-            == "图片相似度（%）"
             for element in dialog_elements
         )
     finally:
@@ -321,15 +311,16 @@ def test_account_configuration_exposes_dynamic_benchmark_ad_settings() -> None:
     source = inspect.getsource(desktop._render_account_config_workspace)
 
     assert 'ui.label("广告栏同步")' in source
-    assert '"启用广告标题同步"' in source
     assert 'label="广告标题来源公众号"' in source
-    assert '"图片相似度（%）"' in source
-    assert '"按对标公众号中的广告位顺序排列"' in source
-    assert '"仅写入图片匹配成功的广告"' in source
-    assert '"自动去除重复广告图片"' in source
+    assert 'ui.label("对标公众号")' in source
+    assert '"未选择，不处理广告标题"' in source
+    assert '"enabled": bool(source_account_id)' in source
+    assert '"启用广告标题同步"' not in source
+    assert '"图片相似度（%）"' not in source
+    assert '"仅写入图片匹配成功的广告"' not in source
     assert '"测试获取最新广告栏"' in source
     assert "on_benchmark_preview" in source
     assert '"获取失败："' in source
     assert "on_benchmark(" in source
-    assert "ops-config-entry-grid" in source
+    assert "ops-config-entry-grid-single" in source
     assert "ops-wrap-anywhere" in source
