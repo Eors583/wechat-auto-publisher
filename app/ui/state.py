@@ -160,9 +160,16 @@ class AppState:
             owner_user_id=owner_user_id,
         )
         self.auth = AuthService(self.db)
-        self.auth.ensure_default_admin()
+        default_admin = self.auth.ensure_default_admin()
         if self.is_admin:
-            ensure_config_accounts_imported(self.db, self.config)
+            # Legacy config.yaml accounts have one explicit historical owner.
+            # Another administrator may manage platform models, but must not
+            # re-import those fixed account IDs into their own tenant or gain
+            # access to the original administrator's WeChat credentials.
+            ensure_config_accounts_imported(
+                self.db.for_user(str(default_admin["id"])),
+                self.config,
+            )
         ensure_account_layouts_initialized(self.db, self.config)
         return self.config
 

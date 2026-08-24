@@ -16,6 +16,17 @@ from app.db_backend import (
     is_postgres_url,
     postgres_integrity_errors,
 )
+from app.schema_migrations import (
+    BASELINE_SCHEMA,
+    DROP_DUPLICATE_INDEXES,
+    PHASE_ONE_COMPAT,
+    SHADOW_BILLING_SCHEMA,
+    apply_shadow_billing_schema,
+    ensure_schema_migrations,
+    migration_applied,
+    record_schema_migration,
+    validate_schema_migrations,
+)
 from app.time_utils import business_date, business_day_bounds_utc
 
 JOB_STATUSES = (
@@ -39,6 +50,19 @@ STEPS = (
     "render",
     "inject",
     "publish",
+)
+
+# Phase-one compatibility contract. New code treats source_channel as the
+# canonical persisted source while preserving source for public/API readers.
+# The four legacy request columns remain physically present until a later
+# observation-backed migration proves they are unused.
+JOB_SOURCE_OF_TRUTH = "source_channel"
+DEPRECATED_JOB_COLUMNS = (
+    "source",
+    "source_mode",
+    "reference_urls_json",
+    "required_facts",
+    "rewrite_intensity",
 )
 
 _PROCESS_OWNER_SESSION_ID = f"process-{uuid.uuid4().hex}"
@@ -189,6 +213,19 @@ class Database:
             conn.close()
 
     def _init_schema(self) -> None:
+        with self.connect() as conn:
+            if self.backend == "postgresql":
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    (8_104_721_907_351,),
+                )
+            ensure_schema_migrations(conn)
+            validate_schema_migrations(conn)
+            baseline_applied = migration_applied(conn, BASELINE_SCHEMA)
+        if baseline_applied:
+            self._run_post_baseline_migrations()
+            return
+
         with self.connect() as conn:
             if self.backend == "postgresql":
                 # Web, API and the standalone admin console can initialize at
@@ -536,7 +573,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS account_creation_plan_defaults (
                     account_id TEXT PRIMARY KEY,
-                    creation_plan_id TEXT NOT NULL,
+                    creation_plan_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (account_id) REFERENCES official_accounts(id) ON DELETE CASCADE
@@ -1126,6 +1163,480 @@ class Database:
                 """
             )
             self._migrate_legacy_jobs_to_batches(conn)
+            record_schema_migration(
+                conn,
+                BASELINE_SCHEMA,
+                applied_at=_utc_now(),
+            )
+        self._run_post_baseline_migrations()
+
+    def _run_post_baseline_migrations(self) -> None:
+        with self.connect() as conn:
+            if self.backend == "postgresql":
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    (8_104_721_907_351,),
+                )
+            ensure_schema_migrations(conn)
+            validate_schema_migrations(conn)
+            if not migration_applied(conn, PHASE_ONE_COMPAT):
+                self._migrate_phase_one_compatibility(conn)
+                record_schema_migration(
+                    conn,
+                    PHASE_ONE_COMPAT,
+                    applied_at=_utc_now(),
+                )
+        self._run_nontransactional_schema_migrations()
+        self._run_shadow_billing_schema_migration()
+
+    def _run_shadow_billing_schema_migration(self) -> None:
+        with self.connect() as conn:
+            if self.backend == "postgresql":
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    (8_104_721_907_351,),
+                )
+            ensure_schema_migrations(conn)
+            validate_schema_migrations(conn)
+            if not migration_applied(conn, SHADOW_BILLING_SCHEMA):
+                apply_shadow_billing_schema(conn)
+                record_schema_migration(
+                    conn,
+                    SHADOW_BILLING_SCHEMA,
+                    applied_at=_utc_now(),
+                )
+
+    def _run_nontransactional_schema_migrations(self) -> None:
+        if self.backend != "postgresql":
+            with self.connect() as conn:
+                if not migration_applied(conn, DROP_DUPLICATE_INDEXES):
+                    self._drop_duplicate_indexes(conn, concurrently=False)
+                    record_schema_migration(
+                        conn,
+                        DROP_DUPLICATE_INDEXES,
+                        applied_at=_utc_now(),
+                    )
+            return
+        conn = connect_postgres(self.database_url, autocommit=True)
+        try:
+            conn.execute(
+                "SELECT pg_advisory_lock(?)",
+                (8_104_721_907_351,),
+            )
+            ensure_schema_migrations(conn)
+            validate_schema_migrations(conn)
+            if not migration_applied(conn, DROP_DUPLICATE_INDEXES):
+                self._drop_duplicate_indexes(conn, concurrently=True)
+                record_schema_migration(
+                    conn,
+                    DROP_DUPLICATE_INDEXES,
+                    applied_at=_utc_now(),
+                )
+        finally:
+            try:
+                conn.execute(
+                    "SELECT pg_advisory_unlock(?)",
+                    (8_104_721_907_351,),
+                )
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _drop_duplicate_indexes(conn: Any, *, concurrently: bool) -> None:
+        modifier = " CONCURRENTLY" if concurrently else ""
+        for index_name in (
+            "idx_draft_deliveries_revision",
+            "idx_feishu_integrations_owner",
+            "idx_feishu_integrations_callback",
+        ):
+            conn.execute(f"DROP INDEX{modifier} IF EXISTS {index_name}")
+
+    def _migrate_phase_one_compatibility(self, conn: Any) -> None:
+        """Apply the first additive PostgreSQL optimization release."""
+
+        account_columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(official_accounts)"
+            ).fetchall()
+        }
+        for name, declaration in {
+            "default_creation_plan_id": "TEXT",
+            "default_editorial_review_profile_id": "TEXT",
+            "editorial_review_config_json": "TEXT NOT NULL DEFAULT '{}'",
+        }.items():
+            if name not in account_columns:
+                conn.execute(
+                    f"ALTER TABLE official_accounts ADD COLUMN {name} {declaration}"
+                )
+
+        job_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        for name, declaration in {
+            "batch_id": "TEXT",
+            "account_id": "TEXT",
+            "account_name_snapshot": "TEXT",
+            "review_status": "TEXT NOT NULL DEFAULT 'unviewed'",
+            "viewed_at": "TEXT",
+            "confirmed_at": "TEXT",
+            "source_channel": "TEXT",
+        }.items():
+            if name not in job_columns:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+
+        duplicate_job = conn.execute(
+            """
+            SELECT job_id, COUNT(*) AS link_count
+            FROM batch_jobs
+            GROUP BY job_id
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if duplicate_job:
+            raise RuntimeError(
+                "检测到一个文章任务属于多个批次，已停止 jobs 结构回填以避免数据歧义"
+            )
+
+        if self.backend == "postgresql":
+            conn.execute(
+                """
+                ALTER TABLE account_creation_plan_defaults
+                ALTER COLUMN creation_plan_id DROP NOT NULL
+                """
+            )
+            conn.execute(
+                """
+                UPDATE account_creation_plan_defaults AS defaults
+                SET creation_plan_id = NULL, updated_at = ?
+                WHERE creation_plan_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM official_accounts AS account
+                      JOIN creation_plans AS plan
+                        ON plan.id = defaults.creation_plan_id
+                       AND plan.owner_user_id = account.owner_user_id
+                      WHERE account.id = defaults.account_id
+                  )
+                """,
+                (_utc_now(),),
+            )
+        else:
+            conn.execute(
+                """
+                DELETE FROM account_creation_plan_defaults
+                WHERE creation_plan_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM official_accounts AS account
+                      JOIN creation_plans AS plan
+                        ON plan.id = account_creation_plan_defaults.creation_plan_id
+                       AND plan.owner_user_id = account.owner_user_id
+                      WHERE account.id = account_creation_plan_defaults.account_id
+                  )
+                """
+            )
+        conn.execute(
+            """
+            UPDATE account_editorial_review_defaults AS defaults
+            SET profile_id = NULL, config_json = '{}', updated_at = ?
+            WHERE profile_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM official_accounts AS account
+                  JOIN editorial_review_profiles AS profile
+                    ON profile.id = defaults.profile_id
+                   AND profile.owner_user_id = account.owner_user_id
+                  WHERE account.id = defaults.account_id
+              )
+            """,
+            (_utc_now(),),
+        )
+        conn.execute(
+            """
+            UPDATE official_accounts AS account
+            SET default_creation_plan_id = (
+                    SELECT defaults.creation_plan_id
+                    FROM account_creation_plan_defaults AS defaults
+                    WHERE defaults.account_id = account.id
+                ),
+                default_editorial_review_profile_id = (
+                    SELECT defaults.profile_id
+                    FROM account_editorial_review_defaults AS defaults
+                    WHERE defaults.account_id = account.id
+                ),
+                editorial_review_config_json = COALESCE((
+                    SELECT defaults.config_json
+                    FROM account_editorial_review_defaults AS defaults
+                    WHERE defaults.account_id = account.id
+                ), '{}')
+            """
+        )
+        conn.execute(
+            """
+            UPDATE jobs
+            SET batch_id = (
+                    SELECT batch_id FROM batch_jobs WHERE job_id = jobs.id
+                ),
+                account_id = (
+                    SELECT account_id FROM batch_jobs WHERE job_id = jobs.id
+                ),
+                account_name_snapshot = (
+                    SELECT account_name FROM batch_jobs WHERE job_id = jobs.id
+                ),
+                review_status = COALESCE((
+                    SELECT review_status FROM batch_jobs WHERE job_id = jobs.id
+                ), review_status, 'unviewed'),
+                viewed_at = (
+                    SELECT viewed_at FROM batch_jobs WHERE job_id = jobs.id
+                ),
+                confirmed_at = (
+                    SELECT confirmed_at FROM batch_jobs WHERE job_id = jobs.id
+                )
+            WHERE EXISTS (SELECT 1 FROM batch_jobs WHERE job_id = jobs.id)
+            """
+        )
+        conn.execute(
+            """
+            UPDATE jobs
+            SET source_channel = source
+            WHERE source_channel IS NULL OR source_channel = ''
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_account ON jobs(account_id, id)"
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_jobs_review_status
+            ON jobs(review_status, status, created_at)
+            """
+        )
+
+        self._migrate_scoped_customer_settings(conn)
+        if self.backend == "postgresql":
+            self._add_phase_one_postgres_constraints(conn)
+
+    @staticmethod
+    def _migrate_scoped_customer_settings(conn: Any) -> None:
+        owner_row = conn.execute(
+            """
+            SELECT value
+            FROM app_settings
+            WHERE key = 'migration.customer_data_owner.v1'
+            """
+        ).fetchone()
+        owner_user_id = str(owner_row["value"] if owner_row else "").strip()
+        if not owner_user_id:
+            return
+        user_exists = conn.execute(
+            "SELECT 1 FROM users WHERE id = ?",
+            (owner_user_id,),
+        ).fetchone()
+        if not user_exists:
+            return
+        now = _utc_now()
+        for row in conn.execute(
+            """
+            SELECT key, value
+            FROM app_settings
+            WHERE key IN (
+                'jizhile_api',
+                'onboarding.guide',
+                'ui.last_target_account_ids',
+                'wechat_backend_search'
+            ) OR key LIKE 'ui.%'
+            """
+        ).fetchall():
+            conn.execute(
+                """
+                INSERT INTO user_settings (user_id, key, value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, key) DO NOTHING
+                """,
+                (owner_user_id, str(row["key"]), str(row["value"]), now),
+            )
+
+    @staticmethod
+    def _postgres_constraint_exists(conn: Any, name: str) -> bool:
+        return bool(
+            conn.execute(
+                """
+                SELECT 1
+                FROM pg_constraint
+                WHERE connamespace = current_schema()::regnamespace
+                  AND conname = ?
+                """,
+                (name,),
+            ).fetchone()
+        )
+
+    @classmethod
+    def _add_postgres_foreign_key(
+        cls,
+        conn: Any,
+        *,
+        table: str,
+        name: str,
+        column: str,
+        referenced_table: str,
+    ) -> None:
+        if not cls._postgres_constraint_exists(conn, name):
+            conn.execute(
+                f"""
+                ALTER TABLE {table}
+                ADD CONSTRAINT {name}
+                FOREIGN KEY ({column}) REFERENCES {referenced_table}(id)
+                ON DELETE SET NULL NOT VALID
+                """
+            )
+        conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {name}")
+
+    @classmethod
+    def _add_postgres_check(
+        cls,
+        conn: Any,
+        *,
+        table: str,
+        name: str,
+        expression: str,
+        invalid_where: str,
+    ) -> None:
+        if not cls._postgres_constraint_exists(conn, name):
+            conn.execute(
+                f"""
+                ALTER TABLE {table}
+                ADD CONSTRAINT {name} CHECK ({expression}) NOT VALID
+                """
+            )
+        invalid = conn.execute(
+            f"SELECT 1 FROM {table} WHERE {invalid_where} LIMIT 1"
+        ).fetchone()
+        if not invalid:
+            conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {name}")
+
+    @classmethod
+    def _add_phase_one_postgres_constraints(cls, conn: Any) -> None:
+        for table, name, column, referenced_table in (
+            (
+                "account_creation_plan_defaults",
+                "fk_account_creation_plan_defaults_plan",
+                "creation_plan_id",
+                "creation_plans",
+            ),
+            (
+                "account_editorial_review_defaults",
+                "fk_account_editorial_review_defaults_profile",
+                "profile_id",
+                "editorial_review_profiles",
+            ),
+            (
+                "official_accounts",
+                "fk_official_accounts_default_creation_plan",
+                "default_creation_plan_id",
+                "creation_plans",
+            ),
+            (
+                "official_accounts",
+                "fk_official_accounts_default_review_profile",
+                "default_editorial_review_profile_id",
+                "editorial_review_profiles",
+            ),
+            (
+                "jobs",
+                "fk_jobs_batch",
+                "batch_id",
+                "batches",
+            ),
+        ):
+            cls._add_postgres_foreign_key(
+                conn,
+                table=table,
+                name=name,
+                column=column,
+                referenced_table=referenced_table,
+            )
+        for table, name, expression, invalid_where in (
+            (
+                "jobs",
+                "ck_jobs_status",
+                "status IN ("
+                + ", ".join(f"'{status}'" for status in JOB_STATUSES)
+                + ")",
+                "status NOT IN ("
+                + ", ".join(f"'{status}'" for status in JOB_STATUSES)
+                + ") OR status IS NULL",
+            ),
+            (
+                "jobs",
+                "ck_jobs_step",
+                "step IN (" + ", ".join(f"'{step}'" for step in STEPS) + ")",
+                "step NOT IN ("
+                + ", ".join(f"'{step}'" for step in STEPS)
+                + ") OR step IS NULL",
+            ),
+            (
+                "batch_jobs",
+                "ck_batch_jobs_review_status",
+                "review_status IN ('unviewed', 'viewed', 'confirmed', 'needs_changes')",
+                "review_status NOT IN ('unviewed', 'viewed', 'confirmed', 'needs_changes') OR review_status IS NULL",
+            ),
+            (
+                "official_accounts",
+                "ck_official_accounts_enabled",
+                "enabled IN (0, 1)",
+                "enabled NOT IN (0, 1) OR enabled IS NULL",
+            ),
+            (
+                "official_accounts",
+                "ck_official_accounts_owner",
+                "owner_user_id <> ''",
+                "owner_user_id IS NULL OR owner_user_id = ''",
+            ),
+            (
+                "batches",
+                "ck_batches_owner",
+                "owner_user_id <> ''",
+                "owner_user_id IS NULL OR owner_user_id = ''",
+            ),
+            (
+                "jobs",
+                "ck_jobs_owner",
+                "owner_user_id <> ''",
+                "owner_user_id IS NULL OR owner_user_id = ''",
+            ),
+            (
+                "feishu_integrations",
+                "ck_feishu_integrations_enabled",
+                "enabled IN (0, 1)",
+                "enabled NOT IN (0, 1) OR enabled IS NULL",
+            ),
+            (
+                "feishu_integrations",
+                "ck_feishu_integrations_owner",
+                "owner_user_id <> ''",
+                "owner_user_id IS NULL OR owner_user_id = ''",
+            ),
+            (
+                "feishu_integration_accounts",
+                "ck_feishu_integration_accounts_default",
+                "is_default IN (0, 1)",
+                "is_default NOT IN (0, 1) OR is_default IS NULL",
+            ),
+        ):
+            cls._add_postgres_check(
+                conn,
+                table=table,
+                name=name,
+                expression=expression,
+                invalid_where=invalid_where,
+            )
+
 
     @staticmethod
     def _migrate_legacy_jobs_to_batches(conn: sqlite3.Connection) -> None:
@@ -1275,14 +1786,16 @@ class Database:
             cur = conn.execute(
                 """
                 INSERT INTO jobs (
-                    owner_user_id, status, step, topic, source, source_url, raw_content, mode,
+                    owner_user_id, status, step, topic, source, source_channel,
+                    source_url, raw_content, mode,
                     meta_json, created_at, updated_at
-                ) VALUES (?, ?, 'ingest', ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, 'ingest', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.owner_user_id,
                     "pending",
                     topic,
+                    source,
                     source,
                     source_url,
                     raw_content,
@@ -1458,8 +1971,9 @@ class Database:
                     for row in conn.execute(
                         f"""
                         SELECT DISTINCT batch_id
-                        FROM batch_jobs
-                        WHERE job_id IN ({recovered_placeholders})
+                        FROM jobs
+                        WHERE id IN ({recovered_placeholders})
+                          AND batch_id IS NOT NULL
                         """,
                         tuple(recovered_job_ids),
                     ).fetchall()
@@ -1481,10 +1995,9 @@ class Database:
                 str(row["status"] or "")
                 for row in conn.execute(
                     """
-                    SELECT j.status
-                    FROM batch_jobs bj
-                    JOIN jobs j ON j.id = bj.job_id
-                    WHERE bj.batch_id = ?
+                    SELECT status
+                    FROM jobs
+                    WHERE batch_id = ?
                     """,
                     (batch_id,),
                 ).fetchall()
@@ -1561,6 +2074,9 @@ class Database:
                 value = json.dumps(value, ensure_ascii=False)
             updates.append(f"{key} = ?")
             values.append(value)
+            if key == "source":
+                updates.append("source_channel = ?")
+                values.append(value)
             if key in {
                 "selected_title",
                 "selected_subtitle",
@@ -1588,9 +2104,13 @@ class Database:
         updates.append("updated_at = ?")
         values.append(_utc_now())
         values.append(job_id)
+        owner_clause = ""
+        if self.owner_user_id:
+            owner_clause = " AND owner_user_id = ?"
+            values.append(self.owner_user_id)
         with self.connect() as conn:
             conn.execute(
-                f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?{owner_clause}",
                 values,
             )
 
@@ -1792,6 +2312,32 @@ class Database:
         account_name: str,
     ) -> None:
         with self.connect() as conn:
+            job = conn.execute(
+                "SELECT owner_user_id, batch_id FROM jobs WHERE id = ?",
+                (int(job_id),),
+            ).fetchone()
+            if job and job["batch_id"] and str(job["batch_id"]) != batch_id:
+                raise ValueError("文章任务已经属于其他批次")
+            if self.owner_user_id:
+                batch = conn.execute(
+                    "SELECT 1 FROM batches WHERE id = ? AND owner_user_id = ?",
+                    (batch_id, self.owner_user_id),
+                ).fetchone()
+                account = conn.execute(
+                    "SELECT owner_user_id FROM official_accounts WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+                if (
+                    not batch
+                    or not job
+                    or str(job["owner_user_id"] or "") != self.owner_user_id
+                    or (
+                        account
+                        and str(account["owner_user_id"] or "")
+                        != self.owner_user_id
+                    )
+                ):
+                    raise ValueError("批次、任务或公众号不存在")
             conn.execute(
                 """
                 INSERT INTO batch_jobs (batch_id, job_id, account_id, account_name)
@@ -1799,6 +2345,24 @@ class Database:
                 """,
                 (batch_id, job_id, account_id, account_name),
             )
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET batch_id = ?, account_id = ?, account_name_snapshot = ?,
+                    updated_at = ?
+                WHERE id = ? AND (batch_id IS NULL OR batch_id = ?)
+                """,
+                (
+                    batch_id,
+                    account_id,
+                    account_name,
+                    _utc_now(),
+                    int(job_id),
+                    batch_id,
+                ),
+            )
+            if not cursor.rowcount:
+                raise ValueError("文章任务已经属于其他批次")
 
     def update_batch(
         self,
@@ -1838,15 +2402,16 @@ class Database:
                 return None
             batch = dict(row)
             jobs = conn.execute(
-                """
-                SELECT bj.account_id, bj.account_name,
-                       bj.review_status, bj.viewed_at, bj.confirmed_at, j.*
-                FROM batch_jobs bj
-                JOIN jobs j ON j.id = bj.job_id
-                WHERE bj.batch_id = ?
+                f"""
+                SELECT j.*, j.account_name_snapshot AS account_name
+                FROM jobs j
+                WHERE j.batch_id = ?
+                {"AND j.owner_user_id = ?" if self.owner_user_id else ""}
                 ORDER BY j.id
                 """,
-                (batch_id,),
+                (batch_id, self.owner_user_id)
+                if self.owner_user_id
+                else (batch_id,),
             ).fetchall()
             batch["jobs"] = [self._row_to_job(item) for item in jobs]
             return batch
@@ -1880,15 +2445,16 @@ class Database:
                 placeholders = ", ".join("?" for _ in batch_ids)
                 job_rows = conn.execute(
                     f"""
-                    SELECT bj.batch_id AS linked_batch_id,
-                           bj.account_id, bj.account_name,
-                           bj.review_status, bj.viewed_at, bj.confirmed_at, j.*
-                    FROM batch_jobs bj
-                    JOIN jobs j ON j.id = bj.job_id
-                    WHERE bj.batch_id IN ({placeholders})
-                    ORDER BY bj.batch_id, j.id
+                    SELECT j.batch_id AS linked_batch_id, j.*,
+                           j.account_name_snapshot AS account_name
+                    FROM jobs j
+                    WHERE j.batch_id IN ({placeholders})
+                    {"AND j.owner_user_id = ?" if self.owner_user_id else ""}
+                    ORDER BY j.batch_id, j.id
                     """,
-                    batch_ids,
+                    [*batch_ids, self.owner_user_id]
+                    if self.owner_user_id
+                    else batch_ids,
                 ).fetchall()
                 for item in job_rows:
                     linked_batch_id = str(item["linked_batch_id"])
@@ -1936,6 +2502,29 @@ class Database:
             )
             if not cursor.rowcount:
                 raise KeyError(f"任务不属于该批次：{job_id}")
+            job_params: list[Any] = [
+                review_status,
+                viewed_at,
+                confirmed_at,
+                int(job_id),
+                batch_id,
+            ]
+            job_owner_clause = ""
+            if self.owner_user_id:
+                job_owner_clause = " AND owner_user_id = ?"
+                job_params.append(self.owner_user_id)
+            job_cursor = conn.execute(
+                f"""
+                UPDATE jobs
+                SET review_status = ?,
+                    viewed_at = COALESCE(viewed_at, ?),
+                    confirmed_at = ?
+                WHERE id = ? AND batch_id = ?{job_owner_clause}
+                """,
+                job_params,
+            )
+            if not job_cursor.rowcount:
+                raise KeyError(f"任务不属于该批次：{job_id}")
 
     def review_inbox_counts(
         self,
@@ -1950,7 +2539,7 @@ class Database:
         day_start_value, day_end_value = business_day_bounds_utc()
         day_start = day_start_value.isoformat(timespec="microseconds")
         day_end = day_end_value.isoformat(timespec="microseconds")
-        account_clause = " AND bj.account_id = ?" if account_id else ""
+        account_clause = " AND j.account_id = ?" if account_id else ""
         account_params: list[Any] = [str(account_id)] if account_id else []
         search_clause = ""
         search_params: list[Any] = []
@@ -1961,11 +2550,11 @@ class Database:
                     COALESCE(j.selected_title, '') LIKE ?
                     OR COALESCE(j.raw_title, '') LIKE ?
                     OR COALESCE(j.topic, '') LIKE ?
-                    OR COALESCE(j.source, '') LIKE ?
+                    OR COALESCE(j.source_channel, j.source, '') LIKE ?
                     OR COALESCE(j.source_url, '') LIKE ?
                     OR COALESCE(b.topic, '') LIKE ?
                     OR COALESCE(b.source_url, '') LIKE ?
-                    OR COALESCE(bj.account_name, '') LIKE ?
+                    OR COALESCE(j.account_name_snapshot, '') LIKE ?
                 )
             """
             pattern = f"%{search_value}%"
@@ -1983,20 +2572,28 @@ class Database:
             if scope_parts
             else ""
         )
-        owner_clause = " AND b.owner_user_id = ?" if self.owner_user_id else ""
-        owner_params: list[Any] = [self.owner_user_id] if self.owner_user_id else []
+        owner_clause = (
+            " AND b.owner_user_id = ? AND j.owner_user_id = ?"
+            if self.owner_user_id
+            else ""
+        )
+        owner_params: list[Any] = (
+            [self.owner_user_id, self.owner_user_id]
+            if self.owner_user_id
+            else []
+        )
         with self.connect() as conn:
             row = conn.execute(
                 f"""
                 SELECT
                     SUM(CASE
                         WHEN j.status = 'ready_for_review'
-                         AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'
+                         AND COALESCE(j.review_status, 'unviewed') != 'confirmed'
                         THEN 1 ELSE 0 END
                     ) AS review,
                     SUM(CASE
                         WHEN j.status = 'ready_for_review'
-                         AND COALESCE(bj.review_status, 'unviewed') = 'confirmed'
+                         AND COALESCE(j.review_status, 'unviewed') = 'confirmed'
                         THEN 1 ELSE 0 END
                     ) AS ready_for_draft,
                     SUM(CASE
@@ -2012,9 +2609,8 @@ class Database:
                          AND j.updated_at >= ? AND j.updated_at < ?
                         THEN 1 ELSE 0 END
                     ) AS today_completed
-                FROM batch_jobs bj
-                JOIN jobs j ON j.id = bj.job_id
-                JOIN batches b ON b.id = bj.batch_id
+                FROM jobs j
+                JOIN batches b ON b.id = j.batch_id
                 WHERE b.archived_at IS NULL
                 {owner_clause}
                 {account_clause}
@@ -2066,11 +2662,11 @@ class Database:
         clauses = {
             "review": (
                 "j.status = 'ready_for_review' "
-                "AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'"
+                "AND COALESCE(j.review_status, 'unviewed') != 'confirmed'"
             ),
             "ready_for_draft": (
                 "j.status = 'ready_for_review' "
-                "AND COALESCE(bj.review_status, 'unviewed') = 'confirmed'"
+                "AND COALESCE(j.review_status, 'unviewed') = 'confirmed'"
             ),
             "write_failed": "j.status = 'failed' AND j.step = 'inject'",
             "generation_failed": "j.status = 'failed' AND j.step != 'inject'",
@@ -2086,7 +2682,7 @@ class Database:
             filter_params.extend((day_start, day_end))
         account_clause = ""
         if account_id:
-            account_clause = " AND bj.account_id = ?"
+            account_clause = " AND j.account_id = ?"
             filter_params.append(str(account_id))
         search_clause = ""
         search_value = str(search or "").strip()
@@ -2096,11 +2692,11 @@ class Database:
                     COALESCE(j.selected_title, '') LIKE ?
                     OR COALESCE(j.raw_title, '') LIKE ?
                     OR COALESCE(j.topic, '') LIKE ?
-                    OR COALESCE(j.source, '') LIKE ?
+                    OR COALESCE(j.source_channel, j.source, '') LIKE ?
                     OR COALESCE(j.source_url, '') LIKE ?
                     OR COALESCE(b.topic, '') LIKE ?
                     OR COALESCE(b.source_url, '') LIKE ?
-                    OR COALESCE(bj.account_name, '') LIKE ?
+                    OR COALESCE(j.account_name_snapshot, '') LIKE ?
                 )
             """
             pattern = f"%{search_value}%"
@@ -2117,8 +2713,16 @@ class Database:
             if scope_parts
             else ""
         )
-        owner_clause = " AND b.owner_user_id = ?" if self.owner_user_id else ""
-        owner_params: list[Any] = [self.owner_user_id] if self.owner_user_id else []
+        owner_clause = (
+            " AND b.owner_user_id = ? AND j.owner_user_id = ?"
+            if self.owner_user_id
+            else ""
+        )
+        owner_params: list[Any] = (
+            [self.owner_user_id, self.owner_user_id]
+            if self.owner_user_id
+            else []
+        )
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
@@ -2128,11 +2732,7 @@ class Database:
                     b.topic AS batch_topic,
                     b.source_url AS batch_source_url,
                     b.source_mode AS batch_source_mode,
-                    bj.account_id,
-                    bj.account_name,
-                    bj.review_status,
-                    bj.viewed_at,
-                    bj.confirmed_at,
+                    j.account_name_snapshot AS account_name,
                     COALESCE(oa.review_priority, 0) AS review_priority,
                     er.id AS latest_review_id,
                     er.status AS latest_review_status,
@@ -2142,16 +2742,15 @@ class Database:
                     CASE
                         WHEN j.created_at >= ? AND j.created_at < ? THEN 1
                         WHEN j.status = 'ready_for_review'
-                         AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'
+                         AND COALESCE(j.review_status, 'unviewed') != 'confirmed'
                          AND j.created_at < ? THEN 2
                         WHEN substr(COALESCE(j.scheduled_at, ''), 1, 10) = ? THEN 3
                         WHEN COALESCE(oa.review_priority, 0) > 0 THEN 4
                         ELSE 5
                     END AS priority_bucket
-                FROM batch_jobs bj
-                JOIN jobs j ON j.id = bj.job_id
-                JOIN batches b ON b.id = bj.batch_id
-                LEFT JOIN official_accounts oa ON oa.id = bj.account_id
+                FROM jobs j
+                JOIN batches b ON b.id = j.batch_id
+                LEFT JOIN official_accounts oa ON oa.id = j.account_id
                 LEFT JOIN editorial_reviews er ON er.id = (
                     SELECT er2.id
                     FROM editorial_reviews er2
@@ -2170,7 +2769,7 @@ class Database:
                     COALESCE(oa.review_priority, 0) DESC,
                     CASE
                         WHEN j.status = 'ready_for_review'
-                         AND COALESCE(bj.review_status, 'unviewed') != 'confirmed'
+                         AND COALESCE(j.review_status, 'unviewed') != 'confirmed'
                          AND j.created_at < ?
                         THEN j.created_at
                     END ASC,
@@ -2196,13 +2795,20 @@ class Database:
         """Return whether any non-archived batch still has active article work."""
 
         with self.connect() as conn:
+            owner_clause = ""
+            params: list[Any] = []
+            if self.owner_user_id:
+                owner_clause = (
+                    " AND b.owner_user_id = ? AND j.owner_user_id = ?"
+                )
+                params.extend((self.owner_user_id, self.owner_user_id))
             row = conn.execute(
-                """
+                f"""
                 SELECT 1
-                FROM batch_jobs bj
-                JOIN jobs j ON j.id = bj.job_id
-                JOIN batches b ON b.id = bj.batch_id
+                FROM jobs j
+                JOIN batches b ON b.id = j.batch_id
                 WHERE b.archived_at IS NULL
+                  {owner_clause}
                   AND j.status IN (
                       'pending',
                       'ingesting',
@@ -2210,9 +2816,10 @@ class Database:
                       'title_optimizing',
                       'rendering',
                       'injecting'
-                  )
+                )
                 LIMIT 1
-                """
+                """,
+                params,
             ).fetchone()
         return row is not None
 
@@ -3109,7 +3716,26 @@ class Database:
 
     def get_setting(self, key: str) -> str | None:
         if self.owner_user_id and _is_customer_setting(key):
-            return self.get_user_setting(key)
+            scoped_value = self.get_user_setting(key)
+            if scoped_value is not None:
+                return scoped_value
+            # One compatibility cycle: installations upgraded before the
+            # user-settings split may still have only the historical value.
+            # Only the explicitly claimed legacy owner may see that row; other
+            # users must never inherit the same customer setting.
+            with self.connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT setting.value
+                    FROM app_settings AS setting
+                    JOIN app_settings AS claim
+                      ON claim.key = 'migration.customer_data_owner.v1'
+                     AND claim.value = ?
+                    WHERE setting.key = ?
+                    """,
+                    (self.owner_user_id, key),
+                ).fetchone()
+            return str(row["value"]) if row else None
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT value FROM app_settings WHERE key = ?", (key,)
@@ -4547,6 +5173,18 @@ class Database:
 
     def delete_creation_plan(self, plan_id: str) -> None:
         with self.connect() as conn:
+            clear_sql = (
+                """
+                UPDATE official_accounts
+                SET default_creation_plan_id = NULL, updated_at = ?
+                WHERE default_creation_plan_id = ?
+                """
+            )
+            clear_params: list[Any] = [_utc_now(), plan_id]
+            if self.owner_user_id:
+                clear_sql += " AND owner_user_id = ?"
+                clear_params.append(self.owner_user_id)
+            conn.execute(clear_sql, clear_params)
             sql = "DELETE FROM creation_plans WHERE id = ?"
             params: list[Any] = [plan_id]
             if self.owner_user_id:
@@ -4561,15 +5199,26 @@ class Database:
             clauses: list[str] = []
             params: list[Any] = []
             if plan_id is not None:
-                clauses.append("d.creation_plan_id = ?")
+                clauses.append(
+                    "COALESCE(a.default_creation_plan_id, d.creation_plan_id) = ?"
+                )
                 params.append(plan_id)
             if self.owner_user_id:
                 clauses.append("a.owner_user_id = ?")
                 params.append(self.owner_user_id)
+            clauses.append(
+                "COALESCE(a.default_creation_plan_id, d.creation_plan_id) IS NOT NULL"
+            )
             sql = """
-                SELECT d.*
-                FROM account_creation_plan_defaults d
-                JOIN official_accounts a ON a.id = d.account_id
+                SELECT a.id AS account_id,
+                       COALESCE(
+                           a.default_creation_plan_id, d.creation_plan_id
+                       ) AS creation_plan_id,
+                       COALESCE(d.created_at, a.created_at) AS created_at,
+                       COALESCE(d.updated_at, a.updated_at) AS updated_at
+                FROM official_accounts a
+                LEFT JOIN account_creation_plan_defaults d
+                  ON d.account_id = a.id
             """
             if clauses:
                 sql += " WHERE " + " AND ".join(clauses)
@@ -4581,10 +5230,19 @@ class Database:
     ) -> dict[str, Any] | None:
         with self.connect() as conn:
             sql = """
-                SELECT d.*
-                FROM account_creation_plan_defaults d
-                JOIN official_accounts a ON a.id = d.account_id
-                WHERE d.account_id = ?
+                SELECT a.id AS account_id,
+                       COALESCE(
+                           a.default_creation_plan_id, d.creation_plan_id
+                       ) AS creation_plan_id,
+                       COALESCE(d.created_at, a.created_at) AS created_at,
+                       COALESCE(d.updated_at, a.updated_at) AS updated_at
+                FROM official_accounts a
+                LEFT JOIN account_creation_plan_defaults d
+                  ON d.account_id = a.id
+                WHERE a.id = ?
+                  AND COALESCE(
+                      a.default_creation_plan_id, d.creation_plan_id
+                  ) IS NOT NULL
             """
             params: list[Any] = [account_id]
             if self.owner_user_id:
@@ -4603,6 +5261,18 @@ class Database:
                 raise ValueError("创作方案不存在")
         now = _utc_now()
         with self.connect() as conn:
+            account_sql = """
+                UPDATE official_accounts
+                SET default_creation_plan_id = ?, updated_at = ?
+                WHERE id = ?
+            """
+            account_params: list[Any] = [creation_plan_id, now, account_id]
+            if self.owner_user_id:
+                account_sql += " AND owner_user_id = ?"
+                account_params.append(self.owner_user_id)
+            cursor = conn.execute(account_sql, account_params)
+            if not cursor.rowcount:
+                raise ValueError("公众号不存在")
             conn.execute(
                 """
                 INSERT INTO account_creation_plan_defaults (
@@ -4900,10 +5570,17 @@ class Database:
         if self.owner_user_id and not self.get_editorial_review_profile(profile_id):
             return
         with self.connect() as conn:
-            conn.execute(
-                "DELETE FROM editorial_review_profiles WHERE id = ?",
-                (profile_id,),
-            )
+            account_sql = """
+                UPDATE official_accounts
+                SET default_editorial_review_profile_id = NULL,
+                    editorial_review_config_json = '{}', updated_at = ?
+                WHERE default_editorial_review_profile_id = ?
+            """
+            account_params: list[Any] = [_utc_now(), profile_id]
+            if self.owner_user_id:
+                account_sql += " AND owner_user_id = ?"
+                account_params.append(self.owner_user_id)
+            conn.execute(account_sql, account_params)
             conn.execute(
                 """
                 UPDATE account_editorial_review_defaults
@@ -4912,18 +5589,42 @@ class Database:
                 """,
                 (_utc_now(), profile_id),
             )
+            conn.execute(
+                "DELETE FROM editorial_review_profiles WHERE id = ?",
+                (profile_id,),
+            )
 
     def get_account_editorial_review_default(
         self, account_id: str
     ) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM account_editorial_review_defaults
-                WHERE account_id = ?
-                """,
-                (account_id,),
-            ).fetchone()
+            sql = """
+                SELECT a.id AS account_id,
+                       COALESCE(
+                           a.default_editorial_review_profile_id, d.profile_id
+                       ) AS profile_id,
+                       COALESCE(
+                           NULLIF(a.editorial_review_config_json, ''),
+                           d.config_json,
+                           '{}'
+                       ) AS config_json,
+                       COALESCE(d.created_at, a.created_at) AS created_at,
+                       COALESCE(d.updated_at, a.updated_at) AS updated_at
+                FROM official_accounts a
+                LEFT JOIN account_editorial_review_defaults d
+                  ON d.account_id = a.id
+                WHERE a.id = ?
+                  AND (
+                      a.default_editorial_review_profile_id IS NOT NULL
+                      OR d.account_id IS NOT NULL
+                      OR COALESCE(a.editorial_review_config_json, '{}') <> '{}'
+                  )
+            """
+            params: list[Any] = [account_id]
+            if self.owner_user_id:
+                sql += " AND a.owner_user_id = ?"
+                params.append(self.owner_user_id)
+            row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def set_account_editorial_review_default(
@@ -4933,8 +5634,32 @@ class Database:
         profile_id: str | None,
         config: dict[str, Any] | None = None,
     ) -> None:
+        if self.owner_user_id:
+            if not self.get_official_account(account_id):
+                raise ValueError("公众号不存在")
+            if profile_id and not self.get_editorial_review_profile(profile_id):
+                raise ValueError("评审方案不存在")
         now = _utc_now()
+        config_json = json.dumps(config or {}, ensure_ascii=False)
         with self.connect() as conn:
+            account_sql = """
+                UPDATE official_accounts
+                SET default_editorial_review_profile_id = ?,
+                    editorial_review_config_json = ?, updated_at = ?
+                WHERE id = ?
+            """
+            account_params: list[Any] = [
+                profile_id or None,
+                config_json,
+                now,
+                account_id,
+            ]
+            if self.owner_user_id:
+                account_sql += " AND owner_user_id = ?"
+                account_params.append(self.owner_user_id)
+            cursor = conn.execute(account_sql, account_params)
+            if not cursor.rowcount:
+                raise ValueError("公众号不存在")
             conn.execute(
                 """
                 INSERT INTO account_editorial_review_defaults (
@@ -4948,7 +5673,7 @@ class Database:
                 (
                     account_id,
                     profile_id or None,
-                    json.dumps(config or {}, ensure_ascii=False),
+                    config_json,
                     now,
                     now,
                 ),
@@ -5882,6 +6607,477 @@ class Database:
                 f"UPDATE followed_articles SET {', '.join(updates)} WHERE id = ?", values
             )
 
+    # Shadow billing -----------------------------------------------------
+
+    def create_usage_operation(self, operation: dict[str, Any]) -> str:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            raise ValueError("用量操作必须绑定当前登录账号")
+        supplied_owner = str(operation.get("owner_user_id") or owner_user_id)
+        if supplied_owner != owner_user_id:
+            raise ValueError("用量操作不属于当前登录账号")
+        operation_id = str(operation.get("id") or uuid.uuid4().hex)
+        idempotency_key = str(operation.get("idempotency_key") or operation_id)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO usage_operations (
+                    id, owner_user_id, scene, source_channel, subject_type,
+                    subject_id, idempotency_key, status, mode, job_id,
+                    estimated_points, reserved_points, charged_points,
+                    reservation_expires_at, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, ?, NULL)
+                ON CONFLICT(owner_user_id, idempotency_key) DO NOTHING
+                """,
+                (
+                    operation_id,
+                    owner_user_id,
+                    str(operation.get("scene") or "unknown"),
+                    str(operation.get("source_channel") or "system"),
+                    str(operation.get("subject_type") or "operation"),
+                    str(operation.get("subject_id") or ""),
+                    idempotency_key,
+                    str(operation.get("status") or "running"),
+                    str(operation.get("mode") or "shadow"),
+                    operation.get("job_id"),
+                    str(operation.get("created_at") or _utc_now()),
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id FROM usage_operations
+                WHERE owner_user_id = ? AND idempotency_key = ?
+                """,
+                (owner_user_id, idempotency_key),
+            ).fetchone()
+        if not row:
+            raise RuntimeError("影子用量操作创建失败")
+        return str(row["id"])
+
+    def finish_usage_operation(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        estimated_points: int,
+        charged_points: int,
+        completed_at: str,
+    ) -> None:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            raise ValueError("用量操作必须绑定当前登录账号")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE usage_operations
+                SET status = ?, estimated_points = ?, charged_points = ?,
+                    completed_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (
+                    str(status),
+                    max(0, int(estimated_points)),
+                    0 if str(status) else max(0, int(charged_points)),
+                    str(completed_at),
+                    str(operation_id),
+                    owner_user_id,
+                ),
+            )
+
+    def insert_ai_usage_event(self, event: dict[str, Any]) -> None:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            raise ValueError("AI 用量必须绑定当前登录账号")
+        if str(event.get("owner_user_id") or owner_user_id) != owner_user_id:
+            raise ValueError("AI 用量不属于当前登录账号")
+        operation_id = str(event.get("operation_id") or "")
+        with self.connect() as conn:
+            owned_operation = conn.execute(
+                """
+                SELECT 1 FROM usage_operations
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (operation_id, owner_user_id),
+            ).fetchone()
+            if not owned_operation:
+                raise ValueError("用量操作不存在或不属于当前登录账号")
+            conn.execute(
+                """
+                INSERT INTO ai_usage_events (
+                    id, owner_user_id, operation_id, job_id, model_id,
+                    provider, provider_model, funding_source, modality,
+                    input_tokens, cached_input_tokens, output_tokens,
+                    reasoning_tokens, total_tokens, image_count, fixed_units,
+                    usage_source, provider_request_id, provider_response_id,
+                    provider_cost_micro_cny, retail_cost_micro_cny,
+                    estimated_points, pricing_status, price_snapshot_json,
+                    contributes_to_result, billable, status, error_code, created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    str(event.get("id") or uuid.uuid4().hex),
+                    owner_user_id,
+                    operation_id,
+                    event.get("job_id"),
+                    str(event.get("model_id") or ""),
+                    str(event.get("provider") or "unknown"),
+                    str(event.get("provider_model") or ""),
+                    str(event.get("funding_source") or "platform"),
+                    str(event.get("modality") or "text"),
+                    max(0, int(event.get("input_tokens") or 0)),
+                    max(0, int(event.get("cached_input_tokens") or 0)),
+                    max(0, int(event.get("output_tokens") or 0)),
+                    max(0, int(event.get("reasoning_tokens") or 0)),
+                    max(0, int(event.get("total_tokens") or 0)),
+                    max(0, int(event.get("image_count") or 0)),
+                    max(0, int(event.get("fixed_units") or 0)),
+                    str(event.get("usage_source") or "unknown"),
+                    str(event.get("provider_request_id") or ""),
+                    str(event.get("provider_response_id") or ""),
+                    max(0, int(event.get("provider_cost_micro_cny") or 0)),
+                    max(0, int(event.get("retail_cost_micro_cny") or 0)),
+                    max(0, int(event.get("estimated_points") or 0)),
+                    str(event.get("pricing_status") or "price_missing"),
+                    str(event.get("price_snapshot_json") or "{}"),
+                    1 if event.get("contributes_to_result", True) else 0,
+                    1 if event.get("billable", False) else 0,
+                    str(event.get("status") or "unknown"),
+                    str(event.get("error_code") or ""),
+                    str(event.get("created_at") or _utc_now()),
+                ),
+            )
+
+    def usage_operation_totals(self, operation_id: str) -> dict[str, int]:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            return {}
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS event_count,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(image_count), 0) AS image_count,
+                       COALESCE(SUM(CASE WHEN contributes_to_result = 1
+                           THEN estimated_points ELSE 0 END), 0) AS estimated_points
+                FROM ai_usage_events
+                WHERE operation_id = ? AND owner_user_id = ?
+                """,
+                (str(operation_id), owner_user_id),
+            ).fetchone()
+        return {key: int(value or 0) for key, value in dict(row or {}).items()}
+
+    def get_effective_model_price_card(
+        self,
+        *,
+        provider: str,
+        provider_model: str,
+        modality: str,
+        at: str | None = None,
+    ) -> dict[str, Any] | None:
+        effective_at = str(at or _utc_now())
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM model_price_cards
+                WHERE enabled = 1
+                  AND provider = ?
+                  AND provider_model IN (?, '*')
+                  AND modality = ?
+                  AND effective_from <= ?
+                  AND (effective_to IS NULL OR effective_to > ?)
+                ORDER BY CASE WHEN provider_model = ? THEN 0 ELSE 1 END,
+                         effective_from DESC
+                LIMIT 1
+                """,
+                (
+                    str(provider),
+                    str(provider_model),
+                    str(modality),
+                    effective_at,
+                    effective_at,
+                    str(provider_model),
+                ),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_model_price_card(self, card: dict[str, Any]) -> str:
+        if self.owner_user_id:
+            raise ValueError("模型价格卡只能由平台管理员维护")
+        card_id = str(card.get("id") or uuid.uuid4().hex)
+        now = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_price_cards (
+                    id, provider, provider_model, modality,
+                    input_micro_cny_per_million,
+                    cached_input_micro_cny_per_million,
+                    output_micro_cny_per_million, image_micro_cny_each,
+                    fixed_request_micro_cny, markup_basis_points, points_per_cny,
+                    effective_from, effective_to, enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    provider = excluded.provider,
+                    provider_model = excluded.provider_model,
+                    modality = excluded.modality,
+                    input_micro_cny_per_million = excluded.input_micro_cny_per_million,
+                    cached_input_micro_cny_per_million = excluded.cached_input_micro_cny_per_million,
+                    output_micro_cny_per_million = excluded.output_micro_cny_per_million,
+                    image_micro_cny_each = excluded.image_micro_cny_each,
+                    fixed_request_micro_cny = excluded.fixed_request_micro_cny,
+                    markup_basis_points = excluded.markup_basis_points,
+                    points_per_cny = excluded.points_per_cny,
+                    effective_from = excluded.effective_from,
+                    effective_to = excluded.effective_to,
+                    enabled = excluded.enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    card_id,
+                    str(card.get("provider") or "unknown"),
+                    str(card.get("provider_model") or "*"),
+                    str(card.get("modality") or "text"),
+                    max(0, int(card.get("input_micro_cny_per_million") or 0)),
+                    max(
+                        0,
+                        int(card.get("cached_input_micro_cny_per_million") or 0),
+                    ),
+                    max(0, int(card.get("output_micro_cny_per_million") or 0)),
+                    max(0, int(card.get("image_micro_cny_each") or 0)),
+                    max(0, int(card.get("fixed_request_micro_cny") or 0)),
+                    max(0, int(card.get("markup_basis_points") or 10_000)),
+                    max(0, int(card.get("points_per_cny") or 100)),
+                    str(card.get("effective_from") or now),
+                    card.get("effective_to") or None,
+                    1 if card.get("enabled", True) else 0,
+                    str(card.get("created_at") or now),
+                    now,
+                ),
+            )
+        return card_id
+
+    def list_model_price_cards(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM model_price_cards"
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY provider, provider_model, modality, effective_from DESC"
+        with self.connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [dict(row) for row in rows]
+
+    def billing_usage_summary(self) -> dict[str, int]:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            return {}
+        since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(
+            timespec="microseconds"
+        )
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(DISTINCT o.id) AS operations,
+                       COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(e.cached_input_tokens), 0) AS cached_input_tokens,
+                       COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(e.image_count), 0) AS image_count,
+                       COALESCE(SUM(CASE WHEN e.contributes_to_result = 1
+                           THEN e.estimated_points ELSE 0 END), 0) AS estimated_points
+                FROM usage_operations AS o
+                LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
+                WHERE o.owner_user_id = ? AND o.created_at >= ?
+                """,
+                (owner_user_id, since),
+            ).fetchone()
+        return {key: int(value or 0) for key, value in dict(row or {}).items()}
+
+    def list_usage_operations(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT o.id, o.scene, o.source_channel, o.subject_type,
+                       o.subject_id, o.status, o.mode, o.job_id,
+                       o.estimated_points, o.charged_points,
+                       o.created_at, o.completed_at,
+                       COUNT(e.id) AS event_count,
+                       COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(e.cached_input_tokens), 0) AS cached_input_tokens,
+                       COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(e.image_count), 0) AS image_count
+                FROM usage_operations AS o
+                LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
+                WHERE o.owner_user_id = ?
+                GROUP BY o.id, o.scene, o.source_channel, o.subject_type,
+                         o.subject_id, o.status, o.mode, o.job_id,
+                         o.estimated_points, o.charged_points,
+                         o.created_at, o.completed_at
+                ORDER BY o.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (owner_user_id, max(1, min(int(limit), 500)), max(0, int(offset))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def admin_billing_usage_summary(self) -> dict[str, int]:
+        if self.owner_user_id:
+            raise ValueError("平台成本汇总仅管理员可读")
+        since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(
+            timespec="microseconds"
+        )
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(DISTINCT operation_id) AS operations,
+                       COUNT(*) AS events,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(image_count), 0) AS image_count,
+                       COALESCE(SUM(provider_cost_micro_cny), 0) AS provider_cost_micro_cny,
+                       COALESCE(SUM(retail_cost_micro_cny), 0) AS retail_cost_micro_cny,
+                       COALESCE(SUM(estimated_points), 0) AS estimated_points,
+                       COALESCE(SUM(CASE WHEN pricing_status = 'price_missing'
+                           THEN 1 ELSE 0 END), 0) AS price_missing_events
+                FROM ai_usage_events
+                WHERE created_at >= ?
+                """,
+                (since,),
+            ).fetchone()
+        return {key: int(value or 0) for key, value in dict(row or {}).items()}
+
+    def admin_list_ai_usage_events(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        if self.owner_user_id:
+            raise ValueError("平台成本明细仅管理员可读")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, owner_user_id, operation_id, job_id, model_id,
+                       provider, provider_model, funding_source, modality,
+                       input_tokens, cached_input_tokens, output_tokens,
+                       reasoning_tokens, total_tokens, image_count, fixed_units,
+                       usage_source, provider_cost_micro_cny,
+                       retail_cost_micro_cny, estimated_points, pricing_status,
+                       contributes_to_result, billable, status, error_code, created_at
+                FROM ai_usage_events
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (max(1, min(int(limit), 500)), max(0, int(offset))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def grant_credit_points(
+        self,
+        *,
+        points: int,
+        source_type: str,
+        source_id: str = "",
+        expires_at: str | None = None,
+        actor_user_id: str = "",
+        reason: str = "",
+    ) -> str:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        amount = int(points)
+        if not owner_user_id:
+            raise ValueError("积分必须绑定当前登录账号")
+        if amount <= 0:
+            raise ValueError("发放积分必须大于 0")
+        bucket_id = uuid.uuid4().hex
+        now = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO credit_buckets (
+                    id, owner_user_id, source_type, source_id,
+                    granted_points, remaining_points, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    bucket_id,
+                    owner_user_id,
+                    str(source_type),
+                    str(source_id or ""),
+                    amount,
+                    amount,
+                    expires_at,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO credit_ledger (
+                    id, owner_user_id, bucket_id, operation_id,
+                    amount_points, event_type, actor_user_id, reason, created_at
+                ) VALUES (?, ?, ?, NULL, ?, 'grant', ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    owner_user_id,
+                    bucket_id,
+                    amount,
+                    str(actor_user_id or ""),
+                    str(reason or ""),
+                    now,
+                ),
+            )
+        return bucket_id
+
+    def credit_wallet_summary(self) -> dict[str, int]:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            return {"available": 0}
+        now = _utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(SUM(remaining_points), 0) AS available
+                FROM credit_buckets
+                WHERE owner_user_id = ?
+                  AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (owner_user_id, now),
+            ).fetchone()
+        return {"available": int((row or {})["available"] or 0)}
+
+    def list_credit_ledger(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, bucket_id, operation_id, amount_points,
+                       event_type, reason, created_at
+                FROM credit_ledger
+                WHERE owner_user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (owner_user_id, max(1, min(int(limit), 500)), max(0, int(offset))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     @staticmethod
     def _topic_source_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
@@ -5905,6 +7101,13 @@ class Database:
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
+        source_channel = str(
+            data.get(JOB_SOURCE_OF_TRUTH) or data.get("source") or "manual"
+        )
+        data[JOB_SOURCE_OF_TRUTH] = source_channel
+        # Public contracts keep the historical key during the compatibility
+        # window, but its value is projected from the canonical field.
+        data["source"] = source_channel
 
         def loads(key: str, default: Any) -> Any:
             raw = data.get(key)

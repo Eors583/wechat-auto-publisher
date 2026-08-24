@@ -1,6 +1,6 @@
 # WeChat Auto Publisher — AI development handoff and code map
 
-Last verified against the repository on **2026-08-20**. This document describes
+Last verified against the repository on **2026-08-24**. This document describes
 the current source tree; code is the final authority. When a symbol moves, update
 this file in the same change.
 
@@ -85,6 +85,9 @@ by NiceGUI from `app/ui/`. Do not edit bytecode or build a second frontend under
 - A customer-scoped handle is created with `Database.for_user(user_id)` or
   `Database.set_owner_user(user_id)`. API requests use `customer_data_scope`.
 - `AppState.set_current_user` scopes its database handle to the logged-in user.
+- Legacy `config.yaml` accounts are imported only through the explicit default
+  administrator owner scope. Secondary administrators may manage platform
+  settings, but cannot see, overwrite or re-claim that administrator's account.
 - Customer data includes accounts, batches/jobs, prompts, plans, review data,
   followed content, topic data, per-user Feishu integrations and UI preferences.
 - `ai_models.owner_user_id == ''` means a platform/official model; a non-empty
@@ -97,6 +100,7 @@ by NiceGUI from `app/ui/`. Do not edit bytecode or build a second frontend under
   never source-controlled data.
 
 Regression authority: `tests/test_customer_data_isolation.py`,
+`tests/test_admin_owner_scope.py`,
 `tests/test_auth_and_managed_models.py`, `tests/test_postgres_only_runtime.py`.
 
 ### 3.2 Business logic boundaries
@@ -144,8 +148,10 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `app/local_model_cors_bridge.py` | Loopback-only 11798 compatibility bridge and `/setup`; exact Origin/Host/routes, local key injection, sanitized model responses and browser-triggered local WeChat extraction. |
 | `app/local_wechat_extractor.py` | Standard-library WeChat article URL validation, user-network HTML fetching, `js_content` extraction and verification/error-page rejection for the standalone bridge. |
 | `app/config.py` | Loads YAML + environment substitutions; computes `_root`, `_data_dir`, `_db_target`; `database_target` enforces PostgreSQL runtime. |
-| `app/db.py` | Schema initialization/migrations, user scoping and every CRUD method. Add persistence here before writing service logic. Large hotspot: do not issue raw customer-table SQL elsewhere. |
+| `app/db.py` | Versioned schema initialization/migrations, user scoping and every CRUD method. Add persistence here before writing service logic. Large hotspot: do not issue raw customer-table SQL elsewhere. |
 | `app/db_backend.py` | PostgreSQL compatibility layer, schema SQL conversion, cursor/connection wrappers and integrity-error mapping. |
+| `app/schema_migrations.py` | Ordered migration manifest, stable checksums and migration-history validation. |
+| `app/db_audit.py` | Read-only aggregate integrity audit for orphan/owner/status/index/schema findings; never returns stored values or credentials. |
 | `app/accounts.py` | Account persistence, legacy config import, public account projection, account→model resolution, account layout/prompt bindings and selection application. |
 | `app/prompt_templates.py` | Article/image prompt template validation, usage protection, account-specific prompt resolution. There is no separate “disabled-word” domain here. |
 | `app/editorial_review.py` | Normalizes AI review configuration and exposes selectable review options. Domain execution is in `services/editorial_reviews.py`. |
@@ -385,30 +391,35 @@ rg -n "@(app|router)\.(get|post|put|patch|delete)" app/api
 ## 5. Database map
 
 `app/db.py` initializes/migrates the schema. Runtime is PostgreSQL-only; SQLite
-is permitted solely when tests explicitly opt in.
+is permitted solely when tests explicitly opt in. The database currently has 45
+tables: 37 core business/runtime tables, 7 additive shadow-billing tables, and
+`schema_migrations`. Applied versions
+are checksum-validated at startup under the existing PostgreSQL advisory lock;
+non-transactional index work uses an autocommit connection and the same lock.
 
 | Table | Owner/scope | Purpose |
 |---|---|---|
 | `users`, `user_sessions` | platform | Login identities and hashed opaque sessions |
 | `user_settings` | user | Cross-device UI/config preferences and private service settings |
-| `app_settings` | mixed via key/scope helpers | Platform and legacy settings; prefer scoped helpers |
+| `app_settings` | platform/legacy | Platform settings and one-cycle legacy compatibility; customer writes go only to `user_settings`, and legacy customer reads require the explicit historical-owner marker |
 | `ai_models` | platform when owner empty; otherwise user | Official and custom text/image/local model definitions |
 | `local_model_requests` | user/device | Browser-fallback or Companion model jobs, attempt/nonce, lease, deadline and idempotent terminal result |
 | `local_model_agents` | user | Paired Companion identity, Agent Token hash, heartbeat/Cockpit status and revocation |
 | `local_agent_pairings` | temporary→user | Hashed one-time device/user codes, expiry, lockout, approval and single consumption |
-| `official_accounts` | user | WeChat AppID/encrypted AppSecret, model, layout and creation-plan bindings |
+| `official_accounts` | user | WeChat AppID/encrypted AppSecret, model, layout and canonical default creation/review bindings |
 | `prompt_templates` | user | Article/image prompt templates |
 | `creation_plans` | user | Combined writing/layout/image/review presets |
-| `account_creation_plan_defaults` | user | Default plan per account |
+| `account_creation_plan_defaults` | user | One-release compatibility mirror of the canonical account default plan; dual-written, not yet dropped |
 | `creation_plan_account_templates` | user | Account-specific template snapshots within plans |
-| `jobs` | user | Article content, pipeline status, titles, render/draft metadata and errors |
-| `batches`, `batch_jobs` | user | Multi-account batch and job membership/review state |
+| `jobs` | user | Article content, pipeline status, canonical batch/account snapshot/review state, titles, render/draft metadata and errors |
+| `batches` | user | Multi-account batch/request/notification envelope |
+| `batch_jobs` | user | One-release compatibility mirror of `jobs.batch_id/account_id/review_*`; dual-written, not yet dropped |
 | `job_versions` | user | Restorable article snapshots |
 | `job_attempts` | user | Stage attempt/heartbeat/retry/lease records |
 | `draft_deliveries` | user | Idempotency and reconciliation records for draft writes |
 | `wechat_connection_health` | user/account | Cached read/write capability and last health result |
 | `editorial_review_profiles` | user | Structured AI review schemes |
-| `account_editorial_review_defaults` | user | Default review profile per account |
+| `account_editorial_review_defaults` | user | One-release compatibility mirror of canonical account review profile/config; dual-written, not yet dropped |
 | `editorial_reviews` | user | Review state, result, progress and errors |
 | `editorial_review_applications` | user | Rewrite candidates and source/candidate choice state |
 | `topic_sources`, `topic_items` | user | Persisted source definitions and fetched topics |
@@ -417,17 +428,26 @@ is permitted solely when tests explicitly opt in.
 | `feishu_integration_accounts` | user/integration/account | Allowed owned accounts and the integration's single default account |
 | `feishu_sessions` | user/integration/chat | Conversation, batch/job and context isolated by `(integration_id, chat_id)` |
 | `feishu_processed_events` | user/integration/event | Event deduplication isolated by `(integration_id, event_id)` |
-| `bot_sessions`, `bot_contexts`, `processed_events` | legacy user/event | Compatibility-only Feishu state; new multi-user Webhook traffic must not use these tables |
+| `bot_sessions`, `bot_contexts` | legacy Feishu | Compatibility-only Feishu session/context; new multi-user Webhook traffic must not use these tables |
+| `processed_events` | shared compatibility | Generic cross-entry event idempotency still used by the WeChat command-agent webhook; it is not part of new Feishu Webhook storage and must not be retired until WeChat idempotency moves to an owner/account-scoped table |
+| `schema_migrations` | platform/schema | Ordered version/name/checksum/application-time history; never stores customer data |
+| `billing_plans`, `model_price_cards` | platform/billing | Shadow-mode plan and model-price snapshots; no online payment capture |
+| `user_subscriptions`, `credit_buckets`, `credit_ledger` | user/billing | Subscription periods and append-only points grant/ledger data |
+| `usage_operations`, `ai_usage_events` | user/billing | Idempotent operation envelope and sanitized provider usage/cost events; created by migration `20260824_0004` |
 | `ads` | user/config-compatible | Advertisement pool and use tracking |
 | `token_cache` | ephemeral/account-compatible | WeChat access-token cache; excluded from legacy business migration |
 
 When adding a column/table:
 
-1. Add creation SQL and idempotent migration in `Database._init_schema`.
+1. Add a new immutable migration entry in `app/schema_migrations.py` and its
+   implementation in the versioned migration runner; never edit an already
+   applied migration signature.
 2. Add `owner_user_id` and owner index for customer data.
 3. Apply `_owner_clause` / `_assert_write_owner` in every read/write method.
-4. Update PostgreSQL migration compatibility in `db_backend.py` if needed.
-5. Add isolation and migration tests; update `scripts/migrate_sqlite_to_postgres.py`
+4. Use transaction-safe DDL by default. PostgreSQL `CONCURRENTLY` operations must
+   run through the locked autocommit migration path.
+5. Update PostgreSQL SQL compatibility in `db_backend.py` only if needed.
+6. Add isolation and real-PostgreSQL migration tests; update `scripts/migrate_sqlite_to_postgres.py`
    if the table is business data.
 
 ## 6. Feature-to-code reverse index
@@ -552,6 +572,8 @@ Run the smallest affected group first. The suite is organized as follows.
 - `test_customer_data_isolation.py`: per-login ownership and request scoping.
 - `test_auth_and_managed_models.py`, `test_auth_persistence.py`: authentication,
   official/custom models and persistent sessions.
+- `test_admin_owner_scope.py`: default-owner legacy import, secondary-admin
+  reload safety and account read/write/delete isolation.
 - `test_configuration_service.py`, `test_accounts_panel.py`,
   `test_optional_account_model.py`: safe account/model/configuration behavior.
 - `test_creation_plans.py`, `test_prompt_templates.py`,
@@ -781,6 +803,8 @@ unless noted.
 | `app/config.py` | YAML/environment loading and runtime paths. |
 | `app/db.py` | Schema, migrations, scoped persistence. |
 | `app/db_backend.py` | PostgreSQL adapter/SQL compatibility. |
+| `app/schema_migrations.py` | Versioned schema manifest/checksums. |
+| `app/db_audit.py` | Credential-safe aggregate schema/data audit. |
 | `app/editorial_review.py` | Review configuration normalization/options. |
 | `app/inline_images.py` | Inline-image lifecycle. |
 | `app/launcher.py` | Desktop/remote launcher and owned API process. |

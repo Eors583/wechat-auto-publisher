@@ -142,7 +142,11 @@ class PostgresConnection:
         self._connection.close()
 
 
-def connect_postgres(database_url: str) -> PostgresConnection:
+def connect_postgres(
+    database_url: str,
+    *,
+    autocommit: bool = False,
+) -> PostgresConnection:
     try:
         import psycopg
         from psycopg.rows import dict_row
@@ -154,6 +158,7 @@ def connect_postgres(database_url: str) -> PostgresConnection:
         database_url,
         row_factory=dict_row,
         connect_timeout=10,
+        autocommit=autocommit,
     )
     return PostgresConnection(raw)
 

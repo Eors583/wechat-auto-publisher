@@ -1283,9 +1283,8 @@ class OnboardingService:
         with self.db.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT j.meta_json, j.updated_at AS job_updated_at, bj.account_id
+                SELECT j.meta_json, j.updated_at AS job_updated_at, j.account_id
                 FROM jobs AS j
-                LEFT JOIN batch_jobs AS bj ON bj.job_id = j.id
                 WHERE j.status IN (
                     'ready_for_review', 'drafted', 'published'
                 )
@@ -1510,6 +1509,23 @@ class OnboardingService:
     ) -> None:
         with self.db.connect() as conn:
             conn.execute(
+                """
+                UPDATE official_accounts
+                SET default_creation_plan_id = ?,
+                    default_editorial_review_profile_id = ?,
+                    editorial_review_config_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    (previous_plan or {}).get("creation_plan_id"),
+                    (previous_review or {}).get("profile_id"),
+                    (previous_review or {}).get("config_json") or "{}",
+                    _utc_now(),
+                    account_id,
+                ),
+            )
+            conn.execute(
                 "DELETE FROM account_creation_plan_defaults WHERE account_id = ?",
                 (account_id,),
             )
@@ -1553,7 +1569,13 @@ class OnboardingService:
             self.db.set_setting(key, previous)
             return
         with self.db.connect() as conn:
-            conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+            if self.db.owner_user_id:
+                conn.execute(
+                    "DELETE FROM user_settings WHERE user_id = ? AND key = ?",
+                    (self.db.owner_user_id, key),
+                )
+            else:
+                conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
 
     def _preset(self, preset_id: str) -> dict[str, Any]:
         try:

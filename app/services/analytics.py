@@ -19,9 +19,10 @@ _PROCESSING_STATUSES = {
 class AnalyticsService:
     """Read-only operational statistics shared by every application surface.
 
-    Article counts intentionally use ``batch_jobs`` rather than every legacy row
-    in ``jobs``.  This matches the data overview and prevents an old standalone
-    CLI job from being presented as part of a multi-account publishing batch.
+    Article counts intentionally use the canonical ``jobs.batch_id`` relation
+    rather than every legacy row in ``jobs``. This matches the data overview and
+    prevents an old standalone CLI job from appearing in a publishing batch.
+    ``batch_jobs`` remains a compatibility dual-write table for one release.
     Archived batches remain part of historical totals, matching the existing
     desktop data page.
     """
@@ -61,9 +62,8 @@ class AnalyticsService:
             status_rows = conn.execute(
                 f"""
                 SELECT j.status, COUNT(*) AS article_count
-                FROM batch_jobs AS bj
-                JOIN jobs AS j ON j.id = bj.job_id
-                JOIN batches AS b ON b.id = bj.batch_id
+                FROM jobs AS j
+                JOIN batches AS b ON b.id = j.batch_id
                 {joined_owner_clause}
                 GROUP BY j.status
                 """,
@@ -77,21 +77,19 @@ class AnalyticsService:
                            ELSE 0
                        END)
                            AS today_articles
-                FROM batch_jobs AS bj
-                JOIN jobs AS j ON j.id = bj.job_id
-                JOIN batches AS b ON b.id = bj.batch_id
+                FROM jobs AS j
+                JOIN batches AS b ON b.id = j.batch_id
                 {joined_owner_clause}
                 """,
                 (day_start_text, day_end_text, *owner_params),
             ).fetchone()
             review_rows = conn.execute(
                 f"""
-                SELECT bj.review_status, COUNT(*) AS article_count
-                FROM batch_jobs AS bj
-                JOIN jobs AS j ON j.id = bj.job_id
-                JOIN batches AS b ON b.id = bj.batch_id
+                SELECT j.review_status, COUNT(*) AS article_count
+                FROM jobs AS j
+                JOIN batches AS b ON b.id = j.batch_id
                 {joined_owner_clause}
-                GROUP BY bj.review_status
+                GROUP BY j.review_status
                 """,
                 owner_params,
             ).fetchall()
