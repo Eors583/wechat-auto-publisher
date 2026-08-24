@@ -10,6 +10,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+from app.ai.usage import emit_usage, fixed_usage
 from PIL import Image, ImageOps
 
 from app.ai.image_providers import (
@@ -91,6 +93,8 @@ def generate_image(
     output_path: str | Path,
     timeout: float = 180,
     provider_type: str | None = None,
+    usage_model_id: str = "",
+    funding_source: str = "platform",
 ) -> Path:
     """Generate and immediately download one landscape article image.
 
@@ -103,19 +107,44 @@ def generate_image(
     _validate_settings(api_key=api_key, api_base=api_base, model=model)
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     protocol = detect_image_protocol(api_base, resolved_provider)
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        item = _request_with_rate_limit_retry(
-            client=client,
-            protocol=protocol,
-            api_base=api_base,
-            headers=headers,
-            model=model,
-            prompt=prompt,
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            item = _request_with_rate_limit_retry(
+                client=client,
+                protocol=protocol,
+                api_base=api_base,
+                headers=headers,
+                model=model,
+                prompt=prompt,
+            )
+            target = Path(output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _save_image_item(client, item, target)
+        _normalize_generated_image(target)
+    except Exception as exc:
+        emit_usage(
+            provider=resolved_provider,
+            provider_model=model,
+            usage=fixed_usage(image_count=1),
+            modality="image",
+            status="failed",
+            error_code=(
+                f"http_{exc.status_code}"
+                if isinstance(exc, ImageProviderError) and exc.status_code
+                else type(exc).__name__
+            ),
+            model_id=usage_model_id,
+            funding_source=funding_source,
         )
-        target = Path(output_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _save_image_item(client, item, target)
-    _normalize_generated_image(target)
+        raise
+    emit_usage(
+        provider=resolved_provider,
+        provider_model=model,
+        usage=fixed_usage(image_count=1),
+        modality="image",
+        model_id=usage_model_id,
+        funding_source=funding_source,
+    )
     return target
 
 

@@ -106,6 +106,10 @@ def generate_article_cover(
         api_base=str(model.get("api_base") or ""),
         model=str(model.get("model") or ""),
         provider_type=str(model.get("provider_type") or ""),
+        usage_model_id=str(model.get("id") or ""),
+        funding_source=(
+            "customer" if str(model.get("owner_user_id") or "") else "platform"
+        ),
         prompt=prompt,
         output_path=target,
     )

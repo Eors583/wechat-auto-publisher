@@ -11,31 +11,65 @@ from app.config import database_target, load_config
 from app.services.wechat_relay_settings import public_wechat_relay_settings
 from app.ui.auth_persistence import auth_session_middleware_kwargs
 from app.ui.panels.auth import AUTH_STORAGE_KEY, current_desktop_user
+from app.ui.panels.billing import build_admin_billing_panel
 from app.ui.panels.settings_hub import build_model_management_panel
 from app.ui.panels.wechat_relay import build_wechat_relay_panel
 from app.ui.state import AppState, set_button_loading
 
 ADMIN_CSS = """
+html,
+body,
+#app,
+.nicegui-layout,
+.q-page-container,
+.q-page,
+.nicegui-content {
+    height: 100%;
+    min-height: 0 !important;
+    overflow: hidden;
+}
+.nicegui-content {
+    box-sizing: border-box;
+}
 body {
     background: #f5f7fb;
     color: #172033;
 }
 .admin-shell {
-    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
     width: 100%;
     min-width: 0;
+    overflow: hidden;
 }
 .admin-header {
+    flex: 0 0 auto;
     background: linear-gradient(115deg, #0f172a 0%, #123c49 58%, #0f766e 100%);
     color: white;
     padding: 22px 30px;
     box-shadow: 0 10px 30px rgba(15, 23, 42, .16);
 }
 .admin-content {
+    flex: 1 1 auto;
+    min-height: 0;
     width: calc(100% - 36px);
     max-width: 1440px;
     margin: 22px auto 42px;
     align-self: center;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+.admin-content > .q-tab-panels {
+    flex: 0 0 auto;
+    height: auto !important;
+    overflow: visible !important;
+}
+.admin-content > .q-tab-panels > .q-panel,
+.admin-content > .q-tab-panels .q-tab-panel {
+    height: auto !important;
+    overflow: visible !important;
 }
 .admin-card, .card {
     background: white;
@@ -53,7 +87,8 @@ body {
     color: #0f766e;
 }
 .admin-login {
-    min-height: 100vh;
+    height: 100%;
+    min-height: 0;
     display: grid;
     place-items: center;
     padding: 28px;
@@ -297,6 +332,7 @@ def create_admin_app() -> None:
                 overview_tab = ui.tab("控制台", icon="dashboard")
                 models_tab = ui.tab("公共模型", icon="smart_toy")
                 relay_tab = ui.tab("微信中转", icon="cloud_sync")
+                billing_tab = ui.tab("AI 成本", icon="query_stats")
                 users_tab = ui.tab("用户管理", icon="group")
             with ui.tab_panels(
                 tabs,
@@ -311,6 +347,8 @@ def create_admin_app() -> None:
                         state,
                         allow_test_account_configuration=True,
                     )
+                with ui.tab_panel(billing_tab).classes("q-pa-none"):
+                    build_admin_billing_panel(state)
                 with ui.tab_panel(users_tab).classes("q-pa-none"):
                     _build_user_panel(state)
 

@@ -61,6 +61,7 @@ from app.ui.panels.auth import (
     current_desktop_user,
     logout_desktop_user,
 )
+from app.ui.panels.billing import build_billing_panel
 from app.ui.panels.feishu import build_feishu_panel
 from app.ui.panels.models import build_models_panel
 from app.ui.panels.onboarding_wizard import (
@@ -219,6 +220,9 @@ def create_desktop_app() -> None:
     )
     open_requested_feishu = (
         str(query_params.get("view") or "").strip().lower() == "feishu"
+    )
+    open_requested_billing = (
+        str(query_params.get("view") or "").strip().lower() == "billing"
     )
     requested_topic_action = str(
         query_params.get("configure") or ""
@@ -442,6 +446,10 @@ def create_desktop_app() -> None:
                             "我的飞书机器人",
                             on_click=lambda: tabs.set_value(tab_feishu),
                         )
+                        ui.menu_item(
+                            "套餐与用量（影子）",
+                            on_click=lambda: tabs.set_value(tab_billing),
+                        )
 
         health_state = {"status": onboarding_status}
 
@@ -548,6 +556,9 @@ def create_desktop_app() -> None:
             tab_feishu = ui.tab("飞书机器人", icon="forum").props(
                 'aria-label="飞书机器人" title="飞书机器人"'
             )
+            tab_billing = ui.tab("套餐与用量", icon="toll").props(
+                'aria-label="套餐与用量" title="套餐与用量"'
+            )
             tab_review = ui.tab("文章审核", icon="rate_review").classes(
                 "ops-review-route-tab"
             )
@@ -586,6 +597,8 @@ def create_desktop_app() -> None:
             if open_requested_topics
             else tab_feishu
             if open_requested_feishu
+            else tab_billing
+            if open_requested_billing
             else tab_accounts
             if open_requested_config or open_requested_admin
             else tab_wizard
@@ -610,6 +623,8 @@ def create_desktop_app() -> None:
                 models_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_feishu).classes("ops-page ops-feishu-page"):
                 feishu_host = ui.column().classes("w-full ops-page-host")
+            with ui.tab_panel(tab_billing).classes("ops-page ops-billing-page"):
+                billing_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_review).classes("ops-page ops-review-page"):
                 review_host = ui.column().classes("w-full ops-page-host")
 
@@ -630,6 +645,7 @@ def create_desktop_app() -> None:
             accounts_host,
             models_host,
             feishu_host,
+            billing_host,
             review_host,
         ):
             with host, ui.row().classes(
@@ -814,6 +830,16 @@ def create_desktop_app() -> None:
                 )
                 build_feishu_panel(page_state)
 
+        def mount_billing() -> None:
+            billing_host.clear()
+            with billing_host:
+                render_page_heading(
+                    "SHADOW USAGE",
+                    "套餐与用量",
+                    "先观察真实 Token、图片和成本分布；当前不扣积分、不限制任何功能。",
+                )
+                build_billing_panel(page_state)
+
         tab_mounts = {
             str(tab_wizard.props["name"]): mount_wizard,
             str(tab_topics.props["name"]): mount_topics,
@@ -821,6 +847,7 @@ def create_desktop_app() -> None:
             str(tab_accounts.props["name"]): mount_accounts,
             str(tab_models.props["name"]): mount_models,
             str(tab_feishu.props["name"]): mount_feishu,
+            str(tab_billing.props["name"]): mount_billing,
             str(tab_review.props["name"]): mount_review,
         }
 

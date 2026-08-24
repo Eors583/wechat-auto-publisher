@@ -18,6 +18,7 @@ from app.ai.image_providers import (
     is_image_provider,
     resolved_image_endpoint,
 )
+from app.ai.usage import tag_client
 from app.db import Database
 from app.services.url_validation import validate_external_url
 
@@ -327,6 +328,7 @@ def apply_model_selection(
             "provider_type": record["provider_type"],
             "api_base": record.get("api_base") or "",
             "model": record["model"],
+            "owner_user_id": str(record.get("owner_user_id") or ""),
             "api_key": (
                 ""
                 if is_local
@@ -455,6 +457,7 @@ def build_text_client(
         )
         name = _CONFIG_MODEL_LABELS.get(provider, provider)
         key = str(record.get("api_key") or "")
+        funding_source = "platform"
     else:
         stored = db.get_ai_model(model_id)
         if not stored or not bool(stored.get("enabled")):
@@ -468,13 +471,22 @@ def build_text_client(
             if provider_type == LOCAL_OPENAI_COMPATIBLE
             else decrypt_api_key(str(record.get("api_key_encrypted") or ""))
         )
+        funding_source = (
+            "local"
+            if provider_type == LOCAL_OPENAI_COMPATIBLE
+            else ("customer" if str(record.get("owner_user_id") or "") else "platform")
+        )
 
     if provider_type == LOCAL_OPENAI_COMPATIBLE:
-        return LocalBrowserCompatClient(
-            db=db,
+        return tag_client(
+            LocalBrowserCompatClient(
+                db=db,
+                model_id=model_id,
+                model=str(record.get("model") or ""),
+                provider_name=name,
+            ),
             model_id=model_id,
-            model=str(record.get("model") or ""),
-            provider_name=name,
+            funding_source=funding_source,
         )
     if provider == "manus" or provider_type == MANUS:
         # Manus runs a remote asynchronous task. Editorial reviews and long
@@ -484,22 +496,34 @@ def build_text_client(
             600.0,
             float(record.get("timeout_seconds") or 600),
         )
-        return ManusClient(
-            api_key=key,
-            api_base=str(record.get("api_base") or "https://api.manus.ai"),
-            model=str(record.get("model") or "manus-1.6"),
-            timeout=manus_timeout,
+        return tag_client(
+            ManusClient(
+                api_key=key,
+                api_base=str(record.get("api_base") or "https://api.manus.ai"),
+                model=str(record.get("model") or "manus-1.6"),
+                timeout=manus_timeout,
+            ),
+            model_id=model_id,
+            funding_source=funding_source,
         )
     if provider_type == GEMINI:
-        return GeminiClient(
-            api_key=key,
-            model=str(record.get("model") or "gemini-2.0-flash"),
-            timeout=60,
+        return tag_client(
+            GeminiClient(
+                api_key=key,
+                model=str(record.get("model") or "gemini-2.0-flash"),
+                timeout=60,
+            ),
+            model_id=model_id,
+            funding_source=funding_source,
         )
-    return OpenAICompatClient(
-        api_key=key,
-        api_base=str(record.get("api_base") or ""),
-        model=str(record.get("model") or provider),
-        provider_name=name,
-        timeout=60,
+    return tag_client(
+        OpenAICompatClient(
+            api_key=key,
+            api_base=str(record.get("api_base") or ""),
+            model=str(record.get("model") or provider),
+            provider_name=name,
+            timeout=60,
+        ),
+        model_id=model_id,
+        funding_source=funding_source,
     )

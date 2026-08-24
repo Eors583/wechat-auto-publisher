@@ -20,6 +20,7 @@ from . import (
     parse_rewrite_output,
     parse_title_output,
 )
+from .usage import emit_usage, fixed_usage
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +283,34 @@ class ManusClient:
         return result
 
     def _run_structured_task(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        *,
+        title: str,
+    ) -> dict[str, Any]:
+        try:
+            value = self._run_structured_task_once(prompt, schema, title=title)
+        except Exception as exc:
+            emit_usage(
+                provider="manus",
+                provider_model=self.model,
+                usage=fixed_usage(),
+                status="failed",
+                request_id=str(getattr(exc, "request_id", "") or ""),
+                error_code=str(getattr(exc, "code", "") or type(exc).__name__)[:120],
+                client=self,
+            )
+            raise
+        emit_usage(
+            provider="manus",
+            provider_model=self.model,
+            usage=fixed_usage(),
+            client=self,
+        )
+        return value
+
+    def _run_structured_task_once(
         self,
         prompt: str,
         schema: dict[str, Any],

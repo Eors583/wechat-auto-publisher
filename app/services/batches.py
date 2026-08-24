@@ -42,6 +42,7 @@ from app.services.batch_contracts import (
     public_job,
 )
 from app.services.batch_progress import BatchProgressMonitor
+from app.services.billing import BillingService
 from app.services.editorial_reviews import (
     EditorialReviewConflict,
     EditorialReviewService,
@@ -1272,13 +1273,21 @@ class BatchService:
                 html_content="",
                 meta_json=invalidate_inline_image_meta(job.get("meta")),
             )
-            Pipeline(cfg, db=self.db).run_job(
-                job_id,
-                review=True,
-                from_step="render",
-                attempt_stage_overrides={"render": "images"},
-                attempt_model_ids={"images": model_id},
-            )
+            with BillingService(self.db).operation(
+                scene="inline_images_regeneration",
+                subject_type="job",
+                subject_id=str(job_id),
+                source_channel="service",
+                idempotency_key=f"inline-images:{job_id}:{uuid.uuid4().hex}",
+                job_id=job_id,
+            ):
+                Pipeline(cfg, db=self.db).run_job(
+                    job_id,
+                    review=True,
+                    from_step="render",
+                    attempt_stage_overrides={"render": "images"},
+                    attempt_model_ids={"images": model_id},
+                )
             refreshed = self._batch_job(batch_id, job_id)
             generated = list((refreshed.get("meta") or {}).get("inline_images") or [])
             if not generated:
@@ -1368,15 +1377,23 @@ class BatchService:
         self.db.update_job(job_id, status="rendering", step="images", error=None)
         try:
             pipeline = Pipeline(cfg, db=self.db)
-            replacement = regenerate_inline_image_asset(
-                asset=assets[selected_position],
-                instruction=request,
-                article_title=str(job.get("selected_title") or job.get("topic") or ""),
-                model=model,
-                client=pipeline._wechat_client(),
-                root=cfg.get("_root") or ".",
+            with BillingService(self.db).operation(
+                scene="inline_image_regeneration",
+                subject_type="job",
+                subject_id=f"{job_id}:{int(image_index)}",
+                source_channel="service",
+                idempotency_key=f"inline-image:{job_id}:{int(image_index)}:{uuid.uuid4().hex}",
                 job_id=job_id,
-            )
+            ):
+                replacement = regenerate_inline_image_asset(
+                    asset=assets[selected_position],
+                    instruction=request,
+                    article_title=str(job.get("selected_title") or job.get("topic") or ""),
+                    model=model,
+                    client=pipeline._wechat_client(),
+                    root=cfg.get("_root") or ".",
+                    job_id=job_id,
+                )
             updated_assets = [dict(item) for item in assets]
             updated_assets[selected_position] = replacement
             meta = dict(job.get("meta") or {})
@@ -1520,7 +1537,17 @@ class BatchService:
                 thumb_media_id=None,
                 meta_json=meta,
             )
-            Pipeline(cfg, db=self.db).run_job(job_id, review=True, from_step="render")
+            with BillingService(self.db).operation(
+                scene="cover_regeneration",
+                subject_type="job",
+                subject_id=str(job_id),
+                source_channel="service",
+                idempotency_key=f"cover:{job_id}:{uuid.uuid4().hex}",
+                job_id=job_id,
+            ):
+                Pipeline(cfg, db=self.db).run_job(
+                    job_id, review=True, from_step="render"
+                )
             refreshed = self._batch_job(batch_id, job_id)
             refreshed_meta = dict(refreshed.get("meta") or {})
             if not (
@@ -1629,15 +1656,25 @@ class BatchService:
         self.db.update_batch_job_review(batch_id, job_id, "needs_changes")
         self.db.update_job(job_id, status="rewriting", step="rewrite", error=None)
         try:
-            revision = revise_paragraph(
-                client,
-                body=str(job.get("body") or ""),
-                paragraph_index=paragraph_index,
-                instruction=instruction,
-                title=str(job.get("selected_title") or ""),
-                topic=str(job.get("topic") or ""),
-                article_instruction=str((cfg.get("ai") or {}).get("rewrite_prompt") or ""),
-            )
+            with BillingService(self.db).operation(
+                scene="paragraph_regeneration",
+                subject_type="job",
+                subject_id=f"{job_id}:{int(paragraph_index)}",
+                source_channel="service",
+                idempotency_key=f"paragraph:{job_id}:{int(paragraph_index)}:{uuid.uuid4().hex}",
+                job_id=job_id,
+            ):
+                revision = revise_paragraph(
+                    client,
+                    body=str(job.get("body") or ""),
+                    paragraph_index=paragraph_index,
+                    instruction=instruction,
+                    title=str(job.get("selected_title") or ""),
+                    topic=str(job.get("topic") or ""),
+                    article_instruction=str(
+                        (cfg.get("ai") or {}).get("rewrite_prompt") or ""
+                    ),
+                )
             meta = preserve_inline_images_after_paragraph_revision(
                 job.get("meta"),
                 original=revision.original,
@@ -2526,11 +2563,24 @@ class BatchService:
         def run_one(item: dict[str, Any]) -> None:
             with customer_data_scope(owner_user_id):
                 try:
-                    item["pipe"].run_job(
-                        int(item["job_id"]),
-                        review=True,
-                        from_step="ingest",
-                    )
+                    job_id = int(item["job_id"])
+                    attempts = self.db.list_job_attempts(job_id, limit=500)
+                    job = self.db.get_job(job_id) or {}
+                    with BillingService(self.db).operation(
+                        scene="article_generation",
+                        subject_type="job",
+                        subject_id=str(job_id),
+                        source_channel=str(job.get("source") or "system"),
+                        idempotency_key=(
+                            f"article-generation:{job_id}:{len(attempts)}"
+                        ),
+                        job_id=job_id,
+                    ):
+                        item["pipe"].run_job(
+                            job_id,
+                            review=True,
+                            from_step="ingest",
+                        )
                 except Exception:  # noqa: BLE001
                     return
 

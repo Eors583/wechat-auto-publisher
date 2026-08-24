@@ -28,6 +28,7 @@ from app.services import (
     get_batch_service,
 )
 from app.services.auth import AuthService
+from app.services.billing import BillingService
 from app.services.configuration import ConfigurationService
 from app.services.feishu_integrations import FeishuIntegrationService
 from app.services.failures import (
@@ -223,6 +224,23 @@ class AdminModelRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     api_key: str | None = None
     local_agent_id: str | None = None
+    enabled: bool = True
+
+
+class ModelPriceCardRequest(BaseModel):
+    id: str | None = None
+    provider: str = Field(min_length=1, max_length=80)
+    provider_model: str = Field(default="*", min_length=1, max_length=160)
+    modality: str = Field(default="text", pattern="^(text|image)$")
+    input_micro_cny_per_million: int = Field(default=0, ge=0)
+    cached_input_micro_cny_per_million: int = Field(default=0, ge=0)
+    output_micro_cny_per_million: int = Field(default=0, ge=0)
+    image_micro_cny_each: int = Field(default=0, ge=0)
+    fixed_request_micro_cny: int = Field(default=0, ge=0)
+    markup_basis_points: int = Field(default=10_000, ge=0)
+    points_per_cny: int = Field(default=100, ge=0)
+    effective_from: str | None = None
+    effective_to: str | None = None
     enabled: bool = True
 
 
@@ -429,6 +447,49 @@ def create_api_app(
     ) -> dict[str, Any]:
         return principal
 
+    @app.get("/api/v1/billing/plans")
+    def billing_plans() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "shadow",
+                "name": "影子计量",
+                "enabled": True,
+                "monthly_points": 0,
+                "notice": "当前不扣积分、不限制任何现有功能。",
+            }
+        ]
+
+    @app.get(
+        "/api/v1/me/billing/summary",
+        dependencies=[Depends(require_token)],
+    )
+    def my_billing_summary() -> dict[str, Any]:
+        return BillingService(batch_service.db).summary()
+
+    @app.get(
+        "/api/v1/me/billing/usage",
+        dependencies=[Depends(require_token)],
+    )
+    def my_billing_usage(
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        return BillingService(batch_service.db).list_usage(
+            limit=limit, offset=offset
+        )
+
+    @app.get(
+        "/api/v1/me/billing/ledger",
+        dependencies=[Depends(require_token)],
+    )
+    def my_billing_ledger(
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        return BillingService(batch_service.db).list_ledger(
+            limit=limit, offset=offset
+        )
+
     @app.get("/api/v1/me/feishu-integration")
     def get_my_feishu_integration(
         request: Request,
@@ -508,6 +569,52 @@ def create_api_app(
     )
     def admin_users() -> list[dict[str, Any]]:
         return auth_service.list_users()
+
+    @app.get(
+        "/api/v1/admin/billing/usage-summary",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_billing_usage_summary() -> dict[str, int]:
+        with customer_data_scope(""):
+            return batch_service.db.admin_billing_usage_summary()
+
+    @app.get(
+        "/api/v1/admin/billing/usage-events",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_billing_usage_events(
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        with customer_data_scope(""):
+            return batch_service.db.admin_list_ai_usage_events(
+                limit=limit, offset=offset
+            )
+
+    @app.get(
+        "/api/v1/admin/billing/price-cards",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_billing_price_cards() -> list[dict[str, Any]]:
+        with customer_data_scope(""):
+            return batch_service.db.list_model_price_cards()
+
+    @app.post(
+        "/api/v1/admin/billing/price-cards",
+        dependencies=[Depends(require_admin)],
+    )
+    def save_admin_billing_price_card(
+        payload: ModelPriceCardRequest,
+    ) -> dict[str, Any]:
+        with customer_data_scope(""):
+            card_id = batch_service.db.upsert_model_price_card(
+                payload.model_dump()
+            )
+            return next(
+                item
+                for item in batch_service.db.list_model_price_cards()
+                if str(item.get("id")) == card_id
+            )
 
     @app.get(
         "/api/v1/admin/models",

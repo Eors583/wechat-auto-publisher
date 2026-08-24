@@ -5,6 +5,7 @@ import re
 import textwrap
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -482,6 +483,12 @@ def resolve_inline_images(
                     api_base=str(model.get("api_base") or ""),
                     model=str(model.get("model") or ""),
                     provider_type=str(model.get("provider_type") or ""),
+                    usage_model_id=str(model.get("id") or ""),
+                    funding_source=(
+                        "customer"
+                        if str(model.get("owner_user_id") or "")
+                        else "platform"
+                    ),
                     prompt=plan.prompt,
                     output_path=target,
                 )
@@ -538,13 +545,20 @@ def _generate_agent_images(
             api_base=api_base,
             model=model_name,
             provider_type=str(model.get("provider_type") or ""),
+            usage_model_id=str(model.get("id") or ""),
+            funding_source=(
+                "customer" if str(model.get("owner_user_id") or "") else "platform"
+            ),
             prompt=plan.prompt,
             output_path=target,
         )
         return plan.index, target
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="argument-image") as pool:
-        futures = {pool.submit(generate_one, plan): plan for plan in plans}
+        futures = {
+            pool.submit(copy_context().run, generate_one, plan): plan
+            for plan in plans
+        }
         for future in as_completed(futures):
             plan = futures[future]
             try:
@@ -645,6 +659,10 @@ def regenerate_inline_image_asset(
         api_base=str(model.get("api_base") or ""),
         model=str(model.get("model") or ""),
         provider_type=str(model.get("provider_type") or ""),
+        usage_model_id=str(model.get("id") or ""),
+        funding_source=(
+            "customer" if str(model.get("owner_user_id") or "") else "platform"
+        ),
         prompt=prompt,
         output_path=target,
     )

@@ -1891,6 +1891,85 @@ APP_CSS += """
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
+.ops-billing-page .ops-page-host {
+  align-content: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.ops-billing-notice {
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-3) var(--ui-space-4);
+  color: var(--ui-color-brand-dark);
+  border: 1px solid var(--ui-color-info-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-color-info-soft);
+  overflow-wrap: anywhere;
+}
+.ops-billing-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--ui-space-3);
+  width: 100%;
+  min-width: 0;
+}
+.ops-billing-metric {
+  min-width: 0;
+  gap: var(--ui-space-1) !important;
+  padding: var(--ui-space-4);
+  border: 1px solid var(--ui-color-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-color-surface);
+}
+.ops-billing-metric-label,
+.ops-billing-metric-hint,
+.ops-billing-section-hint {
+  color: var(--ui-color-text-secondary);
+  font-size: var(--ui-font-size-xs);
+  overflow-wrap: anywhere;
+}
+.ops-billing-metric-value {
+  min-width: 0;
+  color: var(--ui-color-text-primary);
+  font-size: var(--ui-font-size-lg);
+  font-weight: var(--ui-font-weight-bold);
+  overflow-wrap: anywhere;
+}
+.ops-billing-section {
+  width: 100%;
+  min-width: 0;
+  gap: var(--ui-space-2) !important;
+  padding: var(--ui-space-4);
+  border: 1px solid var(--ui-color-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-color-surface);
+}
+.ops-billing-section-title {
+  font-size: var(--ui-font-size-md);
+  font-weight: var(--ui-font-weight-bold);
+}
+.ops-billing-table {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+.ops-billing-table .q-table__middle {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.ops-billing-empty {
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  padding: var(--ui-space-8) var(--ui-space-4);
+  color: var(--ui-color-text-secondary);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
 .ops-page-heading {
   display: flex;
   align-items: flex-end;
@@ -3341,6 +3420,7 @@ APP_CSS += """
 .ops-document-preview-badge { align-items: center; gap: var(--ui-space-1); }
 
 @media (max-width: 1300px) {
+  .ops-billing-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .ops-task-row-card,
   .ops-batch-row-card {
     grid-template-columns: 42px minmax(0, 1fr) minmax(110px, auto) auto !important;
@@ -3467,6 +3547,7 @@ APP_CSS += """
 }
 
 @media (max-width: 860px) {
+  .ops-billing-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ops-account-workspace { grid-template-columns: 1fr; }
   .ops-account-directory { display: none; }
   .ops-queue-workspace { grid-template-columns: minmax(0, 1fr); }
@@ -3474,6 +3555,11 @@ APP_CSS += """
   .ops-config-entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wechat-layout-change-table,
   .wechat-layout-import-previews { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 600px) {
+  .ops-billing-metrics { grid-template-columns: minmax(0, 1fr); }
+  .ops-billing-section { padding: var(--ui-space-3); }
 }
 
 /* Generated Quasar internals must participate in the workbench's width

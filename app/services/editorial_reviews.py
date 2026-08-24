@@ -31,6 +31,7 @@ from app.editorial_review import (
     review_options,
 )
 from app.services.failures import sanitize_failure_text
+from app.services.billing import BillingService
 from app.services.model_readiness import record_model_auth_failure_for_error
 
 _INTEGRITY_ERRORS = (sqlite3.IntegrityError, *postgres_integrity_errors())
@@ -285,13 +286,21 @@ class EditorialReviewService:
             try:
                 degraded_review = False
                 try:
-                    review_payload = complete_json(
-                        client,
-                        prompt,
-                        label="评审结果",
-                        validator=validate_review_payload,
-                        schema=review_result_schema(),
-                    )
+                    with BillingService(self.db).operation(
+                        scene="editorial_review",
+                        subject_type="review",
+                        subject_id=review_id,
+                        source_channel="service",
+                        idempotency_key=f"editorial-review:{review_id}",
+                        job_id=job_id,
+                    ):
+                        review_payload = complete_json(
+                            client,
+                            prompt,
+                            label="评审结果",
+                            validator=validate_review_payload,
+                            schema=review_result_schema(),
+                        )
                 except ReviewPayloadValidationError as exc:
                     degraded_review = True
                     review_payload = safe_incomplete_review_payload(str(exc))
@@ -475,32 +484,40 @@ class EditorialReviewService:
                     "该文章已有正在执行的 AI 评审或修改稿"
                 ) from exc
             try:
-                if rewrite_mode == "selected_paragraphs":
-                    candidate = self._rewrite_selected_paragraphs(
-                        client=client,
-                        review=review,
-                        job=job,
-                        selected=selected,
-                        paragraph_numbers=paragraph_numbers or [],
-                        instruction=instruction,
-                    )
-                else:
-                    prompt = build_rewrite_prompt(
-                        review=review,
-                        selected_issues=selected,
-                        rewrite_mode=rewrite_mode,
-                        instruction=instruction,
-                    )
-                    candidate = normalize_rewrite_candidate(
-                        complete_json(
-                            client,
-                            prompt,
-                            label="候选修改稿",
-                            schema=rewrite_candidate_schema(),
-                        ),
-                        source=dict(review["source_snapshot"]),
-                        rewrite_mode=rewrite_mode,
-                    )
+                with BillingService(self.db).operation(
+                    scene="editorial_rewrite",
+                    subject_type="review_application",
+                    subject_id=application_id,
+                    source_channel="service",
+                    idempotency_key=f"editorial-rewrite:{application_id}",
+                    job_id=job_id,
+                ):
+                    if rewrite_mode == "selected_paragraphs":
+                        candidate = self._rewrite_selected_paragraphs(
+                            client=client,
+                            review=review,
+                            job=job,
+                            selected=selected,
+                            paragraph_numbers=paragraph_numbers or [],
+                            instruction=instruction,
+                        )
+                    else:
+                        prompt = build_rewrite_prompt(
+                            review=review,
+                            selected_issues=selected,
+                            rewrite_mode=rewrite_mode,
+                            instruction=instruction,
+                        )
+                        candidate = normalize_rewrite_candidate(
+                            complete_json(
+                                client,
+                                prompt,
+                                label="候选修改稿",
+                                schema=rewrite_candidate_schema(),
+                            ),
+                            source=dict(review["source_snapshot"]),
+                            rewrite_mode=rewrite_mode,
+                        )
             except Exception as exc:
                 record_model_auth_failure_for_error(
                     self.db,

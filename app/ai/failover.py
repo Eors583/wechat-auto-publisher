@@ -31,6 +31,7 @@ from .openai_compat import (
     is_junk_title_or_subtitle,
     is_overloaded_error,
 )
+from .usage import tag_client, usage_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,79 @@ class FailoverRewriter:
             api_base=str(askmany_cfg.get("api_base") or "https://api.askmany.ai"),
             model=str(askmany_cfg.get("model") or "default"),
         )
+        custom_models = ai.get("custom_models") or {}
+        for client_id, client in self._clients.items():
+            custom_cfg = dict(custom_models.get(client_id) or {})
+            provider_type = str(custom_cfg.get("provider_type") or "")
+            funding_source = (
+                "local"
+                if provider_type == "local_openai_compatible"
+                else ("customer" if custom_cfg else "platform")
+            )
+            tag_client(
+                client,
+                model_id=client_id,
+                funding_source=funding_source,
+            )
+        tag_client(self.askmany, model_id="askmany", funding_source="platform")
+
+    def _rewrite_once(
+        self,
+        client: Any,
+        *,
+        provider: str,
+        prompt: str,
+        topic: str,
+        raw_content: str,
+    ) -> RewriteResult:
+        if hasattr(client, "rewrite_longform"):
+            result = client.rewrite_longform(
+                topic,
+                raw_content,
+                instruction=self.rewrite_prompt,
+                title_instruction=self.title_prompt,
+                min_chars=self.min_body_chars,
+                target_chars=max(self.min_body_chars + 500, 2500),
+            )
+        else:
+            result = client.rewrite(prompt)
+            if (
+                len(re.sub(r"\s+", "", result.body or "")) < self.min_body_chars
+                and hasattr(client, "expand_rewrite")
+            ):
+                expanded = client.expand_rewrite(
+                    topic,
+                    result.body,
+                    target_chars=max(self.min_body_chars + 500, 2500),
+                )
+                if not expanded.titles and result.titles:
+                    expanded.titles = result.titles
+                if not expanded.subtitles and result.subtitles:
+                    expanded.subtitles = result.subtitles
+                if not expanded.digest and result.digest:
+                    expanded.digest = result.digest
+                result = expanded
+        result.titles = [
+            item
+            for item in clean_candidate_list(result.titles)
+            if not is_junk_title_or_subtitle(item)
+        ][:TITLE_CANDIDATE_COUNT]
+        result.subtitles = [
+            item
+            for item in clean_candidate_list(result.subtitles)
+            if not is_junk_title_or_subtitle(item)
+        ][:SUBTITLE_CANDIDATE_COUNT]
+        result.body = enforce_emphasis_rules(result.body)
+        quality_check(
+            result,
+            raw_content,
+            min_body_chars=self.min_body_chars,
+            max_similarity=self.max_similarity,
+            required_titles=TITLE_CANDIDATE_COUNT,
+            required_subtitles=SUBTITLE_CANDIDATE_COUNT,
+        )
+        result.provider = provider
+        return result
 
     def rewrite(self, topic: str, raw_content: str) -> RewriteResult:
         prompt = build_rewrite_user_prompt(topic, raw_content, self.rewrite_prompt)
@@ -176,57 +250,14 @@ class FailoverRewriter:
             for attempt in range(1, self.max_retries + 1):
                 try:
                     logger.info("Rewrite via %s attempt %s", provider, attempt)
-                    if hasattr(client, "rewrite_longform"):
-                        result = client.rewrite_longform(
-                            topic,
-                            raw_content,
-                            instruction=self.rewrite_prompt,
-                            title_instruction=self.title_prompt,
-                            min_chars=self.min_body_chars,
-                            target_chars=max(self.min_body_chars + 500, 2500),
+                    with usage_attempt():
+                        return self._rewrite_once(
+                            client,
+                            provider=provider,
+                            prompt=prompt,
+                            topic=topic,
+                            raw_content=raw_content,
                         )
-                    else:
-                        result = client.rewrite(prompt)
-                        if len(re.sub(r"\s+", "", result.body or "")) < self.min_body_chars and hasattr(
-                            client, "expand_rewrite"
-                        ):
-                            expanded = client.expand_rewrite(
-                                topic,
-                                result.body,
-                                target_chars=max(self.min_body_chars + 500, 2500),
-                            )
-                            if not expanded.titles and result.titles:
-                                expanded.titles = result.titles
-                            if not expanded.subtitles and result.subtitles:
-                                expanded.subtitles = result.subtitles
-                            if not expanded.digest and result.digest:
-                                expanded.digest = result.digest
-                            result = expanded
-                    result.titles = [
-                        item
-                        for item in clean_candidate_list(
-                            result.titles,
-                        )
-                        if not is_junk_title_or_subtitle(item)
-                    ][:TITLE_CANDIDATE_COUNT]
-                    result.subtitles = [
-                        item
-                        for item in clean_candidate_list(
-                            result.subtitles,
-                        )
-                        if not is_junk_title_or_subtitle(item)
-                    ][:SUBTITLE_CANDIDATE_COUNT]
-                    result.body = enforce_emphasis_rules(result.body)
-                    quality_check(
-                        result,
-                        raw_content,
-                        min_body_chars=self.min_body_chars,
-                        max_similarity=self.max_similarity,
-                        required_titles=TITLE_CANDIDATE_COUNT,
-                        required_subtitles=SUBTITLE_CANDIDATE_COUNT,
-                    )
-                    result.provider = provider
-                    return result
                 except Exception as exc:  # noqa: BLE001
                     msg = f"{provider}#{attempt}: {exc}"
                     logger.warning(msg)
@@ -295,13 +326,14 @@ class FailoverRewriter:
         if getattr(self.askmany, "api_key", None):
             for attempt in range(1, 3):
                 try:
-                    result = self.askmany.optimize_titles(prompt)
-                    if len(result.titles) >= TITLE_CANDIDATE_COUNT:
-                        return result
-                    raise RuntimeError(
-                        f"标题候选不足 {TITLE_CANDIDATE_COUNT} 个："
-                        f"当前只有 {len(result.titles)} 个"
-                    )
+                    with usage_attempt():
+                        result = self.askmany.optimize_titles(prompt)
+                        if len(result.titles) >= TITLE_CANDIDATE_COUNT:
+                            return result
+                        raise RuntimeError(
+                            f"标题候选不足 {TITLE_CANDIDATE_COUNT} 个："
+                            f"当前只有 {len(result.titles)} 个"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"askmany#{attempt}: {exc}")
                     time.sleep(min(2**attempt, 6))
@@ -312,13 +344,14 @@ class FailoverRewriter:
             if not client or not hasattr(client, "optimize_titles"):
                 continue
             try:
-                result = client.optimize_titles(prompt)
-                if len(result.titles) >= TITLE_CANDIDATE_COUNT:
-                    return result
-                raise RuntimeError(
-                    f"标题候选不足 {TITLE_CANDIDATE_COUNT} 个："
-                    f"当前只有 {len(result.titles)} 个"
-                )
+                with usage_attempt():
+                    result = client.optimize_titles(prompt)
+                    if len(result.titles) >= TITLE_CANDIDATE_COUNT:
+                        return result
+                    raise RuntimeError(
+                        f"标题候选不足 {TITLE_CANDIDATE_COUNT} 个："
+                        f"当前只有 {len(result.titles)} 个"
+                    )
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{provider}-title: {exc}")
 

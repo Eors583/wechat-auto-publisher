@@ -19,6 +19,7 @@ from . import (
     parse_rewrite_output,
     parse_title_output,
 )
+from .usage import NormalizedUsage, emit_usage, normalize_chat_usage
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +553,14 @@ class OpenAICompatClient:
                 try:
                     resp = client.post(url, headers=headers, json=payload)
                 except httpx.TimeoutException as exc:
+                    emit_usage(
+                        provider=self.provider_name,
+                        provider_model=self.model,
+                        usage=NormalizedUsage(),
+                        status="failed",
+                        error_code="timeout",
+                        client=self,
+                    )
                     last_err = RuntimeError(f"{self.provider_name} timeout: {exc}")
                     if attempt >= max_attempts:
                         raise last_err from exc
@@ -567,6 +576,15 @@ class OpenAICompatClient:
                     continue
 
                 if resp.status_code in (429, 500, 502, 503, 504):
+                    emit_usage(
+                        provider=self.provider_name,
+                        provider_model=self.model,
+                        usage=NormalizedUsage(),
+                        status="failed",
+                        request_id=str(resp.headers.get("x-request-id") or ""),
+                        error_code=f"http_{resp.status_code}",
+                        client=self,
+                    )
                     wait = _retry_after_seconds(resp, attempt)
                     last_err = RuntimeError(
                         f"{self.provider_name} error: {resp.status_code} {resp.text[:400]}"
@@ -586,19 +604,59 @@ class OpenAICompatClient:
                     continue
 
                 if resp.status_code >= 400:
+                    emit_usage(
+                        provider=self.provider_name,
+                        provider_model=self.model,
+                        usage=NormalizedUsage(),
+                        status="failed",
+                        request_id=str(resp.headers.get("x-request-id") or ""),
+                        error_code=f"http_{resp.status_code}",
+                        client=self,
+                    )
                     raise RuntimeError(
                         f"{self.provider_name} error: {resp.status_code} {resp.text[:400]}"
                     )
 
                 data = resp.json()
+                usage = normalize_chat_usage(data)
+                response_id = str(data.get("id") or "")
+                request_id = str(resp.headers.get("x-request-id") or response_id)
                 try:
                     content = data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError, TypeError) as exc:
+                    emit_usage(
+                        provider=self.provider_name,
+                        provider_model=self.model,
+                        usage=usage,
+                        status="failed",
+                        request_id=request_id,
+                        response_id=response_id,
+                        error_code="response_invalid",
+                        client=self,
+                    )
                     raise RuntimeError(
                         f"Unexpected {self.provider_name} response: {data}"
                     ) from exc
                 if not content or not str(content).strip():
+                    emit_usage(
+                        provider=self.provider_name,
+                        provider_model=self.model,
+                        usage=usage,
+                        status="failed",
+                        request_id=request_id,
+                        response_id=response_id,
+                        error_code="response_empty",
+                        client=self,
+                    )
                     raise RuntimeError(f"{self.provider_name} returned empty content")
+                emit_usage(
+                    provider=self.provider_name,
+                    provider_model=self.model,
+                    usage=usage,
+                    request_id=request_id,
+                    response_id=response_id,
+                    client=self,
+                )
                 return str(content)
 
         raise last_err or RuntimeError(f"{self.provider_name} request failed")

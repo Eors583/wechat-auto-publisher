@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from app.ai.openai_compat import OpenAICompatClient
+from app.ai.usage import emit_usage, estimated_text_usage
 from app.db import Database
 
 
@@ -62,9 +63,34 @@ class LocalBrowserCompatClient(OpenAICompatClient):
                 if status == "completed":
                     content = str(request.get("response_text") or "").strip()
                     if not content:
+                        emit_usage(
+                            provider="local",
+                            provider_model=self.model,
+                            usage=estimated_text_usage(prompt, ""),
+                            status="failed",
+                            response_id=request_id,
+                            error_code="response_empty",
+                            client=self,
+                        )
                         raise RuntimeError("本地模型返回了空内容")
+                    emit_usage(
+                        provider="local",
+                        provider_model=self.model,
+                        usage=estimated_text_usage(prompt, content),
+                        response_id=request_id,
+                        client=self,
+                    )
                     return content
                 if status == "failed":
+                    emit_usage(
+                        provider="local",
+                        provider_model=self.model,
+                        usage=estimated_text_usage(prompt, ""),
+                        status="failed",
+                        response_id=request_id,
+                        error_code=str(request.get("error_code") or "provider_error"),
+                        client=self,
+                    )
                     raise RuntimeError(
                         str(request.get("error") or "本地模型调用失败")
                     )
@@ -83,6 +109,15 @@ class LocalBrowserCompatClient(OpenAICompatClient):
                     if str(latest.get("agent_id") or "").strip()
                     else "browser.timeout"
                 ),
+            )
+            emit_usage(
+                provider="local",
+                provider_model=self.model,
+                usage=estimated_text_usage(prompt, ""),
+                status="failed",
+                response_id=request_id,
+                error_code="timeout",
+                client=self,
             )
             raise RuntimeError(message)
         finally:
