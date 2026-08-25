@@ -135,6 +135,35 @@ def test_nicegui_navigation_target_does_not_duplicate_the_proxy_prefix(
     assert ui_navigation_target("https://example.com") == "https://example.com"
 
 
+def test_auto_onboarding_redirect_is_admin_root_only() -> None:
+    status = {
+        "content_ready_account_ids": ["account-1"],
+        "repair_step": "wechat",
+        "wizard_required": True,
+    }
+
+    assert desktop._should_auto_open_onboarding(  # noqa: SLF001
+        page_is_admin=True,
+        requested_view="",
+        status=status,
+    )
+    assert not desktop._should_auto_open_onboarding(  # noqa: SLF001
+        page_is_admin=True,
+        requested_view="onboarding",
+        status=status,
+    )
+    assert not desktop._should_auto_open_onboarding(  # noqa: SLF001
+        page_is_admin=True,
+        requested_view="config",
+        status=status,
+    )
+    assert not desktop._should_auto_open_onboarding(  # noqa: SLF001
+        page_is_admin=False,
+        requested_view="",
+        status=status,
+    )
+
+
 def test_internal_navigation_defaults_to_the_local_root(monkeypatch: Any) -> None:
     monkeypatch.delenv("WECHAT_PUBLISHER_UI_ROOT_PATH", raising=False)
 

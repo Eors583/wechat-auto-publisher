@@ -191,6 +191,26 @@ state: AppState | None = None
 ADD_CUSTOM_MODEL_VALUE = "__add_custom_model__"
 
 
+def _should_auto_open_onboarding(
+    *,
+    page_is_admin: bool,
+    requested_view: str,
+    status: dict[str, Any],
+) -> bool:
+    ready_accounts = [
+        str(item)
+        for item in list(status.get("content_ready_account_ids") or [])
+        if str(item)
+    ]
+    return (
+        page_is_admin
+        and not str(requested_view or "").strip()
+        and len(ready_accounts) == 1
+        and should_show_onboarding(status)
+        and str(status.get("repair_step") or "") == "wechat"
+    )
+
+
 def create_desktop_app() -> None:
     from app.ui.styles import APP_CSS, HEAD_HTML
 
@@ -502,24 +522,12 @@ def create_desktop_app() -> None:
                     return
                 health_state["status"] = dict(checked or {})
                 configuration_health.refresh()
-                ready_accounts = [
-                    str(item)
-                    for item in list(
-                        health_state["status"].get(
-                            "content_ready_account_ids"
-                        )
-                        or []
-                    )
-                    if str(item)
-                ]
-                if (
-                    not open_requested_review
-                    and len(ready_accounts) == 1
-                    and should_show_onboarding(health_state["status"])
-                    and str(
-                        health_state["status"].get("repair_step") or ""
-                    )
-                    == "wechat"
+                if _should_auto_open_onboarding(
+                    page_is_admin=page_is_admin,
+                    requested_view=str(
+                        query_params.get("view") or ""
+                    ).strip().lower(),
+                    status=health_state["status"],
                 ):
                     # An expired healthy cache never blocks startup. Once the
                     # real read-only refresh proves that the sole usable
