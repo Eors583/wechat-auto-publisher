@@ -5625,7 +5625,13 @@ class Database:
                 sql += " AND a.owner_user_id = ?"
                 params.append(self.owner_user_id)
             row = conn.execute(sql, params).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            result = dict(row)
+            if not result.get("profile_id"):
+                config = _loads_json(result.get("config_json"), {})
+                result["profile_id"] = str(config.get("scheme_id") or "") or None
+            return result
 
     def set_account_editorial_review_default(
         self,

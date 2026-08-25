@@ -7,7 +7,11 @@ import threading
 import pytest
 
 from app.config import load_config
-from app.editorial_review import normalize_review_config, review_options
+from app.editorial_review import (
+    BUILTIN_REVIEW_SCHEMES,
+    normalize_review_config,
+    review_options,
+)
 from app.services.batches import BatchService
 from app.services.editorial_reviews import (
     EditorialReviewConflict,
@@ -607,6 +611,34 @@ def test_account_defaults_are_isolated(tmp_path) -> None:
     assert default_a["profile_id"] == custom["id"]
     assert default_a["config"]["strictness"] == "strict"
     assert default_b["profile_id"] == "professional_depth"
+
+
+def test_scoped_account_can_select_every_builtin_review_direction(tmp_path) -> None:
+    service, _batch_id, _job_id = _ready_service(tmp_path)
+    service.db.set_owner_user("user-a")
+    service.db.upsert_official_account(
+        {
+            "id": "account-scoped",
+            "name": "用户公众号",
+            "app_id": "app-scoped",
+            "app_secret_encrypted": "secret",
+            "model_id": "model-a",
+            "layout": {},
+            "enabled": True,
+        }
+    )
+
+    observed_focuses = set()
+    for profile_id, scheme in BUILTIN_REVIEW_SCHEMES.items():
+        selected = service.set_account_editorial_review_default(
+            "account-scoped", profile_id=profile_id
+        )
+        assert selected["profile_id"] == profile_id
+        assert selected["profile_name"] == scheme["name"]
+        assert selected["config"]["focus"] == scheme["focus"]
+        observed_focuses.add(selected["config"]["focus"])
+
+    assert len(observed_focuses) == len(BUILTIN_REVIEW_SCHEMES)
 
 
 def test_invalid_json_is_repaired_once(tmp_path, monkeypatch) -> None:

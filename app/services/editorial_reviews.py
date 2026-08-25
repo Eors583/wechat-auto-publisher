@@ -166,8 +166,12 @@ class EditorialReviewService:
         if not account:
             raise KeyError(f"公众号不存在：{account_id}")
         row = self.db.get_account_editorial_review_default(str(account_id))
-        profile_id = str((row or {}).get("profile_id") or DEFAULT_REVIEW_SCHEME_ID)
         overrides = _loads_json((row or {}).get("config_json"), {})
+        profile_id = str(
+            (row or {}).get("profile_id")
+            or overrides.get("scheme_id")
+            or DEFAULT_REVIEW_SCHEME_ID
+        )
         try:
             config, profile_name = self._profile_config(profile_id)
         except KeyError:
@@ -195,9 +199,16 @@ class EditorialReviewService:
         base, _ = self._profile_config(profile_id)
         overrides = dict(config or {})
         merge_review_config(base, overrides)
+        stored_profile_id: str | None = profile_id
+        if profile_id in BUILTIN_REVIEW_SCHEMES:
+            # Built-ins live in code rather than the user-owned profile table.
+            # Persist their identity with the account overrides so database
+            # foreign keys remain reserved for real custom profile rows.
+            stored_profile_id = None
+            overrides["scheme_id"] = profile_id
         self.db.set_account_editorial_review_default(
             str(account_id),
-            profile_id=profile_id,
+            profile_id=stored_profile_id,
             config=overrides,
         )
         return self.get_account_default(str(account_id))
