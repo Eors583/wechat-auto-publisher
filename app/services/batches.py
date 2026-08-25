@@ -56,6 +56,7 @@ from app.services.preflight import preflight_accounts
 from app.services.url_validation import validate_external_url
 from app.wechat.material import batch_get_material
 from app.wechat.template_snapshot import load_template_snapshot
+from app.workflows.delivery import resolve_secondary_articles
 
 _injection_guards: dict[tuple[str, str], threading.Lock] = {}
 _injection_guards_lock = threading.Lock()
@@ -1634,6 +1635,27 @@ class BatchService:
             if not rows or material_offset >= int(data.get("total_count") or 0):
                 break
         return items
+
+    def _preview_secondary_articles(
+        self, batch_id: str, job_id: int
+    ) -> list[dict[str, Any]]:
+        """Return a read-only preview of the ads used below the main article."""
+
+        job = self._batch_job(batch_id, job_id)
+        account_id = str(job.get("account_id") or "")
+        cfg, _ = apply_account_selection(
+            load_config(), self.db, account_id, allow_disabled=True
+        )
+        client = Pipeline(cfg, db=self.db)._wechat_client()
+        rows = resolve_secondary_articles(client, cfg, self.db, job)
+        return [
+            {
+                "position": index + 2,
+                "title": str(row.get("title") or "未命名广告"),
+                "thumb_url": str(row.get("thumb_url") or ""),
+            }
+            for index, row in enumerate(rows)
+        ]
 
     def select_job_cover(
         self, batch_id: str, job_id: int, media_id: str

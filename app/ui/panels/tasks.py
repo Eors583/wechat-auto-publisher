@@ -2121,6 +2121,49 @@ def build_review_page(
         page_alive["value"] = False
         on_open_review(batch_id, int(target_job["id"]))
 
+    async def load_secondary_preview(host: Any) -> None:
+        try:
+            rows = await run.io_bound(
+                lambda: service._preview_secondary_articles(batch_id, job_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not alive():
+                return
+            host.clear()
+            with host:
+                ui.label(
+                    "广告栏预览暂时无法加载：" + sanitize_failure_text(exc)
+                ).classes("ops-secondary-preview-error")
+            return
+        if not alive():
+            return
+        host.clear()
+        with host:
+            if not rows:
+                ui.label("当前文章没有配置可附加的广告位").classes(
+                    "ops-secondary-preview-empty"
+                )
+                return
+            for row in rows:
+                with ui.element("div").classes("ops-secondary-preview-row"):
+                    thumb_url = str(row.get("thumb_url") or "")
+                    if thumb_url:
+                        ui.image(wechat_image_proxy_url(thumb_url)).classes(
+                            "ops-secondary-preview-thumb"
+                        )
+                    else:
+                        with ui.element("div").classes(
+                            "ops-secondary-preview-thumb ops-secondary-preview-thumb--empty"
+                        ):
+                            ui.icon("image_not_supported", size="20px")
+                    with ui.column().classes("ops-secondary-preview-copy gap-0"):
+                        ui.label(f'第 {int(row.get("position") or 0)} 条').classes(
+                            "ops-secondary-preview-position"
+                        )
+                        ui.label(str(row.get("title") or "未命名广告")).classes(
+                            "ops-secondary-preview-title"
+                        )
+
     version_choice_running = {"value": False}
 
     async def choose_version(
@@ -2301,6 +2344,29 @@ def build_review_page(
                             ),
                             sanitize=False,
                         ).classes("ops-document-canvas")
+
+                    with ui.element("section").classes("ops-secondary-preview"):
+                        with ui.element("div").classes(
+                            "ops-secondary-preview-heading"
+                        ):
+                            ui.label("广告栏预览").classes("ops-panel-title")
+                            ui.label("按当前草稿写入规则生成").classes(
+                                "ops-panel-subtitle"
+                            )
+                        secondary_preview_host = ui.element("div").classes(
+                            "ops-secondary-preview-list"
+                        )
+                        with secondary_preview_host:
+                            with ui.row().classes("items-center gap-2"):
+                                ui.spinner("dots", size="20px", color="primary")
+                                ui.label("正在读取广告栏…").classes(
+                                    "ops-panel-subtitle"
+                                )
+                        ui.timer(
+                            0.05,
+                            lambda: load_secondary_preview(secondary_preview_host),
+                            once=True,
+                        )
 
                 with ui.tab_panel(edit_tab).classes("ops-review-mode-panel"):
                     with ui.element("div").classes("ops-review-editor-grid"):

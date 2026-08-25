@@ -21,6 +21,35 @@ from .rendering import RenderingStep
 logger = logging.getLogger(__name__)
 
 
+def resolve_secondary_articles(
+    client: Any,
+    config: dict[str, Any],
+    db: Any,
+    job: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve the secondary articles exactly as the delivery path will."""
+
+    secondaries = select_secondary_articles(
+        client,
+        config.get("layout") or {},
+        exclude_titles=[str(job.get("selected_title") or "")],
+    )
+    benchmark_cfg = config.get("benchmark") or {}
+    if benchmark_cfg.get("enabled", False):
+        record = fetch_latest_benchmark_record(config, db)
+        secondaries = sync_secondary_titles(
+            secondaries,
+            record,
+            threshold=float(benchmark_cfg.get("image_match_threshold") or 0.90),
+            matched_only=bool(benchmark_cfg.get("matched_only", False)),
+            follow_source_order=bool(benchmark_cfg.get("follow_source_order", True)),
+            deduplicate_by_image=bool(
+                benchmark_cfg.get("deduplicate_by_image", True)
+            ),
+        )
+    return secondaries
+
+
 class DeliverySteps:
     """Draft composition and WeChat delivery, independent from AI generation."""
 
@@ -216,29 +245,12 @@ class DeliverySteps:
         self, client: Any, job: dict[str, Any]
     ) -> list[dict[str, Any]]:
         try:
-            secondaries = select_secondary_articles(
+            return resolve_secondary_articles(
                 client,
-                self.context.config.get("layout") or {},
-                exclude_titles=[str(job.get("selected_title") or "")],
+                self.context.config,
+                self.context.db,
+                job,
             )
-            benchmark_cfg = self.context.config.get("benchmark") or {}
-            if benchmark_cfg.get("enabled", False):
-                record = fetch_latest_benchmark_record(
-                    self.context.config, self.context.db
-                )
-                secondaries = sync_secondary_titles(
-                    secondaries,
-                    record,
-                    threshold=float(benchmark_cfg.get("image_match_threshold") or 0.90),
-                    matched_only=bool(benchmark_cfg.get("matched_only", False)),
-                    follow_source_order=bool(
-                        benchmark_cfg.get("follow_source_order", True)
-                    ),
-                    deduplicate_by_image=bool(
-                        benchmark_cfg.get("deduplicate_by_image", True)
-                    ),
-                )
-            return secondaries
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "select secondary articles failed: %s",
