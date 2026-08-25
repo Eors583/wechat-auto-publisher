@@ -81,7 +81,7 @@ def _tab_labels(function: Any) -> list[str]:
     return [str(node.args[0].value) for node in calls]
 
 
-def test_primary_navigation_exposes_personal_settings_and_shadow_usage() -> None:
+def test_primary_navigation_exposes_personal_settings_and_points_usage() -> None:
     labels = _tab_labels(desktop.create_desktop_app)
 
     assert labels[:8] == [
@@ -91,7 +91,7 @@ def test_primary_navigation_exposes_personal_settings_and_shadow_usage() -> None
         "公众号",
         "模型配置",
         "飞书机器人",
-        "套餐与用量",
+        "积分与用量",
         "文章审核",
     ]
 

@@ -212,6 +212,11 @@ def test_article_usage_never_presents_partial_or_manus_usage_as_total_tokens(
         "manus_tasks": 0,
         "provider_credits": 0,
         "credit_metered_calls": 0,
+        "pricing_incomplete_calls": 2,
+        "estimated_points": 0,
+        "reserved_points": 0,
+        "charged_points": 0,
+        "live_pricing": 0,
         "complete": False,
     }
     assert usage[manus_job]["known_tokens"] == 0

@@ -30,8 +30,8 @@ from app.editorial_review import (
     normalize_review_config,
     review_options,
 )
-from app.services.failures import sanitize_failure_text
 from app.services.billing import BillingService
+from app.services.failures import sanitize_failure_text
 from app.services.model_readiness import record_model_auth_failure_for_error
 
 _INTEGRITY_ERRORS = (sqlite3.IntegrityError, *postgres_integrity_errors())
@@ -299,6 +299,7 @@ class EditorialReviewService:
                 try:
                     with BillingService(self.db).operation(
                         scene="editorial_review",
+                        task_code="editorial_review",
                         subject_type="review",
                         subject_id=review_id,
                         source_channel="service",
@@ -497,6 +498,7 @@ class EditorialReviewService:
             try:
                 with BillingService(self.db).operation(
                     scene="editorial_rewrite",
+                    task_code="editorial_rewrite",
                     subject_type="review_application",
                     subject_id=application_id,
                     source_channel="service",

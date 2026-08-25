@@ -1401,32 +1401,61 @@ def _generation_usage_text(
     manus_tasks = int(usage.get("manus_tasks") or 0)
     credits = int(usage.get("provider_credits") or 0)
     credit_calls = int(usage.get("credit_metered_calls") or 0)
+    estimated_points = int(usage.get("estimated_points") or 0)
+    reserved_points = int(usage.get("reserved_points") or 0)
+    charged_points = int(usage.get("charged_points") or 0)
+    pricing_incomplete = int(usage.get("pricing_incomplete_calls") or 0)
+    live_pricing = bool(usage.get("live_pricing"))
+
+    def with_points(token_text: str, token_hint: str) -> tuple[str, str]:
+        if reserved_points:
+            return (
+                f"已冻结 {reserved_points:,} 积分 · {token_text}",
+                "任务完成后按实际成本结算并自动退回差额。" + token_hint,
+            )
+        if charged_points:
+            return (
+                f"消耗 {charged_points:,} 积分 · {token_text}",
+                "这是本篇文章已结算的最终积分。" + token_hint,
+            )
+        if live_pricing and pricing_incomplete:
+            return (
+                f"积分待核对 · 未扣除 · {token_text}",
+                "服务商计量或价格卡不完整，本次未扣积分。" + token_hint,
+            )
+        if estimated_points:
+            return (
+                f"预计 {estimated_points:,} 积分 · {token_text}",
+                "当前为积分试算，不会实际扣除。" + token_hint,
+            )
+        return token_text, token_hint
+
     if calls <= 0:
         return "Token 待统计", "尚未取得本篇文章的模型调用计量记录"
     if bool(usage.get("complete")):
-        return (
+        return with_points(
             f"实际 {known:,} Token · {metered}/{calls}",
             "全部文本模型调用均返回了服务商实际 Token，可用于审计与结算",
         )
 
     suffix = f" · Manus {credits:,} Credits" if credit_calls else ""
     if known:
-        return (
+        return with_points(
             f"已确认 {known:,} Token · {metered}/{calls}{suffix}",
             "用量不完整：只展示服务商已确认部分，不可作为文章总 Token 结算",
         )
     if estimated:
-        return (
+        return with_points(
             f"估算 {estimated:,} Token · 非实际",
             "这是本地估算，不是服务商账单 Token，不可用于严格计费",
         )
     if manus_tasks:
         credit_text = f"{credits:,} Credits" if credit_calls else "Credits 待同步"
-        return (
+        return with_points(
             f"Manus {credit_text} · 无 Token",
             "Manus 按任务 Credit 计量，服务商没有提供输入/输出 Token",
         )
-    return (
+    return with_points(
         f"Token 未提供 · {metered}/{calls}",
         "服务商响应缺少实际 Token，用量不完整且不可用于结算",
     )

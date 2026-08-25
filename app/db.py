@@ -18,10 +18,12 @@ from app.db_backend import (
 )
 from app.schema_migrations import (
     BASELINE_SCHEMA,
+    COMMERCIAL_POINTS_BILLING,
     DROP_DUPLICATE_INDEXES,
     PHASE_ONE_COMPAT,
     SHADOW_BILLING_SCHEMA,
     STRICT_TOKEN_METERING,
+    apply_commercial_points_billing_schema,
     apply_shadow_billing_schema,
     apply_strict_token_metering_schema,
     ensure_schema_migrations,
@@ -107,6 +109,22 @@ def customer_data_scope(user_id: str | None) -> Iterator[None]:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _normalized_future_timestamp(value: str | None, *, label: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label}必须是有效的 ISO 时间") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label}必须包含时区")
+    normalized = parsed.astimezone(timezone.utc)
+    if normalized <= datetime.now(timezone.utc):
+        raise ValueError(f"{label}必须晚于当前时间")
+    return normalized.isoformat(timespec="microseconds")
 
 
 class Database:
@@ -1212,6 +1230,13 @@ class Database:
                 record_schema_migration(
                     conn,
                     STRICT_TOKEN_METERING,
+                    applied_at=_utc_now(),
+                )
+            if not migration_applied(conn, COMMERCIAL_POINTS_BILLING):
+                apply_commercial_points_billing_schema(conn)
+                record_schema_migration(
+                    conn,
+                    COMMERCIAL_POINTS_BILLING,
                     applied_at=_utc_now(),
                 )
 
@@ -6677,9 +6702,14 @@ class Database:
                 INSERT INTO usage_operations (
                     id, owner_user_id, scene, source_channel, subject_type,
                     subject_id, idempotency_key, status, mode, job_id,
+                    task_code, task_base_points, resource_points,
                     estimated_points, reserved_points, charged_points,
-                    reservation_expires_at, created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, ?, NULL)
+                    pricing_snapshot_json, reservation_expires_at,
+                    created_at, completed_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0,
+                    '{}', NULL, ?, NULL
+                )
                 ON CONFLICT(owner_user_id, idempotency_key) DO NOTHING
                 """,
                 (
@@ -6693,6 +6723,8 @@ class Database:
                     str(operation.get("status") or "running"),
                     str(operation.get("mode") or "shadow"),
                     operation.get("job_id"),
+                    str(operation.get("task_code") or operation.get("scene") or ""),
+                    max(0, int(operation.get("task_base_points") or 0)),
                     str(operation.get("created_at") or _utc_now()),
                 ),
             )
@@ -6714,6 +6746,9 @@ class Database:
         status: str,
         estimated_points: int,
         charged_points: int,
+        task_base_points: int = 0,
+        resource_points: int = 0,
+        pricing_snapshot_json: str = "{}",
         completed_at: str,
     ) -> None:
         owner_user_id = str(self.owner_user_id or "").strip()
@@ -6724,13 +6759,17 @@ class Database:
                 """
                 UPDATE usage_operations
                 SET status = ?, estimated_points = ?, charged_points = ?,
-                    completed_at = ?
+                    task_base_points = ?, resource_points = ?,
+                    pricing_snapshot_json = ?, completed_at = ?
                 WHERE id = ? AND owner_user_id = ?
                 """,
                 (
                     str(status),
                     max(0, int(estimated_points)),
-                    0 if str(status) else max(0, int(charged_points)),
+                    max(0, int(charged_points)),
+                    max(0, int(task_base_points)),
+                    max(0, int(resource_points)),
+                    str(pricing_snapshot_json or "{}"),
                     str(completed_at),
                     str(operation_id),
                     owner_user_id,
@@ -6864,13 +6903,51 @@ class Database:
                        COALESCE(SUM(image_count), 0) AS image_count,
                        COALESCE(SUM(provider_credits), 0) AS provider_credits,
                        COALESCE(SUM(CASE WHEN contributes_to_result = 1
-                           THEN estimated_points ELSE 0 END), 0) AS estimated_points
+                           THEN estimated_points ELSE 0 END), 0) AS estimated_points,
+                       COALESCE(SUM(CASE WHEN billable = 1
+                           THEN provider_cost_micro_cny ELSE 0 END), 0)
+                           AS provider_cost_micro_cny,
+                       COALESCE(SUM(CASE WHEN billable = 1
+                           THEN retail_cost_micro_cny ELSE 0 END), 0)
+                           AS risk_adjusted_cost_micro_cny,
+                       COALESCE(SUM(CASE WHEN billable = 1
+                           THEN 1 ELSE 0 END), 0) AS billable_events,
+                       COALESCE(SUM(CASE
+                           WHEN funding_source = 'platform'
+                            AND status = 'succeeded'
+                            AND contributes_to_result = 1
+                            AND pricing_status NOT IN (
+                                'priced', 'fixed_price', 'unit_priced',
+                                'customer_funded'
+                            )
+                           THEN 1 ELSE 0 END), 0) AS unpriced_platform_events,
+                       COALESCE(SUM(CASE
+                           WHEN (funding_source IN ('customer', 'local')
+                                 OR pricing_status = 'customer_funded')
+                            AND status = 'succeeded'
+                            AND contributes_to_result = 1
+                           THEN 1 ELSE 0 END), 0) AS customer_funded_events
                 FROM ai_usage_events
                 WHERE operation_id = ? AND owner_user_id = ?
                 """,
                 (str(operation_id), owner_user_id),
             ).fetchone()
         return {key: int(value or 0) for key, value in dict(row or {}).items()}
+
+    def get_usage_operation(self, operation_id: str) -> dict[str, Any] | None:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM usage_operations
+                WHERE id = ? AND owner_user_id = ?
+                LIMIT 1
+                """,
+                (str(operation_id), owner_user_id),
+            ).fetchone()
+        return dict(row) if row else None
 
     def get_effective_model_price_card(
         self,
@@ -6910,7 +6987,33 @@ class Database:
         if self.owner_user_id:
             raise ValueError("模型价格卡只能由平台管理员维护")
         card_id = str(card.get("id") or uuid.uuid4().hex)
+        metering_mode = str(card.get("metering_mode") or "TOKEN").upper()
+        if metering_mode not in {"TOKEN", "FIXED", "UNIT", "BYOK"}:
+            raise ValueError("计量模式必须为 TOKEN、FIXED、UNIT 或 BYOK")
         now = _utc_now()
+        effective_from = str(card.get("effective_from") or now)
+        effective_to = card.get("effective_to") or None
+        try:
+            start = datetime.fromisoformat(effective_from.replace("Z", "+00:00"))
+            end = (
+                datetime.fromisoformat(str(effective_to).replace("Z", "+00:00"))
+                if effective_to
+                else None
+            )
+        except ValueError as exc:
+            raise ValueError("价格卡生效时间必须是有效的 ISO 时间") from exc
+        if start.tzinfo is None or (end is not None and end.tzinfo is None):
+            raise ValueError("价格卡生效时间必须包含时区")
+        effective_from = start.astimezone(timezone.utc).isoformat(
+            timespec="microseconds"
+        )
+        effective_to = (
+            end.astimezone(timezone.utc).isoformat(timespec="microseconds")
+            if end is not None
+            else None
+        )
+        if effective_to is not None and effective_to <= effective_from:
+            raise ValueError("价格卡失效时间必须晚于生效时间")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -6920,8 +7023,12 @@ class Database:
                     cached_input_micro_cny_per_million,
                     output_micro_cny_per_million, image_micro_cny_each,
                     fixed_request_micro_cny, markup_basis_points, points_per_cny,
+                    metering_mode, reasoning_micro_cny_per_million,
+                    provider_unit_micro_cny_each, provider_risk_basis_points,
                     effective_from, effective_to, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 ON CONFLICT(id) DO UPDATE SET
                     provider = excluded.provider,
                     provider_model = excluded.provider_model,
@@ -6933,6 +7040,10 @@ class Database:
                     fixed_request_micro_cny = excluded.fixed_request_micro_cny,
                     markup_basis_points = excluded.markup_basis_points,
                     points_per_cny = excluded.points_per_cny,
+                    metering_mode = excluded.metering_mode,
+                    reasoning_micro_cny_per_million = excluded.reasoning_micro_cny_per_million,
+                    provider_unit_micro_cny_each = excluded.provider_unit_micro_cny_each,
+                    provider_risk_basis_points = excluded.provider_risk_basis_points,
                     effective_from = excluded.effective_from,
                     effective_to = excluded.effective_to,
                     enabled = excluded.enabled,
@@ -6953,8 +7064,18 @@ class Database:
                     max(0, int(card.get("fixed_request_micro_cny") or 0)),
                     max(0, int(card.get("markup_basis_points") or 10_000)),
                     max(0, int(card.get("points_per_cny") or 100)),
-                    str(card.get("effective_from") or now),
-                    card.get("effective_to") or None,
+                    metering_mode,
+                    max(
+                        0,
+                        int(card.get("reasoning_micro_cny_per_million") or 0),
+                    ),
+                    max(0, int(card.get("provider_unit_micro_cny_each") or 0)),
+                    max(
+                        0,
+                        int(card.get("provider_risk_basis_points") or 10_000),
+                    ),
+                    effective_from,
+                    effective_to,
                     1 if card.get("enabled", True) else 0,
                     str(card.get("created_at") or now),
                     now,
@@ -6970,6 +7091,162 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(sql).fetchall()
         return [dict(row) for row in rows]
+
+    def get_billing_pricing_policy(self) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM billing_pricing_policies
+                WHERE id = 'default' AND enabled = 1
+                LIMIT 1
+                """
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def upsert_billing_pricing_policy(self, policy: dict[str, Any]) -> None:
+        if self.owner_user_id:
+            raise ValueError("商业积分政策只能由平台管理员维护")
+        mode = str(policy.get("mode") or "shadow").strip().casefold()
+        if mode not in {"off", "shadow", "live"}:
+            raise ValueError("积分模式必须为 off、shadow 或 live")
+
+        def basis_points(name: str, default: int) -> int:
+            value = int(policy.get(name, default) or 0)
+            if value < 0 or value > 10_000:
+                raise ValueError(f"{name} 必须在 0 到 10000 之间")
+            return value
+
+        point_value = int(policy.get("point_retail_micro_cny", 10_000))
+        rounding = int(policy.get("rounding_points", 5))
+        if point_value <= 0 or rounding <= 0:
+            raise ValueError("积分标价和取整单位必须大于 0")
+        discount = basis_points("max_package_discount_basis_points", 2_000)
+        payment_fee = basis_points("payment_fee_basis_points", 150)
+        tax = basis_points("tax_basis_points", 600)
+        target_margin = basis_points("target_margin_basis_points", 6_500)
+        provider_risk = basis_points(
+            "provider_risk_reserve_basis_points",
+            1_500,
+        )
+        if mode == "live" and any(
+            value >= 10_000 for value in (discount, payment_fee, target_margin)
+        ):
+            raise ValueError(
+                "正式计费时套餐折扣、支付费率和目标贡献毛利率必须低于 100%"
+            )
+        now = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO billing_pricing_policies (
+                    id, name, mode, point_retail_micro_cny,
+                    max_package_discount_basis_points,
+                    payment_fee_basis_points, tax_basis_points,
+                    target_margin_basis_points,
+                    provider_risk_reserve_basis_points,
+                    platform_task_cost_micro_cny, rounding_points,
+                    byok_infrastructure_points, enabled, version,
+                    created_at, updated_at
+                ) VALUES (
+                    'default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    mode = excluded.mode,
+                    point_retail_micro_cny = excluded.point_retail_micro_cny,
+                    max_package_discount_basis_points = excluded.max_package_discount_basis_points,
+                    payment_fee_basis_points = excluded.payment_fee_basis_points,
+                    tax_basis_points = excluded.tax_basis_points,
+                    target_margin_basis_points = excluded.target_margin_basis_points,
+                    provider_risk_reserve_basis_points = excluded.provider_risk_reserve_basis_points,
+                    platform_task_cost_micro_cny = excluded.platform_task_cost_micro_cny,
+                    rounding_points = excluded.rounding_points,
+                    byok_infrastructure_points = excluded.byok_infrastructure_points,
+                    enabled = 1,
+                    version = billing_pricing_policies.version + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(policy.get("name") or "默认商业积分政策")[:120],
+                    mode,
+                    point_value,
+                    discount,
+                    payment_fee,
+                    tax,
+                    target_margin,
+                    provider_risk,
+                    max(
+                        0,
+                        int(policy.get("platform_task_cost_micro_cny") or 0),
+                    ),
+                    rounding,
+                    max(
+                        0,
+                        int(policy.get("byok_infrastructure_points") or 0),
+                    ),
+                    now,
+                    now,
+                ),
+            )
+
+    def list_billing_task_rates(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM billing_task_rates"
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY task_code"
+        with self.connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_billing_task_rate(self, task_code: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM billing_task_rates
+                WHERE task_code = ? AND enabled = 1
+                LIMIT 1
+                """,
+                (str(task_code),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_billing_task_rate(self, rate: dict[str, Any]) -> str:
+        if self.owner_user_id:
+            raise ValueError("任务积分价卡只能由平台管理员维护")
+        task_code = str(rate.get("task_code") or "").strip()[:80]
+        if not task_code:
+            raise ValueError("任务编码不能为空")
+        base_points = max(0, int(rate.get("base_points") or 0))
+        max_reserve_points = max(0, int(rate.get("max_reserve_points") or 0))
+        if bool(rate.get("enabled", True)) and max_reserve_points < base_points:
+            raise ValueError("最高冻结积分不能低于任务基础积分")
+        now = _utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO billing_task_rates (
+                    task_code, label, base_points, max_reserve_points,
+                    enabled, version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(task_code) DO UPDATE SET
+                    label = excluded.label,
+                    base_points = excluded.base_points,
+                    max_reserve_points = excluded.max_reserve_points,
+                    enabled = excluded.enabled,
+                    version = billing_task_rates.version + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    task_code,
+                    str(rate.get("label") or task_code)[:120],
+                    base_points,
+                    max_reserve_points,
+                    1 if rate.get("enabled", True) else 0,
+                    now,
+                    now,
+                ),
+            )
+        return task_code
 
     def billing_usage_summary(self) -> dict[str, int]:
         owner_user_id = str(self.owner_user_id or "").strip()
@@ -6994,13 +7271,15 @@ class Database:
                            AND e.token_usage_status = 'UNAVAILABLE'
                            AND e.usage_source <> 'estimated'
                            THEN 1 ELSE 0 END), 0) AS unavailable_token_calls,
-                       COALESCE(SUM(CASE WHEN e.contributes_to_result = 1
-                           THEN e.estimated_points ELSE 0 END), 0) AS estimated_points
+                       (SELECT COALESCE(SUM(points.estimated_points), 0)
+                        FROM usage_operations AS points
+                        WHERE points.owner_user_id = ?
+                          AND points.created_at >= ?) AS estimated_points
                 FROM usage_operations AS o
                 LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
                 WHERE o.owner_user_id = ? AND o.created_at >= ?
                 """,
-                (owner_user_id, since),
+                (owner_user_id, since, owner_user_id, since),
             ).fetchone()
         return {key: int(value or 0) for key, value in dict(row or {}).items()}
 
@@ -7018,7 +7297,9 @@ class Database:
                 """
                 SELECT o.id, o.scene, o.source_channel, o.subject_type,
                        o.subject_id, o.status, o.mode, o.job_id,
-                       o.estimated_points, o.charged_points,
+                       o.task_code, o.task_base_points, o.resource_points,
+                       o.estimated_points, o.reserved_points, o.charged_points,
+                       o.pricing_snapshot_json,
                        o.created_at, o.completed_at,
                        COUNT(e.id) AS event_count,
                        COALESCE(SUM(CASE WHEN e.token_usage_status = 'RECORDED'
@@ -7042,6 +7323,15 @@ class Database:
                        COALESCE(SUM(CASE WHEN e.modality = 'text'
                            AND e.usage_source = 'estimated'
                            THEN 1 ELSE 0 END), 0) AS estimated_calls,
+                       COALESCE(SUM(CASE
+                           WHEN e.funding_source = 'platform'
+                            AND e.status = 'succeeded'
+                            AND e.contributes_to_result = 1
+                            AND e.pricing_status NOT IN (
+                                'priced', 'fixed_price', 'unit_priced',
+                                'customer_funded'
+                            )
+                           THEN 1 ELSE 0 END), 0) AS pricing_incomplete_calls,
                        COALESCE(SUM(
                            CASE
                                WHEN e.pricing_status = 'price_missing'
@@ -7056,7 +7346,9 @@ class Database:
                 WHERE o.owner_user_id = ?
                 GROUP BY o.id, o.scene, o.source_channel, o.subject_type,
                          o.subject_id, o.status, o.mode, o.job_id,
-                         o.estimated_points, o.charged_points,
+                         o.task_code, o.task_base_points, o.resource_points,
+                         o.estimated_points, o.reserved_points, o.charged_points,
+                         o.pricing_snapshot_json,
                          o.created_at, o.completed_at
                 ORDER BY o.created_at DESC
                 LIMIT ? OFFSET ?
@@ -7105,7 +7397,34 @@ class Database:
                            THEN e.fixed_units ELSE 0 END), 0) AS manus_tasks,
                        COALESCE(SUM(e.provider_credits), 0) AS provider_credits,
                        COALESCE(SUM(CASE WHEN e.provider_credits IS NOT NULL
-                           THEN 1 ELSE 0 END), 0) AS credit_metered_calls
+                           THEN 1 ELSE 0 END), 0) AS credit_metered_calls,
+                       COALESCE(SUM(CASE
+                           WHEN e.funding_source = 'platform'
+                            AND e.status = 'succeeded'
+                            AND e.contributes_to_result = 1
+                            AND e.pricing_status NOT IN (
+                                'priced', 'fixed_price', 'unit_priced',
+                                'customer_funded'
+                            )
+                           THEN 1 ELSE 0 END), 0) AS pricing_incomplete_calls,
+                       (SELECT COALESCE(SUM(points.estimated_points), 0)
+                        FROM usage_operations AS points
+                        WHERE points.owner_user_id = ?
+                          AND points.scene = 'article_generation'
+                          AND points.job_id = o.job_id) AS estimated_points,
+                       (SELECT COALESCE(SUM(points.reserved_points), 0)
+                        FROM usage_operations AS points
+                        WHERE points.owner_user_id = ?
+                          AND points.scene = 'article_generation'
+                          AND points.job_id = o.job_id
+                          AND points.status = 'running') AS reserved_points,
+                       (SELECT COALESCE(SUM(points.charged_points), 0)
+                        FROM usage_operations AS points
+                        WHERE points.owner_user_id = ?
+                          AND points.scene = 'article_generation'
+                          AND points.job_id = o.job_id) AS charged_points,
+                       MAX(CASE WHEN o.mode = 'live' THEN 1 ELSE 0 END)
+                           AS live_pricing
                 FROM usage_operations AS o
                 LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
                 WHERE o.owner_user_id = ?
@@ -7113,7 +7432,13 @@ class Database:
                   AND o.job_id IN ({placeholders})
                 GROUP BY o.job_id
                 """,
-                (owner_user_id, *wanted),
+                (
+                    owner_user_id,
+                    owner_user_id,
+                    owner_user_id,
+                    owner_user_id,
+                    *wanted,
+                ),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -7179,6 +7504,250 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def reserve_credit_points(
+        self,
+        operation_id: str,
+        *,
+        points: int,
+        expires_at: str,
+    ) -> int:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        amount = max(0, int(points))
+        if not owner_user_id:
+            raise ValueError("积分冻结必须绑定当前登录账号")
+        if amount <= 0:
+            return 0
+        now = _utc_now()
+        with self.connect() as conn:
+            operation_lock = " FOR UPDATE" if self.backend == "postgresql" else ""
+            operation = conn.execute(
+                """
+                SELECT status, reserved_points, charged_points
+                FROM usage_operations
+                WHERE id = ? AND owner_user_id = ?
+                """
+                + operation_lock,
+                (str(operation_id), owner_user_id),
+            ).fetchone()
+            if not operation:
+                raise ValueError("积分操作不存在或不属于当前登录账号")
+            already_reserved = int(operation["reserved_points"] or 0)
+            if already_reserved:
+                return already_reserved
+            if str(operation["status"]) != "running":
+                raise ValueError("已结束的积分操作不能再次冻结")
+
+            lock_clause = " FOR UPDATE" if self.backend == "postgresql" else ""
+            buckets = conn.execute(
+                """
+                SELECT id, remaining_points, expires_at, created_at
+                FROM credit_buckets
+                WHERE owner_user_id = ? AND remaining_points > 0
+                  AND (expires_at IS NULL OR expires_at > ?)
+                ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END,
+                         expires_at, created_at
+                """
+                + lock_clause,
+                (owner_user_id, now),
+            ).fetchall()
+            available = sum(int(row["remaining_points"] or 0) for row in buckets)
+            if available < amount:
+                raise ValueError(
+                    f"积分不足：本次最多冻结 {amount}，当前可用 {available}"
+                )
+
+            remaining = amount
+            for bucket in buckets:
+                if remaining <= 0:
+                    break
+                used = min(remaining, int(bucket["remaining_points"] or 0))
+                conn.execute(
+                    """
+                    UPDATE credit_buckets
+                    SET remaining_points = remaining_points - ?
+                    WHERE id = ? AND owner_user_id = ?
+                      AND remaining_points >= ?
+                    """,
+                    (used, str(bucket["id"]), owner_user_id, used),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO credit_ledger (
+                        id, owner_user_id, bucket_id, operation_id,
+                        amount_points, event_type, actor_user_id, reason,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, 'reserve', '', ?, ?)
+                    """,
+                    (
+                        uuid.uuid4().hex,
+                        owner_user_id,
+                        str(bucket["id"]),
+                        str(operation_id),
+                        -used,
+                        "任务开始前冻结最高积分",
+                        now,
+                    ),
+                )
+                remaining -= used
+            if remaining:
+                raise RuntimeError("积分并发冻结失败，请重试")
+            conn.execute(
+                """
+                UPDATE usage_operations
+                SET reserved_points = ?, reservation_expires_at = ?
+                WHERE id = ? AND owner_user_id = ? AND status = 'running'
+                """,
+                (amount, str(expires_at), str(operation_id), owner_user_id),
+            )
+        return amount
+
+    def settle_credit_operation(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        charged_points: int,
+        estimated_points: int,
+        task_base_points: int,
+        resource_points: int,
+        pricing_snapshot_json: str,
+        completed_at: str,
+    ) -> int:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            raise ValueError("积分结算必须绑定当前登录账号")
+        with self.connect() as conn:
+            lock_clause = " FOR UPDATE" if self.backend == "postgresql" else ""
+            operation = conn.execute(
+                """
+                SELECT status, reserved_points, charged_points, completed_at
+                FROM usage_operations
+                WHERE id = ? AND owner_user_id = ?
+                """
+                + lock_clause,
+                (str(operation_id), owner_user_id),
+            ).fetchone()
+            if not operation:
+                raise ValueError("积分操作不存在或不属于当前登录账号")
+            if operation["completed_at"] is not None:
+                return int(operation["charged_points"] or 0)
+
+            reserved = max(0, int(operation["reserved_points"] or 0))
+            charged = min(max(0, int(charged_points)), reserved)
+            release_points = reserved - charged
+            reservations = conn.execute(
+                """
+                SELECT l.bucket_id, -l.amount_points AS reserved_points,
+                       b.expires_at, b.created_at
+                FROM credit_ledger AS l
+                JOIN credit_buckets AS b ON b.id = l.bucket_id
+                WHERE l.owner_user_id = ? AND l.operation_id = ?
+                  AND l.event_type = 'reserve'
+                """,
+                (owner_user_id, str(operation_id)),
+            ).fetchall()
+            release_order = sorted(
+                reservations,
+                key=lambda row: (
+                    row["expires_at"] is None,
+                    str(row["expires_at"] or ""),
+                    str(row["created_at"] or ""),
+                ),
+                reverse=True,
+            )
+            released = 0
+            for reservation in release_order:
+                if released >= release_points:
+                    break
+                amount = min(
+                    release_points - released,
+                    int(reservation["reserved_points"] or 0),
+                )
+                if amount <= 0:
+                    continue
+                bucket_id = str(reservation["bucket_id"])
+                conn.execute(
+                    """
+                    UPDATE credit_buckets
+                    SET remaining_points = remaining_points + ?
+                    WHERE id = ? AND owner_user_id = ?
+                    """,
+                    (amount, bucket_id, owner_user_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO credit_ledger (
+                        id, owner_user_id, bucket_id, operation_id,
+                        amount_points, event_type, actor_user_id, reason,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, 'release', '', ?, ?)
+                    """,
+                    (
+                        uuid.uuid4().hex,
+                        owner_user_id,
+                        bucket_id,
+                        str(operation_id),
+                        amount,
+                        "按最终积分释放冻结差额",
+                        str(completed_at),
+                    ),
+                )
+                released += amount
+            if released != release_points:
+                raise RuntimeError("冻结积分释放记录不完整，已回滚结算")
+            conn.execute(
+                """
+                UPDATE usage_operations
+                SET status = ?, estimated_points = ?, charged_points = ?,
+                    task_base_points = ?, resource_points = ?,
+                    pricing_snapshot_json = ?, completed_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (
+                    str(status),
+                    max(0, int(estimated_points)),
+                    charged,
+                    max(0, int(task_base_points)),
+                    max(0, int(resource_points)),
+                    str(pricing_snapshot_json or "{}"),
+                    str(completed_at),
+                    str(operation_id),
+                    owner_user_id,
+                ),
+            )
+        return charged
+
+    def release_expired_credit_reservations(self, *, now: str | None = None) -> int:
+        owner_user_id = str(self.owner_user_id or "").strip()
+        if not owner_user_id:
+            return 0
+        effective_now = str(now or _utc_now())
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM usage_operations
+                WHERE owner_user_id = ? AND mode = 'live' AND status = 'running'
+                  AND reservation_expires_at IS NOT NULL
+                  AND reservation_expires_at <= ?
+                ORDER BY reservation_expires_at
+                """,
+                (owner_user_id, effective_now),
+            ).fetchall()
+        released = 0
+        for row in rows:
+            self.settle_credit_operation(
+                str(row["id"]),
+                status="expired",
+                charged_points=0,
+                estimated_points=0,
+                task_base_points=0,
+                resource_points=0,
+                pricing_snapshot_json='{"reason":"reservation_expired"}',
+                completed_at=effective_now,
+            )
+            released += 1
+        return released
+
     def grant_credit_points(
         self,
         *,
@@ -7197,6 +7766,10 @@ class Database:
             raise ValueError("发放积分必须大于 0")
         bucket_id = uuid.uuid4().hex
         now = _utc_now()
+        normalized_expiry = _normalized_future_timestamp(
+            expires_at,
+            label="积分到期时间",
+        )
         with self.connect() as conn:
             conn.execute(
                 """
@@ -7212,7 +7785,7 @@ class Database:
                     str(source_id or ""),
                     amount,
                     amount,
-                    expires_at,
+                    normalized_expiry,
                     now,
                 ),
             )
@@ -7238,19 +7811,33 @@ class Database:
     def credit_wallet_summary(self) -> dict[str, int]:
         owner_user_id = str(self.owner_user_id or "").strip()
         if not owner_user_id:
-            return {"available": 0}
+            return {"available": 0, "reserved": 0, "charged": 0}
         now = _utc_now()
+        since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(
+            timespec="microseconds"
+        )
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT COALESCE(SUM(remaining_points), 0) AS available
-                FROM credit_buckets
-                WHERE owner_user_id = ?
-                  AND (expires_at IS NULL OR expires_at > ?)
+                SELECT
+                    (SELECT COALESCE(SUM(remaining_points), 0)
+                     FROM credit_buckets
+                     WHERE owner_user_id = ?
+                       AND (expires_at IS NULL OR expires_at > ?)) AS available,
+                    (SELECT COALESCE(SUM(reserved_points), 0)
+                     FROM usage_operations
+                     WHERE owner_user_id = ? AND mode = 'live'
+                       AND status = 'running') AS reserved,
+                    (SELECT COALESCE(SUM(charged_points), 0)
+                     FROM usage_operations
+                     WHERE owner_user_id = ? AND completed_at >= ?) AS charged
                 """,
-                (owner_user_id, now),
+                (owner_user_id, now, owner_user_id, owner_user_id, since),
             ).fetchone()
-        return {"available": int((row or {})["available"] or 0)}
+        return {
+            key: int(value or 0)
+            for key, value in dict(row or {}).items()
+        }
 
     def list_credit_ledger(
         self,

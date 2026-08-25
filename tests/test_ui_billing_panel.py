@@ -12,8 +12,9 @@ def test_customer_and_admin_have_separate_usage_entries() -> None:
     desktop_source = inspect.getsource(desktop.create_desktop_app)
     admin_source = inspect.getsource(admin_server.create_admin_app)
 
-    assert 'ui.tab("套餐与用量", icon="toll")' in desktop_source
+    assert 'ui.tab("积分与用量", icon="toll")' in desktop_source
     assert "build_billing_panel(page_state)" in desktop_source
+    assert "and not open_requested_billing" in desktop_source
     assert 'ui.tab("AI 成本", icon="query_stats")' in admin_source
     assert "build_admin_billing_panel(state)" in admin_source
 
@@ -24,6 +25,22 @@ def test_customer_projection_never_renders_internal_cost_fields() -> None:
     assert "provider_cost_micro_cny" not in source
     assert "retail_cost_micro_cny" not in source
     assert "API Key" in source
+    assert "实际消耗" in source
+    assert 'row.get("charged_points")' in source
+
+
+def test_admin_billing_panel_can_configure_and_grant_commercial_points() -> None:
+    source = inspect.getsource(billing.build_admin_billing_panel)
+
+    assert "商业积分政策" in source
+    assert "任务价值积分" in source
+    assert "服务商成本价卡" in source
+    assert "TOKEN" in source
+    assert "FIXED" in source
+    assert "UNIT" in source
+    assert "BYOK" in source
+    assert "发放积分" in source
+    assert "live_configuration_issues" in source
 
 
 def test_billing_layout_has_explicit_scroll_and_long_content_containment() -> None:

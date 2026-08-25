@@ -57,6 +57,15 @@ STRICT_TOKEN_METERING = SchemaMigration(
         "provider request/response trace-id uniqueness"
     ),
 )
+COMMERCIAL_POINTS_BILLING = SchemaMigration(
+    "20260825_0006",
+    "commercial_points_billing",
+    (
+        "versioned commercial pricing policy and task rates; TOKEN, FIXED, "
+        "UNIT and BYOK price-card fields; operation pricing snapshots; "
+        "credit reservation and release idempotency"
+    ),
+)
 
 SCHEMA_MIGRATIONS = (
     BASELINE_SCHEMA,
@@ -64,6 +73,7 @@ SCHEMA_MIGRATIONS = (
     DROP_DUPLICATE_INDEXES,
     SHADOW_BILLING_SCHEMA,
     STRICT_TOKEN_METERING,
+    COMMERCIAL_POINTS_BILLING,
 )
 
 
@@ -300,6 +310,128 @@ def apply_strict_token_metering_schema(conn: Any) -> None:
     )
 
 
+def apply_commercial_points_billing_schema(conn: Any) -> None:
+    """Add configurable pricing plus reversible point reservations."""
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS billing_pricing_policies (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'shadow',
+            point_retail_micro_cny INTEGER NOT NULL DEFAULT 10000,
+            max_package_discount_basis_points INTEGER NOT NULL DEFAULT 2000,
+            payment_fee_basis_points INTEGER NOT NULL DEFAULT 150,
+            tax_basis_points INTEGER NOT NULL DEFAULT 600,
+            target_margin_basis_points INTEGER NOT NULL DEFAULT 6500,
+            provider_risk_reserve_basis_points INTEGER NOT NULL DEFAULT 1500,
+            platform_task_cost_micro_cny INTEGER NOT NULL DEFAULT 30000,
+            rounding_points INTEGER NOT NULL DEFAULT 5,
+            byok_infrastructure_points INTEGER NOT NULL DEFAULT 15,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS billing_task_rates (
+            task_code TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            base_points INTEGER NOT NULL DEFAULT 0,
+            max_reserve_points INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_billing_task_rates_enabled
+        ON billing_task_rates(enabled, task_code);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_operation_bucket_event
+        ON credit_ledger(operation_id, bucket_id, event_type)
+        WHERE operation_id IS NOT NULL
+          AND bucket_id IS NOT NULL
+          AND event_type IN ('reserve', 'release');
+        """
+    )
+
+    price_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(model_price_cards)").fetchall()
+    }
+    for name, declaration in {
+        "metering_mode": "TEXT NOT NULL DEFAULT 'TOKEN'",
+        "reasoning_micro_cny_per_million": "INTEGER NOT NULL DEFAULT 0",
+        "provider_unit_micro_cny_each": "INTEGER NOT NULL DEFAULT 0",
+        "provider_risk_basis_points": "INTEGER NOT NULL DEFAULT 10000",
+    }.items():
+        if name not in price_columns:
+            conn.execute(f"ALTER TABLE model_price_cards ADD COLUMN {name} {declaration}")
+
+    operation_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(usage_operations)").fetchall()
+    }
+    for name, declaration in {
+        "task_code": "TEXT NOT NULL DEFAULT ''",
+        "task_base_points": "INTEGER NOT NULL DEFAULT 0",
+        "resource_points": "INTEGER NOT NULL DEFAULT 0",
+        "pricing_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+    }.items():
+        if name not in operation_columns:
+            conn.execute(f"ALTER TABLE usage_operations ADD COLUMN {name} {declaration}")
+
+    seed_time = "2026-08-25T00:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO billing_pricing_policies (
+            id, name, mode, point_retail_micro_cny,
+            max_package_discount_basis_points, payment_fee_basis_points,
+            tax_basis_points, target_margin_basis_points,
+            provider_risk_reserve_basis_points,
+            platform_task_cost_micro_cny, rounding_points,
+            byok_infrastructure_points, enabled, version, created_at, updated_at
+        ) VALUES (
+            'default', '默认商业积分政策', 'shadow', 10000,
+            2000, 150, 600, 6500, 1500, 30000, 5, 15,
+            1, 1, ?, ?
+        ) ON CONFLICT(id) DO NOTHING
+        """,
+        (seed_time, seed_time),
+    )
+    for task_code, label, base_points, max_reserve_points in (
+        ("article_light", "轻度润色", 30, 200),
+        ("article_standard", "标准改写", 60, 400),
+        ("article_deep", "深度改写", 120, 800),
+        ("research_longform", "研究型长文", 240, 1200),
+        ("editorial_review", "AI 评审", 30, 200),
+        ("editorial_rewrite", "评审修改稿", 60, 400),
+        ("paragraph_regeneration", "单段轻度改写", 30, 150),
+        ("title_summary", "标题与摘要", 20, 100),
+        ("inline_images_regeneration", "正文配图", 0, 400),
+        ("inline_image_regeneration", "单张配图", 0, 200),
+        ("cover_regeneration", "封面生成", 0, 200),
+    ):
+        conn.execute(
+            """
+            INSERT INTO billing_task_rates (
+                task_code, label, base_points, max_reserve_points,
+                enabled, version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 1, 1, ?, ?)
+            ON CONFLICT(task_code) DO NOTHING
+            """,
+            (
+                task_code,
+                label,
+                base_points,
+                max_reserve_points,
+                seed_time,
+                seed_time,
+            ),
+        )
+
+
 def ensure_schema_migrations(conn: Any) -> None:
     conn.execute(
         """
@@ -368,6 +500,7 @@ def record_schema_migration(
 
 __all__ = [
     "BASELINE_SCHEMA",
+    "COMMERCIAL_POINTS_BILLING",
     "DROP_DUPLICATE_INDEXES",
     "PHASE_ONE_COMPAT",
     "SHADOW_BILLING_SCHEMA",
@@ -375,6 +508,7 @@ __all__ = [
     "SCHEMA_MIGRATIONS",
     "SchemaMigration",
     "apply_shadow_billing_schema",
+    "apply_commercial_points_billing_schema",
     "apply_strict_token_metering_schema",
     "ensure_schema_migrations",
     "migration_applied",

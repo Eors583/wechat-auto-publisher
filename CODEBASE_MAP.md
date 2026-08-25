@@ -244,7 +244,7 @@ Primary tab ownership inside `desktop.py`:
 | `onboarding.py` | Persisted onboarding state, model/account/Feishu steps, readiness and restart. |
 | `onboarding_errors.py` | Converts provider/WeChat errors into guided onboarding actions. |
 | `analytics.py` | Operational metrics and time-bounded summaries. |
-| `billing.py` | Owner-scoped shadow metering, strict article-usage completeness, provider cost snapshots and Credit-safe summaries. |
+| `billing.py` | Owner-scoped strict usage metering plus commercial points pricing: task value + normalized provider cost, versioned policy snapshots, live-readiness checks, atomic freeze/settle/release and customer-safe summaries. |
 | `url_validation.py` | SSRF/network-boundary validation for external URLs. Use before every new server-side fetch feature. |
 
 ### 4.5 Workflow stages (`app/workflows/`) and facade
@@ -393,8 +393,8 @@ rg -n "@(app|router)\.(get|post|put|patch|delete)" app/api
 ## 5. Database map
 
 `app/db.py` initializes/migrates the schema. Runtime is PostgreSQL-only; SQLite
-is permitted solely when tests explicitly opt in. The database currently has 45
-tables: 37 core business/runtime tables, 7 additive shadow-billing tables, and
+is permitted solely when tests explicitly opt in. The database currently has 47
+tables: 37 core business/runtime tables, 9 additive billing tables, and
 `schema_migrations`. Applied versions
 are checksum-validated at startup under the existing PostgreSQL advisory lock;
 non-transactional index work uses an autocommit connection and the same lock.
@@ -433,9 +433,10 @@ non-transactional index work uses an autocommit connection and the same lock.
 | `bot_sessions`, `bot_contexts` | legacy Feishu | Compatibility-only Feishu session/context; new multi-user Webhook traffic must not use these tables |
 | `processed_events` | shared compatibility | Generic cross-entry event idempotency still used by the WeChat command-agent webhook; it is not part of new Feishu Webhook storage and must not be retired until WeChat idempotency moves to an owner/account-scoped table |
 | `schema_migrations` | platform/schema | Ordered version/name/checksum/application-time history; never stores customer data |
-| `billing_plans`, `model_price_cards` | platform/billing | Shadow-mode plan and model-price snapshots; no online payment capture |
+| `billing_plans`, `model_price_cards` | platform/billing | Plan metadata and TOKEN/FIXED/UNIT/BYOK provider cost cards; no online payment capture |
+| `billing_pricing_policies`, `billing_task_rates` | platform/billing | Versioned point-value/margin/risk policy and per-task base/freeze limits; seeded in migration `20260825_0006` with shadow mode as the safe default |
 | `user_subscriptions`, `credit_buckets`, `credit_ledger` | user/billing | Subscription periods and append-only points grant/ledger data |
-| `usage_operations`, `ai_usage_events` | user/billing | Idempotent operation envelope and one sanitized event per physical provider call; migration `20260825_0005` adds explicit `RECORDED/PENDING/UNAVAILABLE` Token status, provider request/response trace-id uniqueness guards, separate estimates, and provider Credits without treating missing usage as zero. |
+| `usage_operations`, `ai_usage_events` | user/billing | Idempotent operation envelope and one sanitized event per physical provider call; migration `20260825_0005` adds strict Token/Credit truth, while `20260825_0006` adds task/resource/final-point snapshots plus atomic reservation settlement without treating missing usage as zero. |
 | `ads` | user/config-compatible | Advertisement pool and use tracking |
 | `token_cache` | ephemeral/account-compatible | WeChat access-token cache; excluded from legacy business migration |
 
@@ -475,7 +476,7 @@ Use this table before searching the whole repository.
 | Followed account recent articles | `ui/panels/topics.py`, `followed_articles.py` | `services/followed_content.py`, provider adapters, per-user settings | `test_article_search.py`, `test_wechat_backend_search.py`, `test_jizhile_api.py`, `test_topic_center.py` |
 | Jizhile failures/fallback | `services/followed_content.py:discover_account` | `providers/jizhile_api.py`, `services/jizhile_settings.py`, backend-search provider/settings | `test_jizhile_api.py`, `test_wechat_backend_search.py` |
 | Generate/rewrite content | `services/batches.py:create_batch` | `Pipeline`, `workflows/generation.py`, selected AI client | `test_batch.py`, `test_p0_backend.py`, provider/model tests |
-| Strict Token/Credit metering | `ai/usage.py`, provider client | `services/billing.py`, `Database.ai_usage_events`, model capability probe, task/billing panels | `test_ai_usage.py`, `test_billing.py`, `test_manus.py`, `test_model_registry.py`, `test_ui_review_inbox.py` |
+| Token/Credit metering and commercial points | `ai/usage.py`, provider client, `services/batches.py` task code | `services/billing.py`, billing migrations/DB reservation ledger, admin/user billing panels and API | `test_ai_usage.py`, `test_billing.py`, `test_commercial_billing.py`, `test_schema_migrations_postgres.py`, `test_ui_review_inbox.py` |
 | Inline images | review UI and `BatchService.regenerate_inline_*` | `inline_images.py`, rendering stage, WeChat material | `test_inline_images.py`, `test_image_generator.py` |
 | Cover generation/selection | review UI and `BatchService` cover methods | `cover/`, rendering stage, image model registry | `test_cover_generator.py`, `test_image_generator.py` |
 | Write to draft safely | `tasks.py:confirm_batch_write` | `BatchService.inject_batch`, workflow delivery, `services/wechat_delivery.py`, `wechat/draft.py` | `test_wechat_delivery_reliability.py`, `test_wechat_publish.py`, `test_ui_ip_whitelist_guide.py` |
@@ -952,7 +953,7 @@ unless noted.
 | `app/services/topic_sources.py` | Persisted topic source/search/pagination. |
 | `app/services/url_validation.py` | External URL/SSRF guard. |
 | `app/services/wechat_backend_settings.py` | Per-user backend Token/Cookie settings. |
-| `app/services/billing.py` | Strict usage completeness and shadow pricing. |
+| `app/services/billing.py` | Strict usage completeness, unified provider-cost pricing and shadow/live point settlement. |
 | `app/services/wechat_delivery.py` | Idempotent/reconciled draft delivery. |
 | `app/services/wechat_layout_import.py` | WeChat article typography parser. |
 | `app/services/wechat_relay_settings.py` | Fixed-egress relay settings/access code. |
@@ -981,7 +982,7 @@ unless noted.
 | `app/ui/workflow.py` | UI stage/navigation helpers. |
 | `app/ui/panels/__init__.py` | Panel package boundary. |
 | `app/ui/panels/auth.py` | Login/register UI. |
-| `app/ui/panels/billing.py` | Customer usage and merchant AI cost/Credit panels. |
+| `app/ui/panels/billing.py` | Customer point/usage ledger and merchant policy/task/provider-price/grant controls. |
 | `app/ui/panels/feishu.py` | Feishu settings UI. |
 | `app/ui/panels/followed_articles.py` | Followed-account article dialog. |
 | `app/ui/panels/models.py` | Custom/local/API model editor. |

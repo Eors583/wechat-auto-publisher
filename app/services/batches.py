@@ -42,7 +42,7 @@ from app.services.batch_contracts import (
     public_job,
 )
 from app.services.batch_progress import BatchProgressMonitor
-from app.services.billing import BillingService
+from app.services.billing import BillingService, article_task_code
 from app.services.editorial_reviews import (
     EditorialReviewConflict,
     EditorialReviewService,
@@ -1308,6 +1308,7 @@ class BatchService:
             )
             with BillingService(self.db).operation(
                 scene="inline_images_regeneration",
+                task_code="inline_images_regeneration",
                 subject_type="job",
                 subject_id=str(job_id),
                 source_channel="service",
@@ -1412,6 +1413,7 @@ class BatchService:
             pipeline = Pipeline(cfg, db=self.db)
             with BillingService(self.db).operation(
                 scene="inline_image_regeneration",
+                task_code="inline_image_regeneration",
                 subject_type="job",
                 subject_id=f"{job_id}:{int(image_index)}",
                 source_channel="service",
@@ -1572,6 +1574,7 @@ class BatchService:
             )
             with BillingService(self.db).operation(
                 scene="cover_regeneration",
+                task_code="cover_regeneration",
                 subject_type="job",
                 subject_id=str(job_id),
                 source_channel="service",
@@ -1712,6 +1715,7 @@ class BatchService:
         try:
             with BillingService(self.db).operation(
                 scene="paragraph_regeneration",
+                task_code="paragraph_regeneration",
                 subject_type="job",
                 subject_id=f"{job_id}:{int(paragraph_index)}",
                 source_channel="service",
@@ -2622,6 +2626,9 @@ class BatchService:
                     job = self.db.get_job(job_id) or {}
                     with BillingService(self.db).operation(
                         scene="article_generation",
+                        task_code=article_task_code(
+                            (job.get("meta") or {}).get("rewrite_intensity")
+                        ),
                         subject_type="job",
                         subject_id=str(job_id),
                         source_channel=str(job.get("source") or "system"),

@@ -378,6 +378,7 @@ def create_desktop_app() -> None:
         and not open_requested_review
         and not open_requested_config
         and not open_requested_feishu
+        and not open_requested_billing
         and not open_requested_admin
         and page_is_admin
         and (open_requested_onboarding or should_show_onboarding(onboarding_status))
@@ -469,7 +470,7 @@ def create_desktop_app() -> None:
                             on_click=lambda: tabs.set_value(tab_feishu),
                         )
                         ui.menu_item(
-                            "套餐与用量（影子）",
+                            "积分与用量",
                             on_click=lambda: tabs.set_value(tab_billing),
                         )
 
@@ -570,8 +571,8 @@ def create_desktop_app() -> None:
             tab_feishu = ui.tab("飞书机器人", icon="forum").props(
                 'aria-label="飞书机器人" title="飞书机器人"'
             )
-            tab_billing = ui.tab("套餐与用量", icon="toll").props(
-                'aria-label="套餐与用量" title="套餐与用量"'
+            tab_billing = ui.tab("积分与用量", icon="toll").props(
+                'aria-label="积分与用量" title="积分与用量"'
             )
             tab_review = ui.tab("文章审核", icon="rate_review").classes(
                 "ops-review-route-tab"
@@ -848,9 +849,9 @@ def create_desktop_app() -> None:
             billing_host.clear()
             with billing_host:
                 render_page_heading(
-                    "SHADOW USAGE",
-                    "套餐与用量",
-                    "先观察真实 Token、图片和成本分布；当前不扣积分、不限制任何功能。",
+                    "POINTS & USAGE",
+                    "积分与用量",
+                    "查看可用、冻结、预计与实际消耗积分，并核对服务商实际 Token 或 Credits。",
                 )
                 build_billing_panel(page_state)
 

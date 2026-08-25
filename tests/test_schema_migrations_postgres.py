@@ -10,10 +10,10 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from app.db import Database, _POSTGRES_SCHEMA_INITIALIZED
+from app.db import _POSTGRES_SCHEMA_INITIALIZED, Database
 from app.db_audit import audit_database
 from app.schema_migrations import PHASE_ONE_COMPAT, SCHEMA_MIGRATIONS
-
+from app.services.auth import AuthService
 
 POSTGRES_ADMIN_URL = os.environ.get("POSTGRES_SCHEMA_TEST_URL", "").strip()
 pytestmark = pytest.mark.skipif(
@@ -196,7 +196,7 @@ def test_fresh_postgres_schema_records_all_versioned_migrations(
             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
             """
         ).fetchone()[0]
-    assert table_count == 45
+    assert table_count == 47
     with psycopg.connect(postgres_database_url) as conn:
         billing_tables = {
             row[0]
@@ -208,7 +208,8 @@ def test_fresh_postgres_schema_records_all_versioned_migrations(
                   AND table_name IN (
                       'billing_plans', 'user_subscriptions',
                       'model_price_cards', 'credit_buckets',
-                      'usage_operations', 'credit_ledger', 'ai_usage_events'
+                      'usage_operations', 'credit_ledger', 'ai_usage_events',
+                      'billing_pricing_policies', 'billing_task_rates'
                   )
                 """
             ).fetchall()
@@ -225,7 +226,9 @@ def test_fresh_postgres_schema_records_all_versioned_migrations(
                       'idx_credit_ledger_owner_created',
                       'idx_usage_operations_owner_created',
                       'idx_usage_events_operation',
-                      'idx_usage_events_owner_created'
+                      'idx_usage_events_owner_created',
+                      'idx_billing_task_rates_enabled',
+                      'idx_credit_ledger_operation_bucket_event'
                   )
                 """
             ).fetchall()
@@ -273,8 +276,39 @@ def test_fresh_postgres_schema_records_all_versioned_migrations(
                 """
             ).fetchall()
         }
-    assert len(billing_tables) == 7
-    assert len(billing_indexes) == 7
+        commercial_price_columns = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'model_price_cards'
+                  AND column_name IN (
+                      'metering_mode', 'reasoning_micro_cny_per_million',
+                      'provider_unit_micro_cny_each',
+                      'provider_risk_basis_points'
+                  )
+                """
+            ).fetchall()
+        }
+        commercial_operation_columns = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'usage_operations'
+                  AND column_name IN (
+                      'task_code', 'task_base_points', 'resource_points',
+                      'pricing_snapshot_json'
+                  )
+                """
+            ).fetchall()
+        }
+    assert len(billing_tables) == 9
+    assert len(billing_indexes) == 9
     assert strict_usage_columns == {
         "token_usage_status",
         "provider_credits",
@@ -298,6 +332,90 @@ def test_fresh_postgres_schema_records_all_versioned_migrations(
     assert "owner_user_id, provider, provider_response_id" in (
         provider_trace_indexes["idx_usage_events_provider_response_unique"]
     )
+    assert commercial_price_columns == {
+        "metering_mode",
+        "reasoning_micro_cny_per_million",
+        "provider_unit_micro_cny_each",
+        "provider_risk_basis_points",
+    }
+    assert commercial_operation_columns == {
+        "task_code",
+        "task_base_points",
+        "resource_points",
+        "pricing_snapshot_json",
+    }
+
+
+def test_commercial_point_reservations_are_atomic_on_postgres(
+    postgres_database_url: str,
+) -> None:
+    root = Database(postgres_database_url)
+    user = AuthService(root).register("points-owner", "secure-pass-123")
+    user_id = str(user["id"])
+    database = root.for_user(user_id)
+    database.grant_credit_points(points=1_000, source_type="test")
+    job_id = database.create_job(topic="PostgreSQL 积分投影")
+    operation_ids = [
+        database.create_usage_operation(
+            {
+                "id": f"concurrent-operation-{index}",
+                "scene": "article_generation",
+                "task_code": "article_standard",
+                "source_channel": "test",
+                "subject_type": "job",
+                "subject_id": str(index),
+                "idempotency_key": f"concurrent-reservation-{index}",
+                "status": "running",
+                "mode": "live",
+                "job_id": job_id,
+            }
+        )
+        for index in range(2)
+    ]
+
+    def reserve(operation_id: str) -> tuple[str, int | str]:
+        try:
+            points = root.for_user(user_id).reserve_credit_points(
+                operation_id,
+                points=600,
+                expires_at="2099-01-01T00:00:00+00:00",
+            )
+        except ValueError as exc:
+            return operation_id, str(exc)
+        return operation_id, points
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(reserve, operation_ids))
+
+    successes = [item for item in results if item[1] == 600]
+    failures = [item for item in results if isinstance(item[1], str)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert "积分不足" in str(failures[0][1])
+    assert database.credit_wallet_summary() == {
+        "available": 400,
+        "reserved": 600,
+        "charged": 0,
+    }
+
+    database.settle_credit_operation(
+        successes[0][0],
+        status="succeeded",
+        charged_points=155,
+        estimated_points=155,
+        task_base_points=60,
+        resource_points=95,
+        pricing_snapshot_json='{"test":true}',
+        completed_at="2026-08-25T12:00:00+00:00",
+    )
+    assert database.credit_wallet_summary() == {
+        "available": 845,
+        "reserved": 0,
+        "charged": 155,
+    }
+    article_usage = database.article_generation_token_usage_by_jobs([job_id])
+    assert article_usage[0]["estimated_points"] == 155
+    assert article_usage[0]["charged_points"] == 155
 
 
 def test_legacy_postgres_schema_upgrades_without_losing_settings(

@@ -15,10 +15,10 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
+from app.ai.image_providers import is_image_provider
 from app.api.editorial_reviews import create_editorial_review_router
 from app.api.local_agents import create_local_agent_router
 from app.api.wechat_commands import create_wechat_command_router
-from app.ai.image_providers import is_image_provider
 from app.config import load_config
 from app.db import customer_data_scope
 from app.services import (
@@ -28,15 +28,15 @@ from app.services import (
     get_batch_service,
 )
 from app.services.auth import AuthService
-from app.services.billing import BillingService
+from app.services.billing import BillingService, live_configuration_issues
 from app.services.configuration import ConfigurationService
-from app.services.feishu_integrations import FeishuIntegrationService
 from app.services.failures import (
     classify_job_failure,
     public_failure,
     sanitize_failure_payload,
     sanitize_failure_text,
 )
+from app.services.feishu_integrations import FeishuIntegrationService
 from app.services.onboarding import OnboardingService
 
 logger = logging.getLogger(__name__)
@@ -237,11 +237,48 @@ class ModelPriceCardRequest(BaseModel):
     output_micro_cny_per_million: int = Field(default=0, ge=0)
     image_micro_cny_each: int = Field(default=0, ge=0)
     fixed_request_micro_cny: int = Field(default=0, ge=0)
+    metering_mode: str = Field(
+        default="TOKEN",
+        pattern="^(TOKEN|FIXED|UNIT|BYOK)$",
+    )
+    reasoning_micro_cny_per_million: int = Field(default=0, ge=0)
+    provider_unit_micro_cny_each: int = Field(default=0, ge=0)
+    provider_risk_basis_points: int = Field(default=10_000, ge=1)
     markup_basis_points: int = Field(default=10_000, ge=0)
     points_per_cny: int = Field(default=100, ge=0)
     effective_from: str | None = None
     effective_to: str | None = None
     enabled: bool = True
+
+
+class BillingPolicyRequest(BaseModel):
+    name: str = Field(default="默认商业积分政策", min_length=1, max_length=120)
+    mode: str = Field(default="shadow", pattern="^(off|shadow|live)$")
+    point_retail_micro_cny: int = Field(default=10_000, ge=1)
+    max_package_discount_basis_points: int = Field(default=2_000, ge=0, le=10_000)
+    payment_fee_basis_points: int = Field(default=150, ge=0, le=10_000)
+    tax_basis_points: int = Field(default=600, ge=0, le=10_000)
+    target_margin_basis_points: int = Field(default=6_500, ge=0, le=10_000)
+    provider_risk_reserve_basis_points: int = Field(default=1_500, ge=0, le=10_000)
+    platform_task_cost_micro_cny: int = Field(default=30_000, ge=0)
+    rounding_points: int = Field(default=5, ge=1)
+    byok_infrastructure_points: int = Field(default=15, ge=0)
+
+
+class BillingTaskRateRequest(BaseModel):
+    task_code: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    base_points: int = Field(default=0, ge=0)
+    max_reserve_points: int = Field(default=0, ge=0)
+    enabled: bool = True
+
+
+class CreditGrantRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    points: int = Field(gt=0)
+    source_id: str = Field(default="", max_length=120)
+    expires_at: str | None = None
+    reason: str = Field(default="", max_length=500)
 
 
 class FeishuIntegrationRequest(BaseModel):
@@ -449,15 +486,36 @@ def create_api_app(
 
     @app.get("/api/v1/billing/plans")
     def billing_plans() -> list[dict[str, Any]]:
-        return [
-            {
-                "id": "shadow",
-                "name": "影子计量",
-                "enabled": True,
-                "monthly_points": 0,
-                "notice": "当前不扣积分、不限制任何现有功能。",
-            }
-        ]
+        platform_db = batch_service.db.for_user("")
+        policy = platform_db.get_billing_pricing_policy()
+        mode = str(policy.get("mode") or "shadow")
+        return [{
+            "id": str(policy.get("id") or "default"),
+            "name": str(policy.get("name") or "商业积分"),
+            "mode": mode,
+            "enabled": mode != "off",
+            "point_retail_micro_cny": int(
+                policy.get("point_retail_micro_cny") or 10_000
+            ),
+            "task_rates": [
+                {
+                    "task_code": str(item.get("task_code") or ""),
+                    "label": str(item.get("label") or ""),
+                    "base_points": int(item.get("base_points") or 0),
+                    "max_reserve_points": int(
+                        item.get("max_reserve_points") or 0
+                    ),
+                }
+                for item in platform_db.list_billing_task_rates(
+                    enabled_only=True
+                )
+            ],
+            "notice": (
+                "任务开始时冻结最高积分，完成后按实际成本结算并退回差额。"
+                if mode == "live"
+                else "当前为积分试算，不扣积分、不限制任何现有功能。"
+            ),
+        }]
 
     @app.get(
         "/api/v1/me/billing/summary",
@@ -599,6 +657,98 @@ def create_api_app(
         with customer_data_scope(""):
             return batch_service.db.list_model_price_cards()
 
+    @app.get(
+        "/api/v1/admin/billing/policy",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_billing_policy() -> dict[str, Any]:
+        with customer_data_scope(""):
+            policy = batch_service.db.get_billing_pricing_policy()
+            return {
+                **policy,
+                "live_configuration_issues": live_configuration_issues(
+                    batch_service.db
+                ),
+            }
+
+    @app.put(
+        "/api/v1/admin/billing/policy",
+        dependencies=[Depends(require_admin)],
+    )
+    def save_admin_billing_policy(
+        payload: BillingPolicyRequest,
+    ) -> dict[str, Any]:
+        try:
+            with customer_data_scope(""):
+                if payload.mode == "live":
+                    issues = live_configuration_issues(batch_service.db)
+                    if issues:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="；".join(issues),
+                        )
+                batch_service.db.upsert_billing_pricing_policy(
+                    payload.model_dump()
+                )
+                return batch_service.db.get_billing_pricing_policy()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/admin/billing/task-rates",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_billing_task_rates() -> list[dict[str, Any]]:
+        with customer_data_scope(""):
+            return batch_service.db.list_billing_task_rates()
+
+    @app.put(
+        "/api/v1/admin/billing/task-rates/{task_code}",
+        dependencies=[Depends(require_admin)],
+    )
+    def save_admin_billing_task_rate(
+        task_code: str,
+        payload: BillingTaskRateRequest,
+    ) -> dict[str, Any]:
+        if str(payload.task_code) != str(task_code):
+            raise HTTPException(status_code=400, detail="任务编码与路径不一致")
+        try:
+            with customer_data_scope(""):
+                batch_service.db.upsert_billing_task_rate(payload.model_dump())
+                return next(
+                    item
+                    for item in batch_service.db.list_billing_task_rates()
+                    if str(item.get("task_code")) == str(task_code)
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/v1/admin/billing/credits/grants")
+    def grant_admin_billing_credits(
+        payload: CreditGrantRequest,
+        principal: dict[str, Any] = Depends(require_admin),
+    ) -> dict[str, Any]:
+        platform_db = batch_service.db.for_user("")
+        if not platform_db.get_user(payload.user_id):
+            raise HTTPException(status_code=404, detail="用户不存在")
+        user_db = platform_db.for_user(payload.user_id)
+        try:
+            bucket_id = user_db.grant_credit_points(
+                points=payload.points,
+                source_type="admin",
+                source_id=payload.source_id,
+                expires_at=payload.expires_at,
+                actor_user_id=str(principal.get("id") or "admin-api"),
+                reason=payload.reason or "管理员发放积分",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "bucket_id": bucket_id,
+            "user_id": payload.user_id,
+            "wallet": user_db.credit_wallet_summary(),
+        }
+
     @app.post(
         "/api/v1/admin/billing/price-cards",
         dependencies=[Depends(require_admin)],
@@ -606,15 +756,18 @@ def create_api_app(
     def save_admin_billing_price_card(
         payload: ModelPriceCardRequest,
     ) -> dict[str, Any]:
-        with customer_data_scope(""):
-            card_id = batch_service.db.upsert_model_price_card(
-                payload.model_dump()
-            )
-            return next(
-                item
-                for item in batch_service.db.list_model_price_cards()
-                if str(item.get("id")) == card_id
-            )
+        try:
+            with customer_data_scope(""):
+                card_id = batch_service.db.upsert_model_price_card(
+                    payload.model_dump()
+                )
+                return next(
+                    item
+                    for item in batch_service.db.list_model_price_cards()
+                    if str(item.get("id")) == card_id
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(
         "/api/v1/admin/models",

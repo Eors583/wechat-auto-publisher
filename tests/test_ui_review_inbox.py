@@ -416,6 +416,34 @@ def test_generation_usage_copy_distinguishes_actual_partial_and_manus_credit() -
     assert "服务商没有提供" in manus_hint
 
 
+def test_generation_usage_copy_leads_with_estimated_or_charged_points() -> None:
+    estimated, estimated_hint = tasks._generation_usage_text(  # noqa: SLF001
+        {
+            "known_tokens": 9_000,
+            "api_call_count": 1,
+            "metered_calls": 1,
+            "estimated_points": 155,
+            "complete": True,
+        }
+    )
+    charged, charged_hint = tasks._generation_usage_text(  # noqa: SLF001
+        {
+            "known_tokens": 9_000,
+            "api_call_count": 1,
+            "metered_calls": 1,
+            "estimated_points": 155,
+            "charged_points": 155,
+            "live_pricing": 1,
+            "complete": True,
+        }
+    )
+
+    assert estimated == "预计 155 积分 · 实际 9,000 Token · 1/1"
+    assert "不会实际扣除" in estimated_hint
+    assert charged == "消耗 155 积分 · 实际 9,000 Token · 1/1"
+    assert "已结算的最终积分" in charged_hint
+
+
 def test_legacy_review_entry_redirects_to_the_full_page_route() -> None:
     source = inspect.getsource(tasks.open_review_workbench)
 
