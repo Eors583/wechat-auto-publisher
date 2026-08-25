@@ -6,7 +6,7 @@ from typing import Any
 from nicegui import ui
 
 from app.services.failures import sanitize_failure_text
-from app.ui.navigation import ui_root_url
+from app.ui.navigation import ui_navigation_target, ui_root_url
 
 PREFLIGHT_REPAIR_ACTIONS: dict[str, tuple[str, str]] = {
     "account": ("account", "配置公众号"),
@@ -122,7 +122,11 @@ def show_preflight_repair_dialog(
 
             def open_repair(account_id: str, check_key: str) -> None:
                 dialog.close()
-                ui.navigate.to(preflight_repair_url(account_id, check_key))
+                ui.navigate.to(
+                    ui_navigation_target(
+                        preflight_repair_url(account_id, check_key)
+                    )
+                )
 
             render_preflight_failures(reports, open_repair)
             with ui.row().classes("w-full justify-end"):

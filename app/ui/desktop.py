@@ -55,7 +55,7 @@ from app.ui.interaction_feedback import (
 )
 from app.ui.lifecycle import client_timer
 from app.ui.local_model_bridge import install_local_model_bridge
-from app.ui.navigation import ui_root_url
+from app.ui.navigation import ui_navigation_target, ui_root_url
 from app.ui.panels.auth import (
     build_auth_screen,
     current_desktop_user,
@@ -366,7 +366,9 @@ def create_desktop_app() -> None:
             page_state,
             service=onboarding_service,
             initial_status=onboarding_status,
-            on_completed=lambda _account_id: ui.navigate.to(ui_root_url()),
+            on_completed=lambda _account_id: ui.navigate.to(
+                ui_navigation_target(ui_root_url())
+            ),
         )
         return
 
@@ -523,7 +525,11 @@ def create_desktop_app() -> None:
                     # real read-only refresh proves that the sole usable
                     # account can no longer write drafts, move directly to the
                     # focused WeChat repair step.
-                    ui.navigate.to(ui_root_url({"view": "onboarding"}))
+                    ui.navigate.to(
+                        ui_navigation_target(
+                            ui_root_url({"view": "onboarding"})
+                        )
+                    )
                     return
 
             client_timer(
@@ -1975,9 +1981,11 @@ def _build_wizard(
             decision = bool(await dialog)
             if repair_target and ui_alive():
                 ui.navigate.to(
-                    _preflight_repair_url(
-                        repair_target["account_id"],
-                        repair_target["check_key"],
+                    ui_navigation_target(
+                        _preflight_repair_url(
+                            repair_target["account_id"],
+                            repair_target["check_key"],
+                        )
                     )
                 )
             return decision

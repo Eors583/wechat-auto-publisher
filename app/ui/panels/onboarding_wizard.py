@@ -17,7 +17,7 @@ from app.services.wechat_relay_settings import (
     save_wechat_relay_access_code,
     save_wechat_relay_settings,
 )
-from app.ui.navigation import ui_root_url
+from app.ui.navigation import ui_navigation_target, ui_root_url
 from app.ui.preflight_repair import (
     preflight_repair_action,
     preflight_repair_url,
@@ -395,7 +395,11 @@ def build_onboarding_settings(
                     try:
                         await run.io_bound(lambda: service.restart(mode="full"))
                         if ui_alive():
-                            ui.navigate.to(ui_root_url({"view": "onboarding"}))
+                            ui.navigate.to(
+                                ui_navigation_target(
+                                    ui_root_url({"view": "onboarding"})
+                                )
+                            )
                     except Exception as exc:  # noqa: BLE001
                         if ui_alive():
                             ui.notify(
@@ -1657,7 +1661,9 @@ class _WizardController:
                                 on_click=lambda _=None,
                                 aid=account_id,
                                 key=check_key: ui.navigate.to(
-                                    preflight_repair_url(aid, key)
+                                    ui_navigation_target(
+                                        preflight_repair_url(aid, key)
+                                    )
                                 ),
                             ).props("flat dense color=teal-9 no-caps")
 

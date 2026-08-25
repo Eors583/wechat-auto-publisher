@@ -10,7 +10,7 @@ from nicegui import ui
 
 from app.ui import desktop
 from app.ui.background_activity import _generation_activity, _review_activity
-from app.ui.navigation import ui_root_url
+from app.ui.navigation import ui_navigation_target, ui_root_url
 from app.ui.panels import tasks
 
 
@@ -96,7 +96,7 @@ def test_primary_navigation_exposes_personal_settings_and_shadow_usage() -> None
     ]
 
 
-def test_internal_navigation_preserves_the_production_ui_root_path(
+def test_public_urls_preserve_the_production_ui_root_path(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("WECHAT_PUBLISHER_UI_ROOT_PATH", "/publisher/")
@@ -121,24 +121,41 @@ def test_internal_navigation_preserves_the_production_ui_root_path(
     )["url"] == "/publisher/?view=review&batch_id=batch-1&job_id=9"
 
 
+def test_nicegui_navigation_target_does_not_duplicate_the_proxy_prefix(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("WECHAT_PUBLISHER_UI_ROOT_PATH", "/publisher/")
+
+    target = ui_navigation_target(ui_root_url({"view": "onboarding"}))
+    client_url = "/publisher" + target
+
+    assert target == "/?view=onboarding"
+    assert client_url == "/publisher/?view=onboarding"
+    assert "/publisher/publisher/" not in client_url
+    assert ui_navigation_target("https://example.com") == "https://example.com"
+
+
 def test_internal_navigation_defaults_to_the_local_root(monkeypatch: Any) -> None:
     monkeypatch.delenv("WECHAT_PUBLISHER_UI_ROOT_PATH", raising=False)
 
     assert ui_root_url({"view": "tasks"}) == "/?view=tasks"
 
 
-def test_ui_navigation_callers_do_not_bypass_the_configured_root_path() -> None:
+def test_ui_navigation_callers_use_the_nicegui_navigation_boundary() -> None:
     root = Path(__file__).resolve().parents[1]
 
     for relative in (
-        "app/ui/background_activity.py",
         "app/ui/desktop.py",
+        "app/ui/preflight_repair.py",
         "app/ui/panels/onboarding_wizard.py",
         "app/ui/panels/tasks.py",
     ):
-        source = (root / relative).read_text(encoding="utf-8")
-        assert '"/?view=' not in source, relative
-        assert "ui.navigate.to(\"/\")" not in source, relative
+        source = "".join(
+            (root / relative).read_text(encoding="utf-8").split()
+        )
+        assert "ui.navigate.to(ui_root_url(" not in source, relative
+        assert "ui.navigate.to(preflight_repair_url(" not in source, relative
+        assert "ui.navigate.to(_settings_action_url(" not in source, relative
 
 
 def test_generation_can_move_to_the_background_task_center() -> None:

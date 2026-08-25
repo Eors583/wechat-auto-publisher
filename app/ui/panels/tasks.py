@@ -24,7 +24,7 @@ from app.ui.ip_whitelist_guide import (
     show_ip_whitelist_guide,
 )
 from app.ui.lifecycle import client_timer
-from app.ui.navigation import ui_root_url
+from app.ui.navigation import ui_navigation_target, ui_root_url
 from app.ui.panels.review_jury import (
     build_review_jury_panel,
     editorial_review_progress,
@@ -512,12 +512,14 @@ def build_tasks_panel(
     def open_activity_detail(batch_id: str, job_id: int | None = None) -> None:
         if job_id:
             ui.navigate.to(
-                ui_root_url(
-                    {
-                        "view": "review",
-                        "batch_id": batch_id,
-                        "job_id": int(job_id),
-                    }
+                ui_navigation_target(
+                    ui_root_url(
+                        {
+                            "view": "review",
+                            "batch_id": batch_id,
+                            "job_id": int(job_id),
+                        }
+                    )
                 )
             )
             return
@@ -1881,7 +1883,9 @@ def _render_inbox_article_card(
                             or nested_job.get("account_id")
                             or ""
                         ): ui.navigate.to(
-                            _settings_action_url(value, aid)
+                            ui_navigation_target(
+                                _settings_action_url(value, aid)
+                            )
                         ),
                     ).props(
                         "flat dense color=teal-9 no-caps icon=settings"
