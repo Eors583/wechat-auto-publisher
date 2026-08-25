@@ -1379,6 +1379,57 @@ def _settings_action_url(action: str, account_id: str) -> str:
     )
 
 
+def _generation_usage_text(
+    usage: Any,
+    *,
+    legacy_tokens: Any = None,
+) -> tuple[str, str]:
+    if not isinstance(usage, dict):
+        if legacy_tokens is not None:
+            return (
+                f"实际 {int(legacy_tokens):,} Token",
+                "本篇文章生成累计服务商实际 Token（输入 + 输出）",
+            )
+        return "Token 待统计", "尚未取得本篇文章的模型调用计量记录"
+
+    calls = int(usage.get("api_call_count") or 0)
+    metered = int(usage.get("metered_calls") or 0)
+    known = int(usage.get("known_tokens") or 0)
+    estimated = int(usage.get("estimated_tokens") or 0)
+    manus_tasks = int(usage.get("manus_tasks") or 0)
+    credits = int(usage.get("provider_credits") or 0)
+    credit_calls = int(usage.get("credit_metered_calls") or 0)
+    if calls <= 0:
+        return "Token 待统计", "尚未取得本篇文章的模型调用计量记录"
+    if bool(usage.get("complete")):
+        return (
+            f"实际 {known:,} Token · {metered}/{calls}",
+            "全部文本模型调用均返回了服务商实际 Token，可用于审计与结算",
+        )
+
+    suffix = f" · Manus {credits:,} Credits" if credit_calls else ""
+    if known:
+        return (
+            f"已确认 {known:,} Token · {metered}/{calls}{suffix}",
+            "用量不完整：只展示服务商已确认部分，不可作为文章总 Token 结算",
+        )
+    if estimated:
+        return (
+            f"估算 {estimated:,} Token · 非实际",
+            "这是本地估算，不是服务商账单 Token，不可用于严格计费",
+        )
+    if manus_tasks:
+        credit_text = f"{credits:,} Credits" if credit_calls else "Credits 待同步"
+        return (
+            f"Manus {credit_text} · 无 Token",
+            "Manus 按任务 Credit 计量，服务商没有提供输入/输出 Token",
+        )
+    return (
+        f"Token 未提供 · {metered}/{calls}",
+        "服务商响应缺少实际 Token，用量不完整且不可用于结算",
+    )
+
+
 def _render_inbox_article_card(
     state: AppState,
     service: BatchService,
@@ -1458,11 +1509,9 @@ def _render_inbox_article_card(
     source_url = str(item.get("source_url") or "")
     body_chars = int(item.get("body_chars") or 0)
     priority_reason = str(item.get("priority_reason") or "")
-    generation_token_usage = item.get("generation_token_usage")
-    generation_token_text = (
-        f"{int(generation_token_usage):,} Token"
-        if generation_token_usage is not None
-        else "Token 待统计"
+    generation_token_text, generation_token_hint = _generation_usage_text(
+        item.get("generation_usage"),
+        legacy_tokens=item.get("generation_token_usage"),
     )
     latest_review_summary = item.get("latest_review_summary")
     if isinstance(latest_review_summary, dict):
@@ -2006,7 +2055,7 @@ def _render_inbox_article_card(
             or (failure_recommendation if failure else "状态已同步")
         ).classes("ops-task-row-state")
         ui.label(generation_token_text).classes("ops-task-row-token").tooltip(
-            "本篇文章生成累计 Token（输入 + 输出）"
+            generation_token_hint
         )
         with ui.row().classes("ops-task-row-actions"):
             ui.button(
@@ -4842,11 +4891,9 @@ def _render_batch_card(
             ui.icon("inventory_2", size="20px").classes("ops-semantic-icon")
         with ui.column().classes("ops-task-row-copy"):
             ui.label(topic or "未命名批次").classes("ops-task-row-title")
-            generation_token_usage = batch.get("generation_token_usage")
-            generation_token_text = (
-                f"{int(generation_token_usage):,} Token"
-                if generation_token_usage is not None
-                else "Token 待统计"
+            generation_token_text, _generation_token_hint = _generation_usage_text(
+                batch.get("generation_usage"),
+                legacy_tokens=batch.get("generation_token_usage"),
             )
             ui.label(
                 f'批次 #{batch.get("display_id") or ""} · 公众号 {len(jobs)} 个'

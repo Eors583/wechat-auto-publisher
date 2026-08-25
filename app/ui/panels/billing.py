@@ -46,6 +46,11 @@ def build_billing_panel(state: Any) -> None:
             f"其中缓存 {_integer(usage.get('cached_input_tokens'))}",
         )
         _metric("输出 Token", _integer(usage.get("output_tokens")), "推理 Token 已包含在输出中")
+        _metric(
+            "Manus Credits",
+            _integer(usage.get("provider_credits")),
+            "与实际 Token 分开统计",
+        )
         _metric("生成图片", _integer(usage.get("images")), "按成功或失败请求审计")
         _metric(
             "影子积分",
@@ -60,6 +65,8 @@ def build_billing_panel(state: Any) -> None:
         {"name": "status_label", "label": "状态", "field": "status_label", "align": "left"},
         {"name": "input_tokens", "label": "输入", "field": "input_tokens", "align": "right"},
         {"name": "output_tokens", "label": "输出", "field": "output_tokens", "align": "right"},
+        {"name": "metering", "label": "Token 计量", "field": "metering", "align": "left"},
+        {"name": "provider_credits", "label": "Credits", "field": "provider_credits", "align": "right"},
         {"name": "image_count", "label": "图片", "field": "image_count", "align": "right"},
         {"name": "estimated_points", "label": "影子积分", "field": "estimated_points", "align": "right"},
         {"name": "charged_points", "label": "实际扣除", "field": "charged_points", "align": "right"},
@@ -71,6 +78,17 @@ def build_billing_panel(state: Any) -> None:
             "status_label": "完成" if row.get("status") == "succeeded" else ("失败" if row.get("status") == "failed" else "进行中"),
             "input_tokens": _integer(row.get("input_tokens")),
             "output_tokens": _integer(row.get("output_tokens")),
+            "metering": (
+                f"实际 {int(row.get('metered_calls') or 0)} 次"
+                if not int(row.get("unavailable_calls") or 0)
+                and not int(row.get("estimated_calls") or 0)
+                else (
+                    f"缺失 {int(row.get('unavailable_calls') or 0)} 次"
+                    if int(row.get("unavailable_calls") or 0)
+                    else f"估算 {int(row.get('estimated_calls') or 0)} 次"
+                )
+            ),
+            "provider_credits": _integer(row.get("provider_credits")),
             "image_count": _integer(row.get("image_count")),
             "estimated_points": _integer(row.get("estimated_points")),
             "charged_points": "0",
@@ -126,7 +144,9 @@ def build_admin_billing_panel(state: Any) -> None:
                     {"name": "provider_model", "label": "模型", "field": "provider_model", "align": "left"},
                     {"name": "funding_source", "label": "资金来源", "field": "funding_source", "align": "left"},
                     {"name": "usage_source", "label": "计量来源", "field": "usage_source", "align": "left"},
+                    {"name": "token_usage_status", "label": "Token 状态", "field": "token_usage_status", "align": "left"},
                     {"name": "tokens", "label": "Token", "field": "tokens", "align": "right"},
+                    {"name": "provider_credits", "label": "Credits", "field": "provider_credits", "align": "right"},
                     {"name": "image_count", "label": "图片", "field": "image_count", "align": "right"},
                     {"name": "cost", "label": "成本", "field": "cost", "align": "right"},
                     {"name": "pricing_status", "label": "价格状态", "field": "pricing_status", "align": "left"},
@@ -135,7 +155,16 @@ def build_admin_billing_panel(state: Any) -> None:
                 rows=[
                     {
                         **row,
-                        "tokens": _integer(int(row.get("input_tokens") or 0) + int(row.get("output_tokens") or 0)),
+                        "tokens": (
+                            _integer(row.get("total_tokens"))
+                            if row.get("token_usage_status") == "RECORDED"
+                            else "—"
+                        ),
+                        "provider_credits": (
+                            _integer(row.get("provider_credits"))
+                            if row.get("provider_credits") is not None
+                            else "—"
+                        ),
                         "image_count": _integer(row.get("image_count")),
                         "cost": f"¥{int(row.get('provider_cost_micro_cny') or 0) / MICRO_CNY_PER_CNY:,.4f}",
                         "billable": "是" if row.get("billable") else "否",

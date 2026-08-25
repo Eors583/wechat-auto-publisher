@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from app.ai.usage import (
     NormalizedUsage,
+    TOKEN_USAGE_UNAVAILABLE,
     bind_usage_recorder,
     emit_usage,
+    estimated_text_usage,
     normalize_chat_usage,
     normalize_gemini_usage,
     normalize_responses_usage,
@@ -40,6 +44,8 @@ def test_openai_chat_and_responses_usage_are_normalized_without_double_counting(
     assert responses.output_tokens == 25
     assert responses.reasoning_tokens == 20
     assert responses.total_tokens == 65
+    assert chat.raw_usage["total_tokens"] == 170
+    assert "choices" not in chat.raw_usage
 
 
 def test_gemini_usage_metadata_is_provider_actual() -> None:
@@ -60,6 +66,37 @@ def test_gemini_usage_metadata_is_provider_actual() -> None:
     assert usage.output_tokens == 12
     assert usage.reasoning_tokens == 4
     assert usage.source == "provider_actual"
+
+
+def test_missing_provider_usage_is_unavailable_instead_of_actual_zero() -> None:
+    chat = normalize_chat_usage(
+        {
+            "id": "response-without-usage",
+            "choices": [{"message": {"content": "OK"}}],
+        }
+    )
+    gemini = normalize_gemini_usage({"text": "OK"})
+
+    assert chat.token_status == TOKEN_USAGE_UNAVAILABLE
+    assert gemini.token_status == TOKEN_USAGE_UNAVAILABLE
+    assert chat.source == gemini.source == "unknown"
+    assert chat.total_tokens == gemini.total_tokens == 0
+    assert chat.raw_usage == gemini.raw_usage == {}
+
+
+def test_estimated_usage_stays_separate_from_the_strict_status_enum() -> None:
+    usage = estimated_text_usage("四个字符", "返回值")
+
+    assert usage.source == "estimated"
+    assert usage.token_status == TOKEN_USAGE_UNAVAILABLE
+    assert usage.total_tokens > 0
+
+    with pytest.raises(ValueError, match="服务商返回"):
+        NormalizedUsage(
+            input_tokens=1,
+            source="estimated",
+            token_status="RECORDED",
+        )
 
 
 def test_recorder_failure_is_fail_open() -> None:

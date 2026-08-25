@@ -230,8 +230,74 @@ def test_fresh_postgres_schema_records_all_versioned_migrations(
                 """
             ).fetchall()
         }
+        strict_usage_columns = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'ai_usage_events'
+                  AND column_name IN (
+                      'token_usage_status', 'provider_credits', 'raw_usage_json'
+                  )
+                """
+            ).fetchall()
+        }
+        metering_model_columns = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'ai_models'
+                  AND column_name IN (
+                      'token_metering_capability', 'strict_token_eligible',
+                      'token_metering_checked_at'
+                  )
+                """
+            ).fetchall()
+        }
+        provider_trace_indexes = {
+            row[0]: row[1]
+            for row in conn.execute(
+                """
+                SELECT indexname, indexdef
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND indexname IN (
+                      'idx_usage_events_provider_request_unique',
+                      'idx_usage_events_provider_response_unique'
+                  )
+                """
+            ).fetchall()
+        }
     assert len(billing_tables) == 7
     assert len(billing_indexes) == 7
+    assert strict_usage_columns == {
+        "token_usage_status",
+        "provider_credits",
+        "raw_usage_json",
+    }
+    assert metering_model_columns == {
+        "token_metering_capability",
+        "strict_token_eligible",
+        "token_metering_checked_at",
+    }
+    assert set(provider_trace_indexes) == {
+        "idx_usage_events_provider_request_unique",
+        "idx_usage_events_provider_response_unique",
+    }
+    assert all(
+        "UNIQUE INDEX" in value for value in provider_trace_indexes.values()
+    )
+    assert "owner_user_id, provider, provider_request_id" in (
+        provider_trace_indexes["idx_usage_events_provider_request_unique"]
+    )
+    assert "owner_user_id, provider, provider_response_id" in (
+        provider_trace_indexes["idx_usage_events_provider_response_unique"]
+    )
 
 
 def test_legacy_postgres_schema_upgrades_without_losing_settings(

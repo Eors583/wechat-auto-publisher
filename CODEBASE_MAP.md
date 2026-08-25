@@ -1,6 +1,6 @@
 # WeChat Auto Publisher — AI development handoff and code map
 
-Last verified against the repository on **2026-08-24**. This document describes
+Last verified against the repository on **2026-08-25**. This document describes
 the current source tree; code is the final authority. When a symbol moves, update
 this file in the same change.
 
@@ -244,6 +244,7 @@ Primary tab ownership inside `desktop.py`:
 | `onboarding.py` | Persisted onboarding state, model/account/Feishu steps, readiness and restart. |
 | `onboarding_errors.py` | Converts provider/WeChat errors into guided onboarding actions. |
 | `analytics.py` | Operational metrics and time-bounded summaries. |
+| `billing.py` | Owner-scoped shadow metering, strict article-usage completeness, provider cost snapshots and Credit-safe summaries. |
 | `url_validation.py` | SSRF/network-boundary validation for external URLs. Use before every new server-side fetch feature. |
 
 ### 4.5 Workflow stages (`app/workflows/`) and facade
@@ -273,6 +274,7 @@ not invent a UI-only status.
 | `gemini.py` | Google Gemini text client adapter. |
 | `askmany.py` | AskMany client adapter. |
 | `failover.py` | Primary/fallback text model execution and title scoring. |
+| `usage.py` | Provider-neutral usage events, strict Token status, provider-actual normalization, estimates and fixed/Credit units. |
 | `image_providers.py` | Supported image-provider presets, type inference, labels and endpoint resolution. |
 | `image_generator.py` | Provider-specific image generation, rate-limit retry, response normalization, image validation and endpoint test. |
 
@@ -433,7 +435,7 @@ non-transactional index work uses an autocommit connection and the same lock.
 | `schema_migrations` | platform/schema | Ordered version/name/checksum/application-time history; never stores customer data |
 | `billing_plans`, `model_price_cards` | platform/billing | Shadow-mode plan and model-price snapshots; no online payment capture |
 | `user_subscriptions`, `credit_buckets`, `credit_ledger` | user/billing | Subscription periods and append-only points grant/ledger data |
-| `usage_operations`, `ai_usage_events` | user/billing | Idempotent operation envelope and sanitized provider usage/cost events; created by migration `20260824_0004` |
+| `usage_operations`, `ai_usage_events` | user/billing | Idempotent operation envelope and one sanitized event per physical provider call; migration `20260825_0005` adds explicit `RECORDED/PENDING/UNAVAILABLE` Token status, provider request/response trace-id uniqueness guards, separate estimates, and provider Credits without treating missing usage as zero. |
 | `ads` | user/config-compatible | Advertisement pool and use tracking |
 | `token_cache` | ephemeral/account-compatible | WeChat access-token cache; excluded from legacy business migration |
 
@@ -473,6 +475,7 @@ Use this table before searching the whole repository.
 | Followed account recent articles | `ui/panels/topics.py`, `followed_articles.py` | `services/followed_content.py`, provider adapters, per-user settings | `test_article_search.py`, `test_wechat_backend_search.py`, `test_jizhile_api.py`, `test_topic_center.py` |
 | Jizhile failures/fallback | `services/followed_content.py:discover_account` | `providers/jizhile_api.py`, `services/jizhile_settings.py`, backend-search provider/settings | `test_jizhile_api.py`, `test_wechat_backend_search.py` |
 | Generate/rewrite content | `services/batches.py:create_batch` | `Pipeline`, `workflows/generation.py`, selected AI client | `test_batch.py`, `test_p0_backend.py`, provider/model tests |
+| Strict Token/Credit metering | `ai/usage.py`, provider client | `services/billing.py`, `Database.ai_usage_events`, model capability probe, task/billing panels | `test_ai_usage.py`, `test_billing.py`, `test_manus.py`, `test_model_registry.py`, `test_ui_review_inbox.py` |
 | Inline images | review UI and `BatchService.regenerate_inline_*` | `inline_images.py`, rendering stage, WeChat material | `test_inline_images.py`, `test_image_generator.py` |
 | Cover generation/selection | review UI and `BatchService` cover methods | `cover/`, rendering stage, image model registry | `test_cover_generator.py`, `test_image_generator.py` |
 | Write to draft safely | `tasks.py:confirm_batch_write` | `BatchService.inject_batch`, workflow delivery, `services/wechat_delivery.py`, `wechat/draft.py` | `test_wechat_delivery_reliability.py`, `test_wechat_publish.py`, `test_ui_ip_whitelist_guide.py` |
@@ -849,6 +852,7 @@ unless noted.
 | `app/ai/manus.py` | Manus async task client/polling. |
 | `app/ai/model_registry.py` | Model storage projection, encryption, selection and client construction. |
 | `app/ai/openai_compat.py` | OpenAI-compatible text client. |
+| `app/ai/usage.py` | Strict provider usage normalization and recorder context. |
 
 ### API
 
@@ -899,6 +903,7 @@ unless noted.
 | `app/services/topic_sources.py` | Persisted topic source/search/pagination. |
 | `app/services/url_validation.py` | External URL/SSRF guard. |
 | `app/services/wechat_backend_settings.py` | Per-user backend Token/Cookie settings. |
+| `app/services/billing.py` | Strict usage completeness and shadow pricing. |
 | `app/services/wechat_delivery.py` | Idempotent/reconciled draft delivery. |
 | `app/services/wechat_layout_import.py` | WeChat article typography parser. |
 | `app/services/wechat_relay_settings.py` | Fixed-egress relay settings/access code. |
@@ -927,6 +932,7 @@ unless noted.
 | `app/ui/workflow.py` | UI stage/navigation helpers. |
 | `app/ui/panels/__init__.py` | Panel package boundary. |
 | `app/ui/panels/auth.py` | Login/register UI. |
+| `app/ui/panels/billing.py` | Customer usage and merchant AI cost/Credit panels. |
 | `app/ui/panels/feishu.py` | Feishu settings UI. |
 | `app/ui/panels/followed_articles.py` | Followed-account article dialog. |
 | `app/ui/panels/models.py` | Custom/local/API model editor. |

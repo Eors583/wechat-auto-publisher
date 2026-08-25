@@ -23,6 +23,7 @@ from app.ai.model_registry import (
     LOCAL_OPENAI_COMPATIBLE,
     MANUS,
     OPENAI_COMPATIBLE,
+    token_metering_capability_label,
 )
 from app.db import Database
 from app.services.configuration import ConfigurationService
@@ -1040,6 +1041,16 @@ def build_models_panel(
                             ui.label(
                                 "API Key：••••••••（环境变量已配置）"
                             ).classes("muted")
+                            ui.label(
+                                "Token 计量："
+                                + token_metering_capability_label(
+                                    str(item.get("token_metering_capability") or "")
+                                )
+                            ).classes(
+                                "text-positive"
+                                if item.get("strict_token_eligible")
+                                else "text-warning"
+                            )
                         ui.label("只读配置").classes(
                             "text-positive text-weight-medium"
                         )
@@ -1111,6 +1122,20 @@ def build_models_panel(
                                     else "API Key：尚未配置"
                                 )
                             ).classes("muted")
+                            if not image_panel:
+                                ui.label(
+                                    "Token 计量："
+                                    + token_metering_capability_label(
+                                        str(
+                                            item.get("token_metering_capability")
+                                            or ""
+                                        )
+                                    )
+                                ).classes(
+                                    "text-positive"
+                                    if item.get("strict_token_eligible")
+                                    else "text-warning"
+                                )
                             if item.get("connection_type") == "local":
                                 agent_id = str(item.get("local_agent_id") or "")
                                 agent = (

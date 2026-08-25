@@ -48,12 +48,22 @@ SHADOW_BILLING_SCHEMA = SchemaMigration(
         "ledger, usage operations and AI usage events with seven lookup indexes"
     ),
 )
+STRICT_TOKEN_METERING = SchemaMigration(
+    "20260825_0005",
+    "strict_token_metering_status",
+    (
+        "AI usage token status and provider credits; model metering capability, "
+        "strict eligibility, last probe timestamp, sanitized raw usage, and "
+        "provider request/response trace-id uniqueness"
+    ),
+)
 
 SCHEMA_MIGRATIONS = (
     BASELINE_SCHEMA,
     PHASE_ONE_COMPAT,
     DROP_DUPLICATE_INDEXES,
     SHADOW_BILLING_SCHEMA,
+    STRICT_TOKEN_METERING,
 )
 
 
@@ -213,6 +223,83 @@ def apply_shadow_billing_schema(conn: Any) -> None:
     )
 
 
+def apply_strict_token_metering_schema(conn: Any) -> None:
+    """Add explicit Token completeness without rewriting the billing baseline."""
+
+    usage_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(ai_usage_events)").fetchall()
+    }
+    for name, declaration in {
+        "token_usage_status": "TEXT NOT NULL DEFAULT 'RECORDED'",
+        "provider_credits": "INTEGER",
+        "raw_usage_json": "TEXT NOT NULL DEFAULT '{}'",
+    }.items():
+        if name not in usage_columns:
+            conn.execute(
+                f"ALTER TABLE ai_usage_events ADD COLUMN {name} {declaration}"
+            )
+    conn.execute(
+        """
+        UPDATE ai_usage_events
+        SET token_usage_status = CASE
+            WHEN usage_source = 'provider_actual'
+             AND (input_tokens > 0 OR output_tokens > 0 OR total_tokens > 0)
+            THEN 'RECORDED'
+            ELSE 'UNAVAILABLE'
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_provider_request_unique
+        ON ai_usage_events(owner_user_id, provider, provider_request_id)
+        WHERE provider_request_id IS NOT NULL AND provider_request_id <> ''
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_provider_response_unique
+        ON ai_usage_events(owner_user_id, provider, provider_response_id)
+        WHERE provider_response_id IS NOT NULL AND provider_response_id <> ''
+        """
+    )
+
+    model_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(ai_models)").fetchall()
+    }
+    for name, declaration in {
+        "token_metering_capability": "TEXT NOT NULL DEFAULT 'unverified'",
+        "strict_token_eligible": "INTEGER NOT NULL DEFAULT 0",
+        "token_metering_checked_at": "TEXT",
+    }.items():
+        if name not in model_columns:
+            conn.execute(f"ALTER TABLE ai_models ADD COLUMN {name} {declaration}")
+    conn.execute(
+        """
+        UPDATE ai_models
+        SET token_metering_capability = CASE
+                WHEN provider_type = 'manus' THEN 'no_token_usage'
+                WHEN provider_type = 'local_openai_compatible' THEN 'estimated_only'
+                WHEN provider_type IN (
+                    'image_alibaba', 'image_minimax', 'image_volcengine',
+                    'image_zhipu', 'openai_image'
+                ) THEN 'not_applicable'
+                ELSE COALESCE(NULLIF(token_metering_capability, ''), 'unverified')
+            END,
+            strict_token_eligible = CASE
+                WHEN provider_type IN (
+                    'manus', 'local_openai_compatible', 'image_alibaba',
+                    'image_minimax', 'image_volcengine', 'image_zhipu',
+                    'openai_image'
+                ) THEN 0
+                ELSE strict_token_eligible
+            END
+        """
+    )
+
+
 def ensure_schema_migrations(conn: Any) -> None:
     conn.execute(
         """
@@ -284,9 +371,11 @@ __all__ = [
     "DROP_DUPLICATE_INDEXES",
     "PHASE_ONE_COMPAT",
     "SHADOW_BILLING_SCHEMA",
+    "STRICT_TOKEN_METERING",
     "SCHEMA_MIGRATIONS",
     "SchemaMigration",
     "apply_shadow_billing_schema",
+    "apply_strict_token_metering_schema",
     "ensure_schema_migrations",
     "migration_applied",
     "record_schema_migration",

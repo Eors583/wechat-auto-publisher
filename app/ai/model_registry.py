@@ -18,7 +18,12 @@ from app.ai.image_providers import (
     is_image_provider,
     resolved_image_endpoint,
 )
-from app.ai.usage import tag_client
+from app.ai.usage import (
+    TOKEN_USAGE_RECORDED,
+    UsageRecord,
+    bind_usage_recorder,
+    tag_client,
+)
 from app.db import Database
 from app.services.url_validation import validate_external_url
 
@@ -35,6 +40,12 @@ PROVIDER_TYPES = {
     *IMAGE_PROVIDER_TYPES,
 }
 CONFIG_MODEL_PREFIX = "config:"
+METERING_UNVERIFIED = "unverified"
+METERING_RESPONSE_USAGE = "response_usage"
+METERING_SUCCESS_ONLY = "success_only_usage"
+METERING_NO_TOKEN = "no_token_usage"
+METERING_ESTIMATED = "estimated_only"
+METERING_NOT_APPLICABLE = "not_applicable"
 
 _CONFIG_MODEL_LABELS = {
     "manus": "Manus",
@@ -45,6 +56,51 @@ _CONFIG_MODEL_LABELS = {
     "gemini": "Google Gemini",
     "openai": "OpenAI",
 }
+
+
+def default_token_metering_capability(provider_type: str) -> str:
+    if is_image_provider(provider_type):
+        return METERING_NOT_APPLICABLE
+    if provider_type == MANUS:
+        return METERING_NO_TOKEN
+    if provider_type == LOCAL_OPENAI_COMPATIBLE:
+        return METERING_ESTIMATED
+    return METERING_UNVERIFIED
+
+
+def token_metering_capability_label(capability: str) -> str:
+    return {
+        METERING_RESPONSE_USAGE: "严格 Token 计量可用",
+        METERING_SUCCESS_ONLY: "仅成功响应可计量，不可全链路追溯",
+        METERING_NO_TOKEN: "服务商不提供实际 Token",
+        METERING_ESTIMATED: "仅本地估算，不可用于严格计费",
+        METERING_NOT_APPLICABLE: "按图片或固定单位计量",
+        METERING_UNVERIFIED: "尚未探测 Token 计量能力",
+    }.get(str(capability or ""), "尚未探测 Token 计量能力")
+
+
+def _probed_token_metering_capability(
+    provider_type: str,
+    records: list[UsageRecord],
+) -> tuple[str, bool]:
+    default = default_token_metering_capability(provider_type)
+    if default != METERING_UNVERIFIED:
+        return default, False
+    actual = [
+        record
+        for record in records
+        if record.usage.token_status == TOKEN_USAGE_RECORDED
+    ]
+    if actual:
+        traceable = any(record.request_id or record.response_id for record in actual)
+        return (
+            (METERING_RESPONSE_USAGE, True)
+            if traceable
+            else (METERING_SUCCESS_ONLY, False)
+        )
+    if any(record.usage.source == "estimated" for record in records):
+        return METERING_ESTIMATED, False
+    return METERING_NO_TOKEN, False
 
 
 def configured_models(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -71,6 +127,15 @@ def configured_models(config: dict[str, Any]) -> list[dict[str, Any]]:
                 "api_base": str(cfg.get("api_base") or ""),
                 "model": str(cfg.get("model") or provider),
                 "enabled": True,
+                "token_metering_capability": default_token_metering_capability(
+                    (
+                        GEMINI
+                        if provider == "gemini"
+                        else (MANUS if provider == "manus" else OPENAI_COMPATIBLE)
+                    )
+                ),
+                "strict_token_eligible": False,
+                "token_metering_checked_at": None,
                 "has_api_key": True,
                 "is_config_model": True,
                 "is_default": provider == primary,
@@ -256,6 +321,21 @@ def save_model(
     if not encrypted and provider_type != LOCAL_OPENAI_COMPATIBLE:
         raise ValueError("API Key 不能为空")
     model_id = model_id or f"custom_{uuid.uuid4().hex[:12]}"
+    connection_changed = bool(
+        not existing
+        or str(existing.get("provider_type") or "") != provider_type
+        or str(existing.get("api_base") or "") != api_base.strip()
+        or str(existing.get("model") or "") != model
+        or (api_key and api_key.strip())
+    )
+    capability = (
+        default_token_metering_capability(provider_type)
+        if connection_changed
+        else str(
+            existing.get("token_metering_capability")
+            or default_token_metering_capability(provider_type)
+        )
+    )
     db.upsert_ai_model(
         {
             "id": model_id,
@@ -266,6 +346,17 @@ def save_model(
             "api_key_encrypted": encrypted,
             "local_agent_id": selected_agent_id,
             "enabled": enabled,
+            "token_metering_capability": capability,
+            "strict_token_eligible": (
+                False
+                if connection_changed
+                else bool(existing.get("strict_token_eligible"))
+            ),
+            "token_metering_checked_at": (
+                None
+                if connection_changed
+                else existing.get("token_metering_checked_at")
+            ),
             "created_at": existing.get("created_at") if existing else None,
         }
     )
@@ -293,6 +384,7 @@ def public_models(
         )
         item.pop("api_key_encrypted", None)
         item["enabled"] = bool(item.get("enabled"))
+        item["strict_token_eligible"] = bool(item.get("strict_token_eligible"))
         item["has_api_key"] = has_api_key
         item["scope"] = "private" if record_owner else "platform"
         item["editable"] = record_owner == db.owner_user_id
@@ -363,9 +455,25 @@ def test_model_connection(db: Database, model_id: str) -> str:
     record = db.get_ai_model(model_id)
     if not record:
         raise ValueError("模型不存在")
+    usage_records: list[UsageRecord] = []
     if record["provider_type"] == LOCAL_OPENAI_COMPATIBLE:
         client = build_text_client(db, {}, model_id)
-        client.complete("只回复 OK", max_tokens=8, temperature=0, max_attempts=1)
+        with bind_usage_recorder(usage_records.append):
+            client.complete(
+                "只回复 OK",
+                max_tokens=8,
+                temperature=0,
+                max_attempts=1,
+            )
+        capability, eligible = _probed_token_metering_capability(
+            str(record["provider_type"]),
+            usage_records,
+        )
+        db.update_ai_model_metering_capability(
+            model_id,
+            capability=capability,
+            strict_eligible=eligible,
+        )
         return "连接成功"
     key = decrypt_api_key(record["api_key_encrypted"])
     if is_image_provider(record["provider_type"]):
@@ -377,29 +485,44 @@ def test_model_connection(db: Database, model_id: str) -> str:
             model=record["model"],
             provider_type=str(record.get("provider_type") or ""),
         )
-    if record["provider_type"] == MANUS:
-        client = ManusClient(
-            api_key=key,
-            api_base=record.get("api_base") or "https://api.manus.ai",
-            model=record["model"] or "manus-1.6",
-            # Manus is an asynchronous task API. Even a minimal probe can take
-            # more than one minute after task creation, so a generic 60-second
-            # connection timeout produces false negatives.
-            timeout=180,
-        )
-        client.complete("只回复 OK")
-    elif record["provider_type"] == GEMINI:
-        client = GeminiClient(api_key=key, model=record["model"], timeout=30)
-        client.complete("只回复 OK")
-    else:
-        client = OpenAICompatClient(
-            api_key=key,
-            api_base=record.get("api_base") or "",
-            model=record["model"],
-            provider_name=record["name"],
-            timeout=30,
-        )
-        client.complete("只回复 OK", max_tokens=8, temperature=0, max_attempts=1)
+    with bind_usage_recorder(usage_records.append):
+        if record["provider_type"] == MANUS:
+            client = ManusClient(
+                api_key=key,
+                api_base=record.get("api_base") or "https://api.manus.ai",
+                model=record["model"] or "manus-1.6",
+                # Manus is an asynchronous task API. Even a minimal probe can take
+                # more than one minute after task creation, so a generic 60-second
+                # connection timeout produces false negatives.
+                timeout=180,
+            )
+            client.complete("只回复 OK")
+        elif record["provider_type"] == GEMINI:
+            client = GeminiClient(api_key=key, model=record["model"], timeout=30)
+            client.complete("只回复 OK")
+        else:
+            client = OpenAICompatClient(
+                api_key=key,
+                api_base=record.get("api_base") or "",
+                model=record["model"],
+                provider_name=record["name"],
+                timeout=30,
+            )
+            client.complete(
+                "只回复 OK",
+                max_tokens=8,
+                temperature=0,
+                max_attempts=1,
+            )
+    capability, eligible = _probed_token_metering_capability(
+        str(record["provider_type"]),
+        usage_records,
+    )
+    db.update_ai_model_metering_capability(
+        model_id,
+        capability=capability,
+        strict_eligible=eligible,
+    )
     return "连接成功"
 
 

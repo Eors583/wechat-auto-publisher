@@ -21,7 +21,9 @@ from app.schema_migrations import (
     DROP_DUPLICATE_INDEXES,
     PHASE_ONE_COMPAT,
     SHADOW_BILLING_SCHEMA,
+    STRICT_TOKEN_METERING,
     apply_shadow_billing_schema,
+    apply_strict_token_metering_schema,
     ensure_schema_migrations,
     migration_applied,
     record_schema_migration,
@@ -1203,6 +1205,13 @@ class Database:
                 record_schema_migration(
                     conn,
                     SHADOW_BILLING_SCHEMA,
+                    applied_at=_utc_now(),
+                )
+            if not migration_applied(conn, STRICT_TOKEN_METERING):
+                apply_strict_token_metering_schema(conn)
+                record_schema_migration(
+                    conn,
+                    STRICT_TOKEN_METERING,
                     applied_at=_utc_now(),
                 )
 
@@ -4153,8 +4162,10 @@ class Database:
                 """
                 INSERT INTO ai_models (
                     id, owner_user_id, name, provider_type, api_base, model,
-                    api_key_encrypted, local_agent_id, enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    api_key_encrypted, local_agent_id, enabled,
+                    token_metering_capability, strict_token_eligible,
+                    token_metering_checked_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     provider_type=excluded.provider_type,
@@ -4168,6 +4179,9 @@ class Database:
                     END,
                     local_agent_id=excluded.local_agent_id,
                     enabled=excluded.enabled,
+                    token_metering_capability=excluded.token_metering_capability,
+                    strict_token_eligible=excluded.strict_token_eligible,
+                    token_metering_checked_at=excluded.token_metering_checked_at,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -4180,10 +4194,43 @@ class Database:
                     api_key_encrypted,
                     str(model.get("local_agent_id") or "") or None,
                     1 if model.get("enabled", True) else 0,
+                    str(
+                        model.get("token_metering_capability") or "unverified"
+                    ),
+                    1 if model.get("strict_token_eligible", False) else 0,
+                    model.get("token_metering_checked_at") or None,
                     model.get("created_at") or now,
                     now,
                 ),
             )
+
+    def update_ai_model_metering_capability(
+        self,
+        model_id: str,
+        *,
+        capability: str,
+        strict_eligible: bool,
+    ) -> bool:
+        """Persist a real connection probe only for the model's owning scope."""
+
+        with self.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE ai_models
+                SET token_metering_capability = ?, strict_token_eligible = ?,
+                    token_metering_checked_at = ?, updated_at = ?
+                WHERE id = ? AND owner_user_id = ?
+                """,
+                (
+                    str(capability),
+                    1 if strict_eligible else 0,
+                    _utc_now(),
+                    _utc_now(),
+                    str(model_id),
+                    str(self.owner_user_id or ""),
+                ),
+            )
+        return updated.rowcount == 1
 
     def delete_ai_model(self, model_id: str) -> None:
         with self.connect() as conn:
@@ -6697,6 +6744,17 @@ class Database:
         if str(event.get("owner_user_id") or owner_user_id) != owner_user_id:
             raise ValueError("AI 用量不属于当前登录账号")
         operation_id = str(event.get("operation_id") or "")
+        provider = str(event.get("provider") or "unknown")
+        provider_request_id = str(event.get("provider_request_id") or "")
+        provider_response_id = str(event.get("provider_response_id") or "")
+        token_usage_status = str(
+            event.get("token_usage_status") or "UNAVAILABLE"
+        ).upper()
+        if token_usage_status not in {"RECORDED", "PENDING", "UNAVAILABLE"}:
+            raise ValueError("不支持的 Token 计量状态")
+        usage_source = str(event.get("usage_source") or "unknown")
+        if token_usage_status == "RECORDED" and usage_source != "provider_actual":
+            raise ValueError("实际 Token 必须来自服务商返回的用量")
         with self.connect() as conn:
             owned_operation = conn.execute(
                 """
@@ -6707,6 +6765,30 @@ class Database:
             ).fetchone()
             if not owned_operation:
                 raise ValueError("用量操作不存在或不属于当前登录账号")
+            if provider_request_id:
+                existing_event = conn.execute(
+                    """
+                    SELECT 1 FROM ai_usage_events
+                    WHERE owner_user_id = ? AND provider = ?
+                      AND provider_request_id = ?
+                    LIMIT 1
+                    """,
+                    (owner_user_id, provider, provider_request_id),
+                ).fetchone()
+                if existing_event:
+                    return
+            if provider_response_id:
+                existing_event = conn.execute(
+                    """
+                    SELECT 1 FROM ai_usage_events
+                    WHERE owner_user_id = ? AND provider = ?
+                      AND provider_response_id = ?
+                    LIMIT 1
+                    """,
+                    (owner_user_id, provider, provider_response_id),
+                ).fetchone()
+                if existing_event:
+                    return
             conn.execute(
                 """
                 INSERT INTO ai_usage_events (
@@ -6714,13 +6796,15 @@ class Database:
                     provider, provider_model, funding_source, modality,
                     input_tokens, cached_input_tokens, output_tokens,
                     reasoning_tokens, total_tokens, image_count, fixed_units,
-                    usage_source, provider_request_id, provider_response_id,
+                    usage_source, token_usage_status, provider_credits,
+                    raw_usage_json,
+                    provider_request_id, provider_response_id,
                     provider_cost_micro_cny, retail_cost_micro_cny,
                     estimated_points, pricing_status, price_snapshot_json,
                     contributes_to_result, billable, status, error_code, created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -6729,7 +6813,7 @@ class Database:
                     operation_id,
                     event.get("job_id"),
                     str(event.get("model_id") or ""),
-                    str(event.get("provider") or "unknown"),
+                    provider,
                     str(event.get("provider_model") or ""),
                     str(event.get("funding_source") or "platform"),
                     str(event.get("modality") or "text"),
@@ -6740,9 +6824,16 @@ class Database:
                     max(0, int(event.get("total_tokens") or 0)),
                     max(0, int(event.get("image_count") or 0)),
                     max(0, int(event.get("fixed_units") or 0)),
-                    str(event.get("usage_source") or "unknown"),
-                    str(event.get("provider_request_id") or ""),
-                    str(event.get("provider_response_id") or ""),
+                    usage_source,
+                    token_usage_status,
+                    (
+                        None
+                        if event.get("provider_credits") is None
+                        else max(0, int(event["provider_credits"]))
+                    ),
+                    str(event.get("raw_usage_json") or "{}"),
+                    provider_request_id,
+                    provider_response_id,
                     max(0, int(event.get("provider_cost_micro_cny") or 0)),
                     max(0, int(event.get("retail_cost_micro_cny") or 0)),
                     max(0, int(event.get("estimated_points") or 0)),
@@ -6764,10 +6855,14 @@ class Database:
             row = conn.execute(
                 """
                 SELECT COUNT(*) AS event_count,
-                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                       COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
-                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(CASE WHEN token_usage_status = 'RECORDED'
+                           THEN input_tokens ELSE 0 END), 0) AS input_tokens,
+                       COALESCE(SUM(CASE WHEN token_usage_status = 'RECORDED'
+                           THEN cached_input_tokens ELSE 0 END), 0) AS cached_input_tokens,
+                       COALESCE(SUM(CASE WHEN token_usage_status = 'RECORDED'
+                           THEN output_tokens ELSE 0 END), 0) AS output_tokens,
                        COALESCE(SUM(image_count), 0) AS image_count,
+                       COALESCE(SUM(provider_credits), 0) AS provider_credits,
                        COALESCE(SUM(CASE WHEN contributes_to_result = 1
                            THEN estimated_points ELSE 0 END), 0) AS estimated_points
                 FROM ai_usage_events
@@ -6887,10 +6982,18 @@ class Database:
             row = conn.execute(
                 """
                 SELECT COUNT(DISTINCT o.id) AS operations,
-                       COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
-                       COALESCE(SUM(e.cached_input_tokens), 0) AS cached_input_tokens,
-                       COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(CASE WHEN e.token_usage_status = 'RECORDED'
+                           THEN e.input_tokens ELSE 0 END), 0) AS input_tokens,
+                       COALESCE(SUM(CASE WHEN e.token_usage_status = 'RECORDED'
+                           THEN e.cached_input_tokens ELSE 0 END), 0) AS cached_input_tokens,
+                       COALESCE(SUM(CASE WHEN e.token_usage_status = 'RECORDED'
+                           THEN e.output_tokens ELSE 0 END), 0) AS output_tokens,
                        COALESCE(SUM(e.image_count), 0) AS image_count,
+                       COALESCE(SUM(e.provider_credits), 0) AS provider_credits,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'UNAVAILABLE'
+                           AND e.usage_source <> 'estimated'
+                           THEN 1 ELSE 0 END), 0) AS unavailable_token_calls,
                        COALESCE(SUM(CASE WHEN e.contributes_to_result = 1
                            THEN e.estimated_points ELSE 0 END), 0) AS estimated_points
                 FROM usage_operations AS o
@@ -6918,10 +7021,27 @@ class Database:
                        o.estimated_points, o.charged_points,
                        o.created_at, o.completed_at,
                        COUNT(e.id) AS event_count,
-                       COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
-                       COALESCE(SUM(e.cached_input_tokens), 0) AS cached_input_tokens,
-                       COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(CASE WHEN e.token_usage_status = 'RECORDED'
+                           THEN e.input_tokens ELSE 0 END), 0) AS input_tokens,
+                       COALESCE(SUM(CASE WHEN e.token_usage_status = 'RECORDED'
+                           THEN e.cached_input_tokens ELSE 0 END), 0) AS cached_input_tokens,
+                       COALESCE(SUM(CASE WHEN e.token_usage_status = 'RECORDED'
+                           THEN e.output_tokens ELSE 0 END), 0) AS output_tokens,
                        COALESCE(SUM(e.image_count), 0) AS image_count,
+                       COALESCE(SUM(e.provider_credits), 0) AS provider_credits,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'RECORDED'
+                           THEN 1 ELSE 0 END), 0) AS metered_calls,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'PENDING'
+                           THEN 1 ELSE 0 END), 0) AS pending_calls,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'UNAVAILABLE'
+                           AND e.usage_source <> 'estimated'
+                           THEN 1 ELSE 0 END), 0) AS unavailable_calls,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.usage_source = 'estimated'
+                           THEN 1 ELSE 0 END), 0) AS estimated_calls,
                        COALESCE(SUM(
                            CASE
                                WHEN e.pricing_status = 'price_missing'
@@ -6949,7 +7069,7 @@ class Database:
         self,
         job_ids: list[int],
     ) -> list[dict[str, Any]]:
-        """Return owner-scoped generation Token totals for the requested jobs."""
+        """Return owner-scoped generation usage and completeness by article."""
 
         owner_user_id = str(self.owner_user_id or "").strip()
         wanted = sorted({int(job_id) for job_id in job_ids if int(job_id) > 0})
@@ -6960,7 +7080,32 @@ class Database:
             rows = conn.execute(
                 f"""
                 SELECT o.job_id,
-                       COALESCE(SUM(e.total_tokens), 0) AS total_tokens
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'RECORDED'
+                           THEN e.total_tokens ELSE 0 END), 0) AS known_tokens,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.usage_source = 'estimated'
+                           THEN e.total_tokens ELSE 0 END), 0) AS estimated_tokens,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           THEN 1 ELSE 0 END), 0) AS api_call_count,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'RECORDED'
+                           THEN 1 ELSE 0 END), 0) AS metered_calls,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'PENDING'
+                           THEN 1 ELSE 0 END), 0) AS pending_calls,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.token_usage_status = 'UNAVAILABLE'
+                           AND e.usage_source <> 'estimated'
+                           THEN 1 ELSE 0 END), 0) AS unavailable_calls,
+                       COALESCE(SUM(CASE WHEN e.modality = 'text'
+                           AND e.usage_source = 'estimated'
+                           THEN 1 ELSE 0 END), 0) AS estimated_calls,
+                       COALESCE(SUM(CASE WHEN e.provider = 'manus'
+                           THEN e.fixed_units ELSE 0 END), 0) AS manus_tasks,
+                       COALESCE(SUM(e.provider_credits), 0) AS provider_credits,
+                       COALESCE(SUM(CASE WHEN e.provider_credits IS NOT NULL
+                           THEN 1 ELSE 0 END), 0) AS credit_metered_calls
                 FROM usage_operations AS o
                 LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
                 WHERE o.owner_user_id = ?
@@ -6983,9 +7128,16 @@ class Database:
                 """
                 SELECT COUNT(DISTINCT operation_id) AS operations,
                        COUNT(*) AS events,
-                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(CASE WHEN token_usage_status = 'RECORDED'
+                           THEN input_tokens ELSE 0 END), 0) AS input_tokens,
+                       COALESCE(SUM(CASE WHEN token_usage_status = 'RECORDED'
+                           THEN output_tokens ELSE 0 END), 0) AS output_tokens,
                        COALESCE(SUM(image_count), 0) AS image_count,
+                       COALESCE(SUM(provider_credits), 0) AS provider_credits,
+                       COALESCE(SUM(CASE WHEN modality = 'text'
+                           AND token_usage_status = 'UNAVAILABLE'
+                           AND usage_source <> 'estimated'
+                           THEN 1 ELSE 0 END), 0) AS unavailable_token_calls,
                        COALESCE(SUM(provider_cost_micro_cny), 0) AS provider_cost_micro_cny,
                        COALESCE(SUM(retail_cost_micro_cny), 0) AS retail_cost_micro_cny,
                        COALESCE(SUM(estimated_points), 0) AS estimated_points,
@@ -7013,7 +7165,10 @@ class Database:
                        provider, provider_model, funding_source, modality,
                        input_tokens, cached_input_tokens, output_tokens,
                        reasoning_tokens, total_tokens, image_count, fixed_units,
-                       usage_source, provider_cost_micro_cny,
+                       usage_source, token_usage_status, provider_credits,
+                       raw_usage_json,
+                       provider_request_id, provider_response_id,
+                       provider_cost_micro_cny,
                        retail_cost_micro_cny, estimated_points, pricing_status,
                        contributes_to_result, billable, status, error_code, created_at
                 FROM ai_usage_events

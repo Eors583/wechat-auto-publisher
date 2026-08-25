@@ -17,6 +17,8 @@ from app.ai.failover import FailoverRewriter
 from app.ai.image_providers import IMAGE_MINIMAX
 from app.ai.model_registry import (
     MANUS,
+    METERING_NO_TOKEN,
+    METERING_RESPONSE_USAGE,
     OPENAI_COMPATIBLE,
     apply_model_selection,
     build_text_client,
@@ -25,6 +27,7 @@ from app.ai.model_registry import (
     public_models,
     save_model,
 )
+from app.ai.usage import NormalizedUsage, emit_usage
 from app.ai.model_registry import (
     test_model_connection as probe_model_connection,
 )
@@ -175,6 +178,53 @@ def test_manus_connection_probe_allows_async_task_completion(
     assert probe_model_connection(db, model_id) == "连接成功"
     assert captured["timeout"] == 180
     assert captured["prompt"] == "只回复 OK"
+    stored = db.get_ai_model(model_id) or {}
+    assert stored["token_metering_capability"] == METERING_NO_TOKEN
+    assert stored["strict_token_eligible"] == 0
+    assert stored["token_metering_checked_at"]
+
+
+def test_connection_probe_marks_traceable_provider_usage_strict_eligible(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db = Database(tmp_path / "strict-metering-probe.db")
+    model_id = save_model(
+        db,
+        name="Traceable API",
+        provider_type=OPENAI_COMPATIBLE,
+        api_base="https://example.com/v1",
+        model="traceable-model",
+        api_key="private-key",
+    )
+
+    class FakeOpenAIClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def complete(self, _prompt: str, **_kwargs) -> str:
+            emit_usage(
+                provider="traceable",
+                provider_model="traceable-model",
+                usage=NormalizedUsage(
+                    input_tokens=2,
+                    output_tokens=1,
+                    total_tokens=3,
+                    source="provider_actual",
+                ),
+                request_id="request-3",
+            )
+            return "OK"
+
+    monkeypatch.setattr(
+        "app.ai.openai_compat.OpenAICompatClient",
+        FakeOpenAIClient,
+    )
+
+    assert probe_model_connection(db, model_id) == "连接成功"
+    stored = db.get_ai_model(model_id) or {}
+    assert stored["token_metering_capability"] == METERING_RESPONSE_USAGE
+    assert stored["strict_token_eligible"] == 1
 
 
 def test_manus_text_client_keeps_a_long_async_task_window(

@@ -364,11 +364,12 @@ def test_inbox_row_shows_per_article_token_usage_in_gold_without_hiding_it() -> 
     service_source = inspect.getsource(BatchService.list_review_inbox)
     token_css = APP_CSS[APP_CSS.index(".ops-task-row-token {") :]
 
+    assert 'item.get("generation_usage")' in card_source
+    assert "_generation_usage_text(" in card_source
     assert 'item.get("generation_token_usage")' in card_source
-    assert 'f"{int(generation_token_usage):,} Token"' in card_source
-    assert 'else "Token 待统计"' in card_source
     assert 'classes("ops-task-row-token")' in card_source
-    assert "article_generation_tokens(" in service_source
+    assert "article_generation_usage(" in service_source
+    assert 'item["generation_usage"]' in service_source
     assert 'item["generation_token_usage"]' in service_source
     assert "color: var(--ui-color-warning)" in token_css[:500]
     assert "text-overflow: ellipsis" in token_css[:500]
@@ -376,6 +377,43 @@ def test_inbox_row_shows_per_article_token_usage_in_gold_without_hiding_it() -> 
     narrow_css = token_css[token_css.index("@container (max-width: 720px)") :]
     assert ".ops-task-row-token" in narrow_css
     assert "display: none" not in narrow_css[narrow_css.index(".ops-task-row-token") :][:250]
+
+
+def test_generation_usage_copy_distinguishes_actual_partial_and_manus_credit() -> None:
+    actual, _ = tasks._generation_usage_text(  # noqa: SLF001
+        {
+            "known_tokens": 23_410,
+            "api_call_count": 5,
+            "metered_calls": 5,
+            "complete": True,
+        }
+    )
+    partial, partial_hint = tasks._generation_usage_text(  # noqa: SLF001
+        {
+            "known_tokens": 18_920,
+            "api_call_count": 5,
+            "metered_calls": 4,
+            "unavailable_calls": 1,
+            "complete": False,
+        }
+    )
+    manus, manus_hint = tasks._generation_usage_text(  # noqa: SLF001
+        {
+            "api_call_count": 1,
+            "metered_calls": 0,
+            "unavailable_calls": 1,
+            "manus_tasks": 1,
+            "provider_credits": 37,
+            "credit_metered_calls": 1,
+            "complete": False,
+        }
+    )
+
+    assert actual == "实际 23,410 Token · 5/5"
+    assert partial == "已确认 18,920 Token · 4/5"
+    assert "不可作为文章总 Token" in partial_hint
+    assert manus == "Manus 37 Credits · 无 Token"
+    assert "服务商没有提供" in manus_hint
 
 
 def test_legacy_review_entry_redirects_to_the_full_page_route() -> None:

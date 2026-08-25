@@ -22,6 +22,7 @@ from app.ai.manus import (
     _latest_error,
     _rewrite_schema,
 )
+from app.ai.usage import bind_usage_recorder
 
 
 class ManusClientTests(unittest.TestCase):
@@ -366,6 +367,10 @@ class ManusClientTests(unittest.TestCase):
                         }
                     ],
                 },
+                {
+                    "ok": True,
+                    "task": {"id": "task-123", "credit_usage": 37},
+                },
             ]
         )
         requested_task_ids: list[str] = []
@@ -378,13 +383,18 @@ class ManusClientTests(unittest.TestCase):
                 raise response
             return response
 
-        with patch.object(client, "_request_json", side_effect=fake_request):
-            result = client._run_structured_task(
-                "test", {"type": "object"}, title="test"
-            )
+        usage_records = []
+        with bind_usage_recorder(usage_records.append):
+            with patch.object(client, "_request_json", side_effect=fake_request):
+                result = client._run_structured_task(
+                    "test", {"type": "object"}, title="test"
+                )
 
         self.assertEqual(result, {"text": "done"})
-        self.assertEqual(requested_task_ids, ["task-123"] * 3)
+        self.assertEqual(requested_task_ids, ["task-123"] * 4)
+        self.assertEqual(usage_records[0].request_id, "task-123")
+        self.assertEqual(usage_records[0].usage.provider_credits, 37)
+        self.assertEqual(usage_records[0].usage.token_status, "UNAVAILABLE")
 
 
 if __name__ == "__main__":

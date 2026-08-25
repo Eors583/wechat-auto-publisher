@@ -683,14 +683,21 @@ class BatchService:
             for batch in batches
             for job in list(batch.get("jobs") or [])
         ]
-        token_usage = BillingService(self.db).article_generation_tokens(job_ids)
+        billing = BillingService(self.db)
+        generation_usage = billing.article_generation_usage(job_ids)
         for batch in batches:
             values = [
-                token_usage[int(job["id"])]
+                generation_usage[int(job["id"])]
                 for job in list(batch.get("jobs") or [])
-                if int(job["id"]) in token_usage
+                if int(job["id"]) in generation_usage
             ]
-            batch["generation_token_usage"] = sum(values) if values else None
+            summary = billing.aggregate_article_generation_usage(values)
+            batch["generation_usage"] = summary
+            batch["generation_token_usage"] = (
+                int(summary["known_tokens"])
+                if summary and bool(summary["complete"])
+                else None
+            )
         return batches
 
     def has_active_batches(self) -> bool:
@@ -730,11 +737,17 @@ class BatchService:
             self._review_inbox_item(row)
             for row in rows[:page_size]
         ]
-        token_usage = BillingService(self.db).article_generation_tokens(
+        generation_usage = BillingService(self.db).article_generation_usage(
             [int(item["job_id"]) for item in items]
         )
         for item in items:
-            item["generation_token_usage"] = token_usage.get(int(item["job_id"]))
+            summary = generation_usage.get(int(item["job_id"]))
+            item["generation_usage"] = summary
+            item["generation_token_usage"] = (
+                int(summary["known_tokens"])
+                if summary and bool(summary["complete"])
+                else None
+            )
         return {
             "bucket": str(bucket or "review"),
             "counts": self.db.review_inbox_counts(

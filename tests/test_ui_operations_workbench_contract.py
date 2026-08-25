@@ -53,6 +53,16 @@ def test_fullscreen_shell_and_compact_task_rows_use_shared_tokens() -> None:
     assert "flex: 0 0 21px" in APP_CSS
 
 
+def test_models_page_owns_its_scroll_without_page_level_overflow() -> None:
+    model_scroll_css = APP_CSS[
+        APP_CSS.index(".ops-models-page .ops-page-host {") :
+    ]
+
+    assert "overflow-x: hidden;" in model_scroll_css[:260]
+    assert "overflow-y: auto;" in model_scroll_css[:260]
+    assert "overscroll-behavior: contain;" in model_scroll_css[:260]
+
+
 def test_key_business_pages_do_not_use_inline_style_calls() -> None:
     files = (
         "app/ui/desktop.py",
@@ -110,9 +120,9 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
     assert "dialog.close()" in batch_source
     assert 'classes("ops-task-row-card ops-batch-row-card")' in batch_source
     assert ').classes("ops-task-row-badge")' in batch_source
+    assert 'batch.get("generation_usage")' in batch_source
+    assert "_generation_usage_text(" in batch_source
     assert 'batch.get("generation_token_usage")' in batch_source
-    assert 'f"{int(generation_token_usage):,} Token"' in batch_source
-    assert 'else "Token 待统计"' in batch_source
 
 
 def test_task_queue_width_chain_and_breakpoints_cannot_push_sidebar_offscreen() -> None:

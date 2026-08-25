@@ -8,7 +8,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from app.ai.usage import UsageRecord, bind_usage_recorder
+from app.ai.usage import (
+    TOKEN_USAGE_RECORDED,
+    UsageRecord,
+    bind_usage_recorder,
+)
 from app.db import Database
 
 MICRO_CNY_PER_CNY = 1_000_000
@@ -44,6 +48,22 @@ def calculate_shadow_price(
             "retail_cost_micro_cny": 0,
             "estimated_points": 0,
             "pricing_status": "customer_funded",
+            "price_snapshot": {},
+        }
+    if (
+        usage.token_status != TOKEN_USAGE_RECORDED
+        and not usage.image_count
+        and not usage.fixed_units
+    ):
+        return {
+            "provider_cost_micro_cny": 0,
+            "retail_cost_micro_cny": 0,
+            "estimated_points": 0,
+            "pricing_status": (
+                "usage_estimated"
+                if usage.source == "estimated"
+                else "usage_unavailable"
+            ),
             "price_snapshot": {},
         }
     if not card:
@@ -190,6 +210,13 @@ class BillingService:
                 "image_count": usage.image_count,
                 "fixed_units": usage.fixed_units,
                 "usage_source": usage.source,
+                "token_usage_status": usage.token_status,
+                "provider_credits": usage.provider_credits,
+                "raw_usage_json": json.dumps(
+                    usage.raw_usage,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 "provider_request_id": record.request_id,
                 "provider_response_id": record.response_id,
                 "provider_cost_micro_cny": priced["provider_cost_micro_cny"],
@@ -204,6 +231,12 @@ class BillingService:
                     record.funding_source == "platform"
                     and record.contributes_to_result
                     and record.status == "succeeded"
+                    and (
+                        usage.token_status == TOKEN_USAGE_RECORDED
+                        or usage.image_count > 0
+                        or usage.fixed_units > 0
+                        or usage.provider_credits is not None
+                    )
                 ),
                 "status": record.status,
                 "error_code": record.error_code,
@@ -258,6 +291,10 @@ class BillingService:
                 ),
                 "output_tokens": int(totals.get("output_tokens") or 0),
                 "images": int(totals.get("image_count") or 0),
+                "provider_credits": int(totals.get("provider_credits") or 0),
+                "unavailable_token_calls": int(
+                    totals.get("unavailable_token_calls") or 0
+                ),
                 "estimated_points": int(totals.get("estimated_points") or 0),
             },
             "notice": "当前为影子计量，不扣积分、不限制现有功能。",
@@ -270,8 +307,11 @@ class BillingService:
             logger.exception("shadow usage list unavailable")
             return []
 
-    def article_generation_tokens(self, job_ids: list[int]) -> dict[int, int]:
-        """Return total generation Tokens keyed by article job id."""
+    def article_generation_usage(
+        self,
+        job_ids: list[int],
+    ) -> dict[int, dict[str, int | bool]]:
+        """Return strict Token completeness keyed by article job id."""
 
         try:
             rows = self.db.article_generation_token_usage_by_jobs(job_ids)
@@ -279,9 +319,71 @@ class BillingService:
             logger.exception("article generation token usage unavailable")
             return {}
         return {
-            int(row["job_id"]): int(row.get("total_tokens") or 0)
+            int(row["job_id"]): self._normalized_article_usage(row)
             for row in rows
         }
+
+    def article_generation_tokens(self, job_ids: list[int]) -> dict[int, int]:
+        """Compatibility view: expose only complete provider-actual totals."""
+
+        return {
+            job_id: int(usage["known_tokens"])
+            for job_id, usage in self.article_generation_usage(job_ids).items()
+            if bool(usage["complete"])
+        }
+
+    @staticmethod
+    def _normalized_article_usage(
+        row: dict[str, Any],
+    ) -> dict[str, int | bool]:
+        values = {
+            key: int(row.get(key) or 0)
+            for key in (
+                "known_tokens",
+                "estimated_tokens",
+                "api_call_count",
+                "metered_calls",
+                "pending_calls",
+                "unavailable_calls",
+                "estimated_calls",
+                "manus_tasks",
+                "provider_credits",
+                "credit_metered_calls",
+            )
+        }
+        values["complete"] = bool(
+            values["api_call_count"] > 0
+            and values["metered_calls"] == values["api_call_count"]
+        )
+        return values
+
+    @classmethod
+    def aggregate_article_generation_usage(
+        cls,
+        rows: list[dict[str, int | bool]],
+    ) -> dict[str, int | bool] | None:
+        if not rows:
+            return None
+        totals: dict[str, Any] = {
+            key: sum(int(row.get(key) or 0) for row in rows)
+            for key in (
+                "known_tokens",
+                "estimated_tokens",
+                "api_call_count",
+                "metered_calls",
+                "pending_calls",
+                "unavailable_calls",
+                "estimated_calls",
+                "manus_tasks",
+                "provider_credits",
+                "credit_metered_calls",
+            )
+        }
+        totals["complete"] = bool(
+            totals["api_call_count"] > 0
+            and totals["metered_calls"] == totals["api_call_count"]
+        )
+        return totals
 
     def list_ledger(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         try:

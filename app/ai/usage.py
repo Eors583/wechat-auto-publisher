@@ -4,10 +4,19 @@ import logging
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Mapping
 
 logger = logging.getLogger(__name__)
+
+TOKEN_USAGE_RECORDED = "RECORDED"
+TOKEN_USAGE_PENDING = "PENDING"
+TOKEN_USAGE_UNAVAILABLE = "UNAVAILABLE"
+TOKEN_USAGE_STATUSES = {
+    TOKEN_USAGE_RECORDED,
+    TOKEN_USAGE_PENDING,
+    TOKEN_USAGE_UNAVAILABLE,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +31,13 @@ class NormalizedUsage:
     image_count: int = 0
     fixed_units: int = 0
     source: str = "unknown"
+    token_status: str = ""
+    provider_credits: int | None = None
+    raw_usage: dict[str, Any] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         for name in (
@@ -45,6 +61,25 @@ class NormalizedUsage:
                 "total_tokens",
                 self.input_tokens + self.output_tokens,
             )
+        token_status = str(self.token_status or "").strip().upper()
+        if not token_status:
+            token_status = (
+                TOKEN_USAGE_RECORDED
+                if self.source == "provider_actual"
+                else TOKEN_USAGE_UNAVAILABLE
+            )
+        if token_status not in TOKEN_USAGE_STATUSES:
+            raise ValueError(f"不支持的 Token 计量状态：{token_status}")
+        if token_status == TOKEN_USAGE_RECORDED and self.source != "provider_actual":
+            raise ValueError("实际 Token 必须来自服务商返回的用量")
+        object.__setattr__(self, "token_status", token_status)
+        if self.provider_credits is not None:
+            object.__setattr__(
+                self,
+                "provider_credits",
+                max(0, int(self.provider_credits)),
+            )
+        object.__setattr__(self, "raw_usage", dict(self.raw_usage or {}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +153,7 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     }
 
 
-def _int(data: Mapping[str, Any], *names: str) -> int:
+def _int_or_none(data: Mapping[str, Any], *names: str) -> int | None:
     for name in names:
         value = data.get(name)
         if value is None:
@@ -127,28 +162,75 @@ def _int(data: Mapping[str, Any], *names: str) -> int:
             return max(0, int(value))
         except (TypeError, ValueError):
             continue
-    return 0
+    return None
+
+
+def _int(data: Mapping[str, Any], *names: str) -> int:
+    return int(_int_or_none(data, *names) or 0)
+
+
+def _usage_snapshot(data: Mapping[str, Any]) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, Mapping):
+            snapshot[str(key)] = _usage_snapshot(value)
+        elif value is None or isinstance(value, (str, int, float, bool)):
+            snapshot[str(key)] = value
+        else:
+            nested = _mapping(value)
+            if nested:
+                snapshot[str(key)] = _usage_snapshot(nested)
+    return snapshot
+
+
+def unavailable_token_usage(*, source: str = "unknown") -> NormalizedUsage:
+    """Represent missing provider Token data without pretending it is zero."""
+
+    return NormalizedUsage(
+        source=source,
+        token_status=TOKEN_USAGE_UNAVAILABLE,
+    )
 
 
 def normalize_chat_usage(response: Any) -> NormalizedUsage:
     data = _mapping(response)
-    usage = _mapping(data.get("usage") or data)
+    raw_usage = data.get("usage")
+    if raw_usage is None and any(
+        key in data
+        for key in (
+            "prompt_tokens",
+            "input_tokens",
+            "completion_tokens",
+            "output_tokens",
+            "total_tokens",
+        )
+    ):
+        raw_usage = data
+    usage = _mapping(raw_usage)
+    input_tokens = _int_or_none(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _int_or_none(
+        usage,
+        "completion_tokens",
+        "output_tokens",
+    )
+    total_tokens = _int_or_none(usage, "total_tokens")
+    if input_tokens is None or output_tokens is None or total_tokens is None:
+        return unavailable_token_usage()
     prompt_details = _mapping(
         usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
     )
     completion_details = _mapping(
         usage.get("completion_tokens_details") or usage.get("output_tokens_details")
     )
-    input_tokens = _int(usage, "prompt_tokens", "input_tokens")
-    output_tokens = _int(usage, "completion_tokens", "output_tokens")
-    source = "provider_actual" if usage else "unknown"
     return NormalizedUsage(
         input_tokens=input_tokens,
         cached_input_tokens=_int(prompt_details, "cached_tokens"),
         output_tokens=output_tokens,
         reasoning_tokens=_int(completion_details, "reasoning_tokens"),
-        total_tokens=_int(usage, "total_tokens"),
-        source=source,
+        total_tokens=total_tokens,
+        source="provider_actual",
+        token_status=TOKEN_USAGE_RECORDED,
+        raw_usage=_usage_snapshot(usage),
     )
 
 
@@ -158,15 +240,37 @@ def normalize_responses_usage(response: Any) -> NormalizedUsage:
 
 def normalize_gemini_usage(response: Any) -> NormalizedUsage:
     data = _mapping(response)
-    usage = _mapping(
-        data.get("usage_metadata") or data.get("usageMetadata") or data
+    raw_usage = data.get("usage_metadata") or data.get("usageMetadata")
+    if raw_usage is None and any(
+        key in data
+        for key in (
+            "prompt_token_count",
+            "promptTokenCount",
+            "candidates_token_count",
+            "candidatesTokenCount",
+            "total_token_count",
+            "totalTokenCount",
+        )
+    ):
+        raw_usage = data
+    usage = _mapping(raw_usage)
+    input_tokens = _int_or_none(
+        usage,
+        "prompt_token_count",
+        "promptTokenCount",
     )
-    input_tokens = _int(usage, "prompt_token_count", "promptTokenCount")
-    output_tokens = _int(
+    output_tokens = _int_or_none(
         usage,
         "candidates_token_count",
         "candidatesTokenCount",
     )
+    total_tokens = _int_or_none(
+        usage,
+        "total_token_count",
+        "totalTokenCount",
+    )
+    if input_tokens is None or output_tokens is None or total_tokens is None:
+        return unavailable_token_usage()
     return NormalizedUsage(
         input_tokens=input_tokens,
         cached_input_tokens=_int(
@@ -180,8 +284,10 @@ def normalize_gemini_usage(response: Any) -> NormalizedUsage:
             "thoughts_token_count",
             "thoughtsTokenCount",
         ),
-        total_tokens=_int(usage, "total_token_count", "totalTokenCount"),
-        source="provider_actual" if usage else "unknown",
+        total_tokens=total_tokens,
+        source="provider_actual",
+        token_status=TOKEN_USAGE_RECORDED,
+        raw_usage=_usage_snapshot(usage),
     )
 
 
@@ -194,11 +300,23 @@ def estimated_text_usage(prompt: str, output: str) -> NormalizedUsage:
     )
 
 
-def fixed_usage(*, image_count: int = 0, fixed_units: int = 1) -> NormalizedUsage:
+def fixed_usage(
+    *,
+    image_count: int = 0,
+    fixed_units: int = 1,
+    provider_credits: int | None = None,
+) -> NormalizedUsage:
     return NormalizedUsage(
         image_count=image_count,
         fixed_units=fixed_units,
         source="provider_fixed",
+        token_status=TOKEN_USAGE_UNAVAILABLE,
+        provider_credits=provider_credits,
+        raw_usage=(
+            {"credit_usage": provider_credits}
+            if provider_credits is not None
+            else {}
+        ),
     )
 
 
@@ -314,6 +432,9 @@ def _safe_record(recorder: UsageRecorder, record: UsageRecord) -> None:
 
 __all__ = [
     "NormalizedUsage",
+    "TOKEN_USAGE_PENDING",
+    "TOKEN_USAGE_RECORDED",
+    "TOKEN_USAGE_UNAVAILABLE",
     "UsageRecord",
     "bind_usage_recorder",
     "emit_usage",
@@ -325,4 +446,5 @@ __all__ = [
     "tag_client",
     "usage_attempt",
     "usage_attributes",
+    "unavailable_token_usage",
 ]

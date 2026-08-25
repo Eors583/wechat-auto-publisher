@@ -290,7 +290,11 @@ class ManusClient:
         title: str,
     ) -> dict[str, Any]:
         try:
-            value = self._run_structured_task_once(prompt, schema, title=title)
+            value, task_id, credit_usage = self._run_structured_task_once(
+                prompt,
+                schema,
+                title=title,
+            )
         except Exception as exc:
             emit_usage(
                 provider="manus",
@@ -305,7 +309,8 @@ class ManusClient:
         emit_usage(
             provider="manus",
             provider_model=self.model,
-            usage=fixed_usage(),
+            usage=fixed_usage(provider_credits=credit_usage),
+            request_id=task_id,
             client=self,
         )
         return value
@@ -316,7 +321,7 @@ class ManusClient:
         schema: dict[str, Any],
         *,
         title: str,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], str, int | None]:
         if not self.api_key:
             raise RuntimeError("MANUS_API_KEY is empty")
 
@@ -399,7 +404,11 @@ class ManusClient:
                         value = result.get("value")
                         if not isinstance(value, dict):
                             raise RuntimeError("Manus structured output is not an object")
-                        return value
+                        return (
+                            value,
+                            task_id,
+                            self._task_credit_usage(client, headers, task_id),
+                        )
 
                 last_status = _latest_agent_status(events) or last_status
                 if last_status == "error":
@@ -426,6 +435,33 @@ class ManusClient:
             f"Manus task timed out after {int(self.timeout)} seconds "
             f"(last status: {last_status})"
         )
+
+    def _task_credit_usage(
+        self,
+        client: httpx.Client,
+        headers: dict[str, str],
+        task_id: str,
+    ) -> int | None:
+        """Read provider-confirmed task Credit; Manus exposes no Token counts."""
+
+        try:
+            detail = self._request_json(
+                client,
+                "GET",
+                "/v2/task.detail",
+                headers=headers,
+                params={"task_id": task_id},
+            )
+            task = detail.get("task") or {}
+            value = task.get("credit_usage") if isinstance(task, dict) else None
+            return None if value is None else max(0, int(value))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Manus task %s Credit usage unavailable: %s",
+                task_id,
+                type(exc).__name__,
+            )
+            return None
 
     def _request_json(
         self,

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.ai.usage import NormalizedUsage, UsageRecord, emit_usage
+from app.ai.usage import (
+    NormalizedUsage,
+    UsageRecord,
+    emit_usage,
+    estimated_text_usage,
+    fixed_usage,
+    unavailable_token_usage,
+)
 from app.db import Database
 from app.services.auth import AuthService
 from app.services.batches import BatchService
@@ -136,6 +143,97 @@ def test_article_generation_tokens_are_projected_to_each_review_inbox_job(
     assert batches[0]["generation_token_usage"] == sum(usage.values())
 
 
+def test_article_usage_never_presents_partial_or_manus_usage_as_total_tokens(
+    tmp_path,
+) -> None:
+    _root, db, _user_id = _scoped_db(tmp_path)
+    service = BillingService(db)
+    partial_job = db.create_job(topic="部分计量")
+    manus_job = db.create_job(topic="Manus Credit")
+    estimated_job = db.create_job(topic="仅本地估算")
+
+    with service.operation(
+        scene="article_generation",
+        subject_type="job",
+        subject_id=str(partial_job),
+        job_id=partial_job,
+    ):
+        emit_usage(
+            provider="openai",
+            provider_model="actual",
+            usage=NormalizedUsage(
+                input_tokens=80,
+                output_tokens=20,
+                total_tokens=100,
+                source="provider_actual",
+            ),
+        )
+        emit_usage(
+            provider="compatible-gateway",
+            provider_model="missing-usage",
+            usage=unavailable_token_usage(),
+        )
+    with service.operation(
+        scene="article_generation",
+        subject_type="job",
+        subject_id=str(manus_job),
+        job_id=manus_job,
+    ):
+        emit_usage(
+            provider="manus",
+            provider_model="manus-1.6",
+            usage=fixed_usage(provider_credits=37),
+            request_id="task-37",
+        )
+    with service.operation(
+        scene="article_generation",
+        subject_type="job",
+        subject_id=str(estimated_job),
+        job_id=estimated_job,
+    ):
+        emit_usage(
+            provider="local",
+            provider_model="local-model",
+            usage=estimated_text_usage("abcd", "efgh"),
+        )
+
+    usage = service.article_generation_usage(
+        [partial_job, manus_job, estimated_job]
+    )
+
+    assert usage[partial_job] == {
+        "known_tokens": 100,
+        "estimated_tokens": 0,
+        "api_call_count": 2,
+        "metered_calls": 1,
+        "pending_calls": 0,
+        "unavailable_calls": 1,
+        "estimated_calls": 0,
+        "manus_tasks": 0,
+        "provider_credits": 0,
+        "credit_metered_calls": 0,
+        "complete": False,
+    }
+    assert usage[manus_job]["known_tokens"] == 0
+    assert usage[manus_job]["manus_tasks"] == 1
+    assert usage[manus_job]["provider_credits"] == 37
+    assert usage[manus_job]["complete"] is False
+    assert usage[estimated_job]["known_tokens"] == 0
+    assert usage[estimated_job]["estimated_tokens"] == 2
+    assert usage[estimated_job]["estimated_calls"] == 1
+    assert usage[estimated_job]["unavailable_calls"] == 0
+    assert usage[estimated_job]["complete"] is False
+    assert service.article_generation_tokens(
+        [partial_job, manus_job, estimated_job]
+    ) == {}
+    manus_event = next(
+        row
+        for row in _root.admin_list_ai_usage_events()
+        if row["provider"] == "manus"
+    )
+    assert manus_event["raw_usage_json"] == '{"credit_usage":37}'
+
+
 def test_customer_funded_usage_has_zero_platform_cost() -> None:
     priced = calculate_shadow_price(
         record=UsageRecord(
@@ -193,6 +291,62 @@ def test_usage_operation_idempotency_is_scoped_per_owner(tmp_path) -> None:
     second = db.create_usage_operation({**payload, "id": "op-second"})
 
     assert first == second == "op-first"
+
+
+def test_provider_trace_ids_are_recorded_once_per_owner(tmp_path) -> None:
+    root, db, _user_id = _scoped_db(tmp_path)
+    service = BillingService(db)
+    for operation_index in range(2):
+        with service.operation(
+            scene="article_generation",
+            subject_type="job",
+            subject_id=str(operation_index + 1),
+            idempotency_key=f"request-dedupe:{operation_index}",
+        ):
+            emit_usage(
+                provider="openai",
+                provider_model="gpt-test",
+                usage=NormalizedUsage(
+                    input_tokens=2,
+                    output_tokens=1,
+                    total_tokens=3,
+                    source="provider_actual",
+                ),
+                request_id="provider-request-once",
+            )
+
+    rows = [
+        row
+        for row in root.admin_list_ai_usage_events()
+        if row["provider_request_id"] == "provider-request-once"
+    ]
+    assert len(rows) == 1
+
+    for operation_index in range(2):
+        with service.operation(
+            scene="article_generation",
+            subject_type="job",
+            subject_id=str(operation_index + 3),
+            idempotency_key=f"response-dedupe:{operation_index}",
+        ):
+            emit_usage(
+                provider="gemini",
+                provider_model="gemini-test",
+                usage=NormalizedUsage(
+                    input_tokens=2,
+                    output_tokens=1,
+                    total_tokens=3,
+                    source="provider_actual",
+                ),
+                response_id="provider-response-once",
+            )
+
+    rows = [
+        row
+        for row in root.admin_list_ai_usage_events()
+        if row["provider_response_id"] == "provider-response-once"
+    ]
+    assert len(rows) == 1
 
 
 def test_shadow_operation_start_and_finish_failures_never_replace_business_result(

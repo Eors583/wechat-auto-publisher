@@ -1918,6 +1918,13 @@ APP_CSS += """
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
+.ops-models-page .ops-page-host {
+  align-content: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
 .ops-billing-notice {
   width: 100%;
   min-width: 0;
@@ -1932,7 +1939,7 @@ APP_CSS += """
 }
 .ops-billing-metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: var(--ui-space-3);
   width: 100%;
   min-width: 0;
@@ -3566,8 +3573,9 @@ APP_CSS += """
     grid-row: 2;
     width: max-content;
     justify-self: start;
-    overflow: visible;
-    text-overflow: clip;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .ops-task-row-card:not(.ops-batch-row-card) .ops-task-row-actions {
     grid-column: 2;
