@@ -92,16 +92,10 @@ class GenerationSteps:
             list(result.subtitles or []),
             limit=SUBTITLE_CANDIDATE_COUNT,
         )
-        if len(titles) != TITLE_CANDIDATE_COUNT:
-            raise ValueError(
-                f"主标题候选必须为 {TITLE_CANDIDATE_COUNT} 个，"
-                f"清洗后得到 {len(titles)} 个"
-            )
-        if len(subtitles) != SUBTITLE_CANDIDATE_COUNT:
-            raise ValueError(
-                f"副标题候选必须为 {SUBTITLE_CANDIDATE_COUNT} 个，"
-                f"清洗后得到 {len(subtitles)} 个"
-            )
+        if not titles:
+            raise ValueError("没有生成有效的主标题候选")
+        if not subtitles:
+            raise ValueError("没有生成有效的副标题候选")
         db.update_job(
             job_id,
             body=normalize_model_body(result.body),

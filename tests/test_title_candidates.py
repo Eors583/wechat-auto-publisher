@@ -257,6 +257,24 @@ def test_generation_rewrite_persists_at_most_ten_titles_and_subtitles() -> None:
     assert context.db.last_changes["digest"] == "阅读全文后形成的经营决策摘要"
 
 
+def test_generation_rewrite_accepts_partial_nonempty_candidates() -> None:
+    context = _GenerationContext()
+    context.rewriter.rewrite = lambda *_args: RewriteResult(
+        body="有效正文",
+        titles=["唯一有效主标题"],
+        subtitles=["唯一有效副标题"],
+        digest="有效摘要",
+        provider="custom",
+    )
+
+    GenerationSteps(context).rewrite(
+        {"id": 115, "topic": "话题", "raw_content": "原文", "meta": {}}
+    )
+
+    assert context.db.last_changes["titles_json"] == ["唯一有效主标题"]
+    assert context.db.last_changes["subtitles_json"] == ["唯一有效副标题"]
+
+
 def test_generation_title_optimization_persists_at_most_ten_candidates() -> None:
     context = _GenerationContext()
 

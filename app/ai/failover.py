@@ -228,8 +228,8 @@ class FailoverRewriter:
             raw_content,
             min_body_chars=self.min_body_chars,
             max_similarity=self.max_similarity,
-            required_titles=TITLE_CANDIDATE_COUNT,
-            required_subtitles=SUBTITLE_CANDIDATE_COUNT,
+            required_titles=1,
+            required_subtitles=1,
         )
         result.provider = provider
         return result
