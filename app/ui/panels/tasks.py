@@ -4739,8 +4739,15 @@ def _render_batch_card(
             ui.icon("inventory_2", size="20px").classes("ops-semantic-icon")
         with ui.column().classes("ops-task-row-copy"):
             ui.label(topic or "未命名批次").classes("ops-task-row-title")
+            generation_token_usage = batch.get("generation_token_usage")
+            generation_token_text = (
+                f"{int(generation_token_usage):,} Token"
+                if generation_token_usage is not None
+                else "Token 待统计"
+            )
             ui.label(
                 f'批次 #{batch.get("display_id") or ""} · 公众号 {len(jobs)} 个'
+                f" · {generation_token_text}"
             ).classes("ops-task-row-meta")
         ui.badge(_batch_status_text(batch)).props(
             f'color={_batch_color(batch_status)}'

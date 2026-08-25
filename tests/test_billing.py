@@ -132,6 +132,8 @@ def test_article_generation_tokens_are_projected_to_each_review_inbox_job(
         for item in inbox["items"]
     }
     assert inbox_usage == usage
+    batches = batch_service.list_batches()
+    assert batches[0]["generation_token_usage"] == sum(usage.values())
 
 
 def test_customer_funded_usage_has_zero_platform_cost() -> None:

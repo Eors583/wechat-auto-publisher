@@ -110,6 +110,9 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
     assert "dialog.close()" in batch_source
     assert 'classes("ops-task-row-card ops-batch-row-card")' in batch_source
     assert ').classes("ops-task-row-badge")' in batch_source
+    assert 'batch.get("generation_token_usage")' in batch_source
+    assert 'f"{int(generation_token_usage):,} Token"' in batch_source
+    assert 'else "Token 待统计"' in batch_source
 
 
 def test_task_queue_width_chain_and_breakpoints_cannot_push_sidebar_offscreen() -> None:

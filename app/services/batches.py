@@ -670,13 +670,27 @@ class BatchService:
     def list_batches(
         self, *, limit: int = 100, include_archived: bool = False
     ) -> list[dict[str, Any]]:
-        return [
+        batches = [
             self._public_batch(batch, include_content=False)
             for batch in self.db.list_batches(
                 limit=limit,
                 include_archived=include_archived,
             )
         ]
+        job_ids = [
+            int(job["id"])
+            for batch in batches
+            for job in list(batch.get("jobs") or [])
+        ]
+        token_usage = BillingService(self.db).article_generation_tokens(job_ids)
+        for batch in batches:
+            values = [
+                token_usage[int(job["id"])]
+                for job in list(batch.get("jobs") or [])
+                if int(job["id"]) in token_usage
+            ]
+            batch["generation_token_usage"] = sum(values) if values else None
+        return batches
 
     def has_active_batches(self) -> bool:
         """Return whether any non-archived batch still has active article work."""
