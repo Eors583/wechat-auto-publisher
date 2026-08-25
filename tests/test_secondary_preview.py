@@ -63,3 +63,7 @@ def test_review_page_renders_responsive_secondary_article_preview() -> None:
     assert ".ops-secondary-preview-row" in APP_CSS
     assert "minmax(0, 1fr)" in APP_CSS
     assert "overflow-wrap: anywhere" in APP_CSS
+    assert (
+        ".ops-review-document-panels .ops-review-mode-panel { "
+        "padding: 0 !important; overflow: auto;"
+    ) in APP_CSS

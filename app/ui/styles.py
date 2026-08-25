@@ -3275,7 +3275,7 @@ APP_CSS += """
 .ops-review-document-panels > .q-panel-parent,
 .ops-review-document-panels .q-panel,
 .ops-review-document-panels .q-tab-panel { min-height: 0; height: 100%; overflow: hidden; }
-.ops-review-mode-panel { padding: 0 !important; overflow: auto; scrollbar-width: none; }
+.ops-review-document-panels .ops-review-mode-panel { padding: 0 !important; overflow: auto; scrollbar-width: none; }
 .ops-review-mode-panel::-webkit-scrollbar { display: none; }
 .ops-document-tools { display: flex; align-items: center; justify-content: space-between; gap: var(--ui-space-2); min-height: 54px; padding: var(--ui-space-3) var(--ui-space-4); border-bottom: 1px solid var(--ui-color-border); background: var(--ui-color-bg-subtle); }
 .ops-document-canvas { display: block; max-width: 650px; min-height: calc(100% - 54px); height: auto; margin: 0 auto; padding: 28px 30px 38px; overflow: visible; }
