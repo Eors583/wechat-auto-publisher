@@ -8,39 +8,46 @@ from app.workflows import delivery
 
 
 def test_secondary_preview_reuses_delivery_resolution(monkeypatch) -> None:
-    selected = [{"title": "原广告标题", "thumb_url": "https://mmbiz.qpic.cn/a"}]
-    synced = [{"title": "最新广告标题", "thumb_url": "https://mmbiz.qpic.cn/a"}]
     calls: dict[str, object] = {}
-
-    def fake_select(client, layout, *, exclude_titles):
-        calls["select"] = (client, layout, exclude_titles)
-        return selected
-
-    def fake_fetch(config, db):
-        calls["fetch"] = (config, db)
-        return object()
-
-    def fake_sync(rows, record, **options):
-        calls["sync"] = (rows, record, options)
-        return synced
-
-    monkeypatch.setattr(delivery, "select_secondary_articles", fake_select)
-    monkeypatch.setattr(delivery, "fetch_latest_benchmark_record", fake_fetch)
-    monkeypatch.setattr(delivery, "sync_secondary_titles", fake_sync)
+    monkeypatch.setattr(
+        delivery,
+        "article_from_news_item",
+        lambda payload: dict(payload),
+    )
 
     config = {
         "layout": {"enabled": True},
         "benchmark": {"enabled": True, "follow_source_order": True},
     }
+    record = __import__("app.benchmark", fromlist=["BenchmarkRecord"])
+    calls["record"] = record.BenchmarkRecord(
+        published_at=300,
+        source="official_freepublish",
+        articles=[
+            record.BenchmarkArticle("最新头条", payload={"title": "最新头条"}),
+            record.BenchmarkArticle(
+                "广告1：最新广告标题",
+                payload={
+                    "title": "广告1：最新广告标题",
+                    "thumb_media_id": "cover-a",
+                    "content": "广告正文",
+                },
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        delivery,
+        "fetch_latest_benchmark_record",
+        lambda config, db: calls["record"],
+    )
+
     result = delivery.resolve_secondary_articles(
         "client", config, "db", {"selected_title": "主文章"}
     )
 
-    assert result == synced
-    assert calls["select"] == ("client", config["layout"], ["主文章"])
-    assert calls["fetch"] == (config, "db")
-    assert calls["sync"][0] == selected
-    assert calls["sync"][2]["follow_source_order"] is True
+    assert [item["title"] for item in result] == ["最新广告标题"]
+    assert result[0]["content"] == "广告正文"
+    assert result[0]["_benchmark_source"] == "official_freepublish"
 
 
 def test_delivery_and_review_use_the_same_secondary_resolver() -> None:

@@ -19,41 +19,98 @@ from app.layout.composer import is_ad_titled, parse_ad_number, strip_ad_title_pr
 
 
 class BenchmarkTests(unittest.TestCase):
-    def test_latest_draft_wins_over_older_published_record(self) -> None:
+    def test_latest_published_record_is_used_without_reading_drafts(self) -> None:
         class Client:
+            paths: list[str] = []
+
             def request(self, _method, path, **_kwargs):
-                if path == "/cgi-bin/draft/batchget":
-                    return {
-                        "item": [
-                            {
-                                "update_time": 200,
-                                "content": {
-                                    "news_item": [
-                                        {"title": "最新草稿头条"},
-                                        {"title": "最新广告标题"},
-                                    ]
-                                },
-                            }
-                        ]
-                    }
+                self.paths.append(path)
                 return {
                     "item": [
                         {
                             "update_time": 100,
-                            "content": {"news_item": [{"title": "旧发表头条"}]},
+                            "content": {
+                                "news_item": [
+                                    {"title": "最新发表头条"},
+                                    {"title": "最新发表广告"},
+                                ]
+                            },
                         }
+                    ]
+                }
+
+        client = Client()
+        result = fetch_latest_official_record(client)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.source, "official_freepublish")
+        self.assertEqual(
+            [article.title for article in result.articles],
+            ["最新发表头条", "最新发表广告"],
+        )
+        self.assertEqual(client.paths, ["/cgi-bin/freepublish/batchget"])
+
+    def test_newest_publish_timestamp_wins_inside_published_records(self) -> None:
+        class Client:
+            def request(self, _method, _path, **_kwargs):
+                return {
+                    "item": [
+                        {
+                            "update_time": 100,
+                            "content": {"news_item": [{"title": "较早发表"}]},
+                        },
+                        {
+                            "update_time": 300,
+                            "content": {
+                                "news_item": [
+                                    {"title": "最新发表头条"},
+                                    {"title": "最新发表广告"},
+                                ]
+                            },
+                        },
+                        {
+                            "update_time": 200,
+                            "content": {"news_item": [{"title": "中间发表"}]},
+                        },
                     ]
                 }
 
         result = fetch_latest_official_record(Client())
 
-        self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(result.source, "official_draft")
+        self.assertEqual(result.published_at, 300)
         self.assertEqual(
             [article.title for article in result.articles],
-            ["最新草稿头条", "最新广告标题"],
+            ["最新发表头条", "最新发表广告"],
         )
+
+    def test_draft_cache_is_not_used_as_published_ad_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "benchmark.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "published_at": 200,
+                        "source": "official_draft",
+                        "articles": [{"title": "草稿广告"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            result = fetch_latest_benchmark_record(
+                {
+                    "benchmark": {
+                        "enabled": True,
+                        "cache_path": str(cache_path),
+                        "official_fallback_enabled": False,
+                    }
+                },
+                object(),
+            )
+
+        self.assertIsNone(result)
 
     def test_live_official_record_wins_over_fresh_cache(self) -> None:
         now = datetime.now(timezone.utc)

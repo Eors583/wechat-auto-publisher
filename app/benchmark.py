@@ -24,6 +24,7 @@ class BenchmarkArticle:
     title: str
     cover_url: str = ""
     url: str = ""
+    payload: dict[str, Any] | None = None
 
 
 @dataclass
@@ -37,7 +38,7 @@ def fetch_latest_benchmark_record(
     config: dict[str, Any],
     db: Database,
 ) -> BenchmarkRecord | None:
-    """取蓝血研究的最新发表组；后台记录优先，开放接口只作新鲜数据回退。"""
+    """只取最新发表记录；草稿箱和旧草稿缓存永不作为广告栏来源。"""
     cfg = config.get("benchmark") or {}
     if not cfg.get("enabled", False):
         return None
@@ -52,7 +53,7 @@ def fetch_latest_benchmark_record(
         except Exception as exc:  # noqa: BLE001
             logger.warning("benchmark admin publish fetch failed: %s", exc)
 
-    cached = _load_cache(cache_path)
+    cached = _published_cache(_load_cache(cache_path))
     if not bool(cfg.get("official_fallback_enabled", False)):
         return cached
 
@@ -143,7 +144,7 @@ def fetch_official_publish_record(client: WeChatClient) -> BenchmarkRecord | Non
     data = client.request(
         "POST",
         "/cgi-bin/freepublish/batchget",
-        json_body={"offset": 0, "count": 20, "no_content": 1},
+        json_body={"offset": 0, "count": 20, "no_content": 0},
     )
     records: list[BenchmarkRecord] = []
     for item in data.get("item") or []:
@@ -161,41 +162,10 @@ def fetch_official_publish_record(client: WeChatClient) -> BenchmarkRecord | Non
     return max(records, key=lambda x: x.published_at) if records else None
 
 
-def fetch_official_draft_record(client: WeChatClient) -> BenchmarkRecord | None:
-    data = client.request(
-        "POST",
-        "/cgi-bin/draft/batchget",
-        json_body={"offset": 0, "count": 20, "no_content": 0},
-    )
-    records: list[BenchmarkRecord] = []
-    for item in data.get("item") or []:
-        content = item.get("content") or {}
-        articles = [_article_from_mapping(x) for x in content.get("news_item") or []]
-        articles = [x for x in articles if x.title]
-        if articles:
-            records.append(
-                BenchmarkRecord(
-                    int(item.get("update_time") or content.get("update_time") or 0),
-                    articles,
-                    "official_draft",
-                )
-            )
-    return max(records, key=lambda x: x.published_at) if records else None
-
-
 def fetch_latest_official_record(client: WeChatClient) -> BenchmarkRecord | None:
-    """Return the newest group across live drafts and published records."""
+    """Return only the newest group from WeChat's published-record API."""
 
-    records: list[BenchmarkRecord] = []
-    for fetch in (fetch_official_draft_record, fetch_official_publish_record):
-        try:
-            record = fetch(client)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("benchmark live source fetch failed: %s", exc)
-            continue
-        if record and record.articles:
-            records.append(record)
-    return max(records, key=lambda x: x.published_at) if records else None
+    return fetch_official_publish_record(client)
 
 
 def sync_secondary_titles(
@@ -326,6 +296,7 @@ def _article_from_mapping(item: dict[str, Any]) -> BenchmarkArticle:
             or ""
         ).strip(),
         url=str(item.get("url") or item.get("content_url") or item.get("link") or "").strip(),
+        payload=dict(item),
     )
 
 
@@ -409,7 +380,10 @@ def _cache_path(config: dict[str, Any], cfg: dict[str, Any]) -> Path:
 
 def _save_cache(path: Path, record: BenchmarkRecord) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(record), ensure_ascii=False, indent=2), encoding="utf-8")
+    data = asdict(record)
+    for article in data.get("articles") or []:
+        article["payload"] = None
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _load_cache(path: Path) -> BenchmarkRecord | None:
@@ -422,3 +396,9 @@ def _load_cache(path: Path) -> BenchmarkRecord | None:
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
+
+
+def _published_cache(record: BenchmarkRecord | None) -> BenchmarkRecord | None:
+    if record and record.source in {"admin_publish_record", "official_freepublish"}:
+        return record
+    return None
