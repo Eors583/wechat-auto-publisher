@@ -71,6 +71,38 @@ def test_task_center_registers_focusable_external_refresh() -> None:
     assert 'runtime["focus_batch_id"] = str(batch_id)' in source
 
 
+def test_final_confirmation_routes_batch_to_ready_for_draft_queue() -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class State:
+        @staticmethod
+        def task_center_refresh(*args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+    fallback_calls: list[bool] = []
+    tasks._show_confirmed_batch_in_draft_queue(
+        State(),
+        "batch-42",
+        lambda: fallback_calls.append(True),
+    )
+
+    assert calls == [
+        (
+            ("batch-42",),
+            {"status_filter": "ready_for_draft", "entry_mode": "activity"},
+        )
+    ]
+    assert fallback_calls == []
+
+    panel_source = inspect.getsource(tasks.build_tasks_panel)
+    review_source = inspect.getsource(tasks.build_review_page)
+    workbench_source = inspect.getsource(tasks.open_review_workbench)
+    assert 'requested_status == "ready_for_draft"' in panel_source
+    assert "queue_segment.set_value(inbox_bucket)" in panel_source
+    assert "_show_confirmed_batch_in_draft_queue(" in review_source
+    assert "_show_confirmed_batch_in_draft_queue(" in workbench_source
+
+
 def test_task_center_does_not_reference_removed_refresh_button() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
 

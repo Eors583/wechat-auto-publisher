@@ -321,6 +321,24 @@ def task_center_workflow_stage(batch: dict[str, Any] | None) -> str:
     return "review"
 
 
+def _show_confirmed_batch_in_draft_queue(
+    state: AppState,
+    batch_id: str,
+    fallback: Callable[[], None],
+) -> None:
+    """Refresh the task center into the draft-ready bucket after final approval."""
+
+    refresh = getattr(state, "task_center_refresh", None)
+    if callable(refresh):
+        refresh(
+            str(batch_id),
+            status_filter="ready_for_draft",
+            entry_mode="activity",
+        )
+        return
+    fallback()
+
+
 def build_tasks_panel(
     state: AppState,
     *,
@@ -958,9 +976,16 @@ def build_tasks_panel(
             runtime["completion_batch_id"] = (
                 str(batch_id) if entry_mode == "completion" else ""
             )
-            runtime["inbox_bucket"] = "review"
+            requested_status = str(status_filter or "")
+            inbox_bucket = (
+                "ready_for_draft"
+                if requested_status == "ready_for_draft"
+                else "review"
+            )
+            runtime["inbox_bucket"] = inbox_bucket
             runtime["visible_limit"] = 4
             view_in.value = "inbox"
+            queue_segment.set_value(inbox_bucket)
             status_in.set_visibility(False)
             batch_only_filters.set_visibility(False)
         elif status_filter is not None or today is not None:
@@ -2717,16 +2742,23 @@ def build_review_page(
                                     "文章已确认通过，可进入写入草稿流程",
                                     type="positive",
                                 )
-                                following = next_review_job(
-                                    service.get_batch(
+                                latest = await run.io_bound(
+                                    lambda: service.get_batch(
                                         batch_id, include_content=False
-                                    ).get("jobs")
-                                    or [],
+                                    )
+                                )
+                                following = next_review_job(
+                                    latest.get("jobs") or [],
                                     current_job_id=job_id,
                                 )
                                 if following:
                                     on_open_review(batch_id, int(following["id"]))
                                 else:
+                                    _show_confirmed_batch_in_draft_queue(
+                                        state,
+                                        batch_id,
+                                        lambda: None,
+                                    )
                                     on_back()
                         except Exception as exc:  # noqa: BLE001
                             if alive():
@@ -4535,8 +4567,8 @@ def open_review_workbench(
                     review_runtime["review_open"] = False
                 workbench_state["open"] = False
                 dialog.close()
-                on_change()
                 if following is not None:
+                    on_change()
                     ui.notify(
                         f'已确认，继续审核 {following.get("account_name") or "下一篇"}',
                         type="positive",
@@ -4554,6 +4586,11 @@ def open_review_workbench(
                         once=True,
                     )
                 else:
+                    _show_confirmed_batch_in_draft_queue(
+                        state,
+                        batch_id,
+                        on_change,
+                    )
                     ui.notify("全部文章已确认，可以写入草稿箱", type="positive")
             except Exception as exc:  # noqa: BLE001
                 if workbench_alive():
