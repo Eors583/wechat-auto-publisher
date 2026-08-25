@@ -71,6 +71,23 @@ class ParseTests(unittest.TestCase):
         self.assertIn("第二段继续说明。\n\n## 观点二：边界与权力", restored)
         self.assertNotIn(r"\n\n##", restored)
 
+    def test_model_process_preface_is_removed_from_article_body(self) -> None:
+        body = (
+            "本文在不联网、不依赖外部工具的前提下，基于原文观点进行扩写，"
+            "力求将论点讲透。以下从六个核心观点展开，逐条剖析其底层逻辑。\n\n"
+            "## 会议只是入场券，能把事情做完才是产品\n\n"
+            "真正的生产力来自明确责任与持续交付。"
+        )
+
+        cleaned = normalize_model_body(body)
+
+        self.assertNotIn("不联网", cleaned)
+        self.assertTrue(cleaned.startswith("## 会议只是入场券"))
+
+    def test_legitimate_article_opening_that_mentions_tools_is_preserved(self) -> None:
+        body = "本文分析企业为什么不应依赖外部工具。\n\n正文继续讨论组织能力。"
+        self.assertEqual(normalize_model_body(body), body)
+
     def test_parse_rewrite_json(self) -> None:
         body = "这是一篇足够长的正文内容，用于测试解析与质检逻辑是否正常工作。" * 5
         payload = {
