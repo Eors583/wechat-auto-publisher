@@ -53,16 +53,6 @@ def test_fullscreen_shell_and_compact_task_rows_use_shared_tokens() -> None:
     assert "flex: 0 0 21px" in APP_CSS
 
 
-def test_models_page_owns_its_scroll_without_page_level_overflow() -> None:
-    model_scroll_css = APP_CSS[
-        APP_CSS.index(".ops-models-page .ops-page-host {") :
-    ]
-
-    assert "overflow-x: hidden;" in model_scroll_css[:260]
-    assert "overflow-y: auto;" in model_scroll_css[:260]
-    assert "overscroll-behavior: contain;" in model_scroll_css[:260]
-
-
 def test_key_business_pages_do_not_use_inline_style_calls() -> None:
     files = (
         "app/ui/desktop.py",
@@ -531,18 +521,20 @@ def test_create_log_keeps_multiline_height_and_cannot_overlap_actions() -> None:
     assert "max-width: 100%" in containment_css[:800]
 
 
-def test_authenticated_user_can_open_personal_model_settings() -> None:
-    source = inspect.getsource(desktop.create_desktop_app)
+def test_personal_model_settings_live_in_account_configuration_only() -> None:
+    app_source = inspect.getsource(desktop.create_desktop_app)
+    account_source = inspect.getsource(desktop._render_account_config_workspace)
 
-    account_tab = source.index('tab_accounts = ui.tab("公众号"')
-    model_tab = source.index('tab_models = ui.tab("模型配置"')
-
-    assert account_tab < model_tab
-    assert 'aria-label="模型配置" title="模型配置"' in source
-    assert 'def mount_models() -> None:' in source
-    assert "build_models_panel(page_state, purpose=\"text\")" in source
-    assert "配置只属于当前登录账号" in source
-    assert "我的大模型" not in source
+    assert 'tab_accounts = ui.tab("公众号"' in app_source
+    assert 'ui.tab("模型配置"' not in app_source
+    assert "tab_models" not in app_source
+    assert "mount_models" not in app_source
+    assert 'ui.label("默认模型")' in account_source
+    assert "ADD_CUSTOM_MODEL_VALUE" in account_source
+    assert "build_models_panel(" in account_source
+    assert "render_panel=False" in account_source
+    assert 'edit=request_model_edit' in account_source
+    assert 'delete=request_model_delete' in account_source
 
 
 def test_custom_prompt_template_manager_is_available_from_account_configuration() -> None:

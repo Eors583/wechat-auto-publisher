@@ -1918,13 +1918,6 @@ APP_CSS += """
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
-.ops-models-page .ops-page-host {
-  align-content: flex-start;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-}
 .ops-billing-notice {
   width: 100%;
   min-width: 0;

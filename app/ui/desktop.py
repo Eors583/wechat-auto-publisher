@@ -565,9 +565,6 @@ def create_desktop_app() -> None:
             tab_accounts = ui.tab("公众号", icon="campaign").props(
                 'aria-label="公众号" title="公众号"'
             )
-            tab_models = ui.tab("模型配置", icon="smart_toy").props(
-                'aria-label="模型配置" title="模型配置"'
-            )
             tab_feishu = ui.tab("飞书机器人", icon="forum").props(
                 'aria-label="飞书机器人" title="飞书机器人"'
             )
@@ -634,8 +631,6 @@ def create_desktop_app() -> None:
                 jobs_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_accounts).classes("ops-page ops-accounts-page"):
                 accounts_host = ui.column().classes("w-full ops-page-host")
-            with ui.tab_panel(tab_models).classes("ops-page ops-models-page"):
-                models_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_feishu).classes("ops-page ops-feishu-page"):
                 feishu_host = ui.column().classes("w-full ops-page-host")
             with ui.tab_panel(tab_billing).classes("ops-page ops-billing-page"):
@@ -658,7 +653,6 @@ def create_desktop_app() -> None:
             topics_host,
             jobs_host,
             accounts_host,
-            models_host,
             feishu_host,
             billing_host,
             review_host,
@@ -824,17 +818,6 @@ def create_desktop_app() -> None:
                     initial_action=requested_config_repair,
                 )
 
-        def mount_models() -> None:
-            models_host.clear()
-            with models_host:
-                render_page_heading(
-                    "MODEL SETTINGS",
-                    "模型配置",
-                    "配置只属于当前登录账号；远程 API Key 加密保存，"
-                    "本地模型密钥只保存在本机助手。",
-                )
-                build_models_panel(page_state, purpose="text")
-
         def mount_feishu() -> None:
             feishu_host.clear()
             with feishu_host:
@@ -860,7 +843,6 @@ def create_desktop_app() -> None:
             str(tab_topics.props["name"]): mount_topics,
             str(tab_jobs.props["name"]): mount_jobs,
             str(tab_accounts.props["name"]): mount_accounts,
-            str(tab_models.props["name"]): mount_models,
             str(tab_feishu.props["name"]): mount_feishu,
             str(tab_billing.props["name"]): mount_billing,
             str(tab_review.props["name"]): mount_review,
@@ -5654,7 +5636,7 @@ def _build_help_panel() -> None:
             """
 **第一次使用**
 
-每个用户都可以在左侧“模型配置”中保存自己的 API Key、接口地址和模型名称；这些配置只跟随当前登录账号。平台公共模型仍可直接选择，但只能由管理员维护。
+每个用户都可以在“公众号”页面的“默认模型”下拉框中添加自己的 API Key、接口地址和模型名称；这些配置只跟随当前登录账号。平台公共模型仍可直接选择，但只能由管理员维护。
 
 1. **选择内容**：在工作台直接粘贴链接、正文或输入话题；需要找热点和关注文章时，点击“从选题库选择”  
 2. **选择公众号**：系统会自动使用每个公众号已经保存的模型、创作规则、排版和图片配置  

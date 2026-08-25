@@ -196,9 +196,9 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `followed_articles.py` | Recent-article dialog for one followed account, pagination/load limits, cover proxy and actionable fetch errors. |
 | `tasks.py` | “任务队列” plus full-page article review. Owns inbox rows, filters, retry/progress, title/body/image/history views, confirmation, AI review UI, background rewrite and draft-write confirmation. Business calls still go to `BatchService`. |
 | `review_jury.py` | AI review progress calculation, risk/result panel, review-profile configuration and profile options. |
-| `models.py` | Reusable custom model create/edit form, provider presets, local/API model choice and connection testing. It is embedded by the account model selector and settings surfaces. |
+| `models.py` | Reusable custom model create/edit form, provider presets, local/API model choice and connection testing. Customer model management is embedded in the account default-model selector; platform model management remains in the merchant admin surface. |
 | `prompts.py` | Structured article/image prompt-template administration. |
-| `settings_hub.py` | Merchant/user model-management composition and creation-plan panel composition. |
+| `settings_hub.py` | Merchant platform-model administration and reusable creation-plan panel composition. |
 | `onboarding_wizard.py` | First-run configuration wizard, readiness checks and persistent health banner. |
 | `overview.py` | Compact overview/metric cards used by older or secondary UI composition paths. |
 | `feishu.py` | “我的飞书机器人”: per-user encrypted app credentials, dedicated Webhook, model/account scope, callback status, one-time p2p pairing, unbind and disable controls. |
@@ -212,7 +212,6 @@ Primary tab ownership inside `desktop.py`:
 | 选题雷达 | `panels.topics.build_topic_center` |
 | 任务队列 | `panels.tasks.build_tasks_panel` |
 | 公众号 | `_build_accounts_panel` → `_render_account_config_workspace` |
-| 模型配置 | `panels.models.build_models_panel` |
 | 飞书机器人 | `panels.feishu.build_feishu_panel` |
 | 文章审核 | hidden route/tab entered from a task row → `panels.tasks.build_review_page` |
 

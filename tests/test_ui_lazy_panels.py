@@ -51,8 +51,9 @@ def test_inactive_workspaces_are_mounted_from_tab_changes() -> None:
     assert 'str(tab_topics.props["name"]): mount_topics' in source
     assert 'str(tab_jobs.props["name"]): mount_jobs' in source
     assert 'str(tab_accounts.props["name"]): mount_accounts' in source
-    assert 'str(tab_models.props["name"]): mount_models' in source
     assert 'str(tab_review.props["name"]): mount_review' in source
+    assert "tab_models" not in source
+    assert "mount_models" not in source
 
 
 def test_page_navigation_uses_spinner_mask_only_for_lazy_mounts() -> None:

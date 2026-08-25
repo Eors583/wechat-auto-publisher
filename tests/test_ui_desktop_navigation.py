@@ -81,19 +81,19 @@ def _tab_labels(function: Any) -> list[str]:
     return [str(node.args[0].value) for node in calls]
 
 
-def test_primary_navigation_exposes_personal_settings_and_points_usage() -> None:
+def test_primary_navigation_uses_account_embedded_model_settings() -> None:
     labels = _tab_labels(desktop.create_desktop_app)
 
-    assert labels[:8] == [
+    assert labels[:7] == [
         "创作台",
         "选题雷达",
         "任务队列",
         "公众号",
-        "模型配置",
         "飞书机器人",
         "积分与用量",
         "文章审核",
     ]
+    assert "模型配置" not in labels
 
 
 def test_public_urls_preserve_the_production_ui_root_path(
