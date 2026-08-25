@@ -324,28 +324,28 @@ def test_legacy_service_fallback_projects_all_inbox_buckets() -> None:
     assert account_filtered["counts"]["generation_failed"] == 0
 
 
-def test_task_center_defaults_to_inbox_and_exposes_draft_ready_count() -> None:
+def test_task_center_uses_one_all_batches_queue() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
 
-    assert '"inbox": "待处理"' in source
-    assert 'value="batches" if initial_view == "batches" else "inbox"' in source
-    assert 'runtime["inbox_bucket"]' in source
-    assert 'INBOX_BUCKETS[str(runtime["inbox_bucket"])]' in source
-    assert '"ready_for_draft"' in source
-    assert "_render_inbox_article_card(" in source
+    assert 'initial_view: str = "batches"' in source
+    assert source.count('{"batches": "全部批次"}') == 2
+    for removed_queue in ("待我处理", "可写草稿"):
+        assert f'"{removed_queue}"' not in source
+    assert 'runtime["inbox_bucket"]' not in source
+    assert "_render_inbox_article_card(" not in source
     assert "_render_batch_card(" in source
 
 
-def test_inbox_render_uses_server_search_without_loading_all_batches() -> None:
+def test_batch_queue_fills_the_viewport_before_offering_more() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
-    inbox_start = source.index('if view_mode == "inbox":')
-    inbox_end = source.index("\n        batches = service.list_batches(", inbox_start)
-    inbox_branch = source[inbox_start:inbox_end]
+    task_list_css = APP_CSS[APP_CSS.rindex(".ops-task-list {") :]
 
-    assert "service.list_batches(" not in inbox_branch
-    assert "has_active_batches" in inbox_branch
-    assert "search=str(search_in.value or \"\")" in inbox_branch
-    assert "needle =" not in inbox_branch
+    assert tasks.TASK_BATCH_PAGE_SIZE == 30
+    assert '"visible_limit": TASK_BATCH_PAGE_SIZE' in source
+    assert "int(runtime[\"visible_limit\"]) + TASK_BATCH_PAGE_SIZE" in source
+    assert 'queue_count_label.set_text(f"{filtered_total} 条")' in source
+    assert "overflow-y: auto !important" in task_list_css[:700]
+    assert "overscroll-behavior: contain" in task_list_css[:700]
 
 
 def test_inbox_review_action_opens_the_deep_workbench_directly() -> None:

@@ -47,7 +47,7 @@ def test_billing_layout_has_explicit_scroll_and_long_content_containment() -> No
     billing_css = APP_CSS[APP_CSS.index(".ops-billing-page .ops-page-host") :]
 
     assert "overflow-y: auto" in billing_css[:500]
-    assert "grid-template-columns: repeat(5, minmax(0, 1fr))" in billing_css
+    assert "grid-template-columns: repeat(6, minmax(0, 1fr))" in billing_css
     assert "overflow-wrap: anywhere" in billing_css
     assert ".ops-billing-table .q-table__middle" in billing_css
     assert "overflow-x: auto" in billing_css

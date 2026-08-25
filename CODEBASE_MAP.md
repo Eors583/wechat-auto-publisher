@@ -194,7 +194,7 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `auth.py` | Login/register/logout UI; stores only the opaque token in NiceGUI user storage and delegates to `AuthService`. |
 | `topics.py` | “选题雷达”: topic list/table, pagination/filtering, followed accounts, source management and refresh actions. |
 | `followed_articles.py` | Recent-article dialog for one followed account, pagination/load limits, cover proxy and actionable fetch errors. |
-| `tasks.py` | “任务队列” plus full-page article review. Owns inbox rows, filters, retry/progress, title/body/image/history views, confirmation, AI review UI, background rewrite and draft-write confirmation. Business calls still go to `BatchService`. |
+| `tasks.py` | “任务队列” plus full-page article review. Owns the single all-batches list, its filters/internal scrolling, retry/progress, title/body/image/history views, confirmation, AI review UI, background rewrite and draft-write confirmation. Business calls still go to `BatchService`. |
 | `review_jury.py` | AI review progress calculation, risk/result panel, review-profile configuration and profile options. |
 | `models.py` | Reusable custom model create/edit form, provider presets, local/API model choice and connection testing. Customer model management is embedded in the account default-model selector; platform model management remains in the merchant admin surface. |
 | `prompts.py` | Structured article/image prompt-template administration. |
@@ -460,7 +460,7 @@ Use this table before searching the whole repository.
 |---|---|---|---|
 | Main shell/sidebar/topbar/navigation | `ui/desktop.py:create_desktop_app` | `ui/styles.py`, `ui/style_tokens.py`, `ui/state.py` | `test_ui_desktop_navigation.py`, `test_ui_lazy_panels.py`, `test_ui_performance_contract.py`, `test_ui_style_tokens.py` |
 | Creation source form/background generation | `ui/desktop.py:_build_wizard` | `services/batches.py:create_batch`, `pipeline.py`, `background_activity.py`, `loading.py` | `test_workbench_content_source_ui.py`, `test_batch_progress.py`, `test_ui_operations_workbench_contract.py` |
-| Task queue/count/status mismatch | `ui/panels/tasks.py:build_tasks_panel` | `services/batch_contracts.py`, `Database.review_inbox_counts/list_review_inbox_rows`, API review inbox | `test_ui_review_inbox.py`, `test_ui_operations_workbench_contract.py`, `test_batch_progress.py` |
+| Task queue/count/status mismatch | `ui/panels/tasks.py:build_tasks_panel` | `BatchService.list_batches`, `services/batch_contracts.py`; article-level review inbox remains a service/API contract | `test_ui_review_inbox.py`, `test_ui_operations_workbench_contract.py`, `test_batch_progress.py` |
 | Full article review UI | `ui/panels/tasks.py:build_review_page` | `BatchService` selection/content/confirm/version/image/cover methods | `test_ui_review_inbox.py`, `test_ui_review_routing.py`, `test_ui_review_inplace.py` |
 | AI review/background rewrite | `ui/panels/review_jury.py`, `ui/panels/tasks.py` | `services/editorial_reviews.py`, `services/batches.py`, `api/editorial_reviews.py`, DB review tables | `test_editorial_reviews.py`, `test_api_editorial_reviews.py`, `test_ui_review_jury_contract.py`, `test_batch_review.py` |
 | Article before/after rewrite choice | `services/editorial_reviews.py` application methods | review page candidate UI, DB applications, API apply/keep-source | same AI review tests plus `test_ui_review_inbox.py` |

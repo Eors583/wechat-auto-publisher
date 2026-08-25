@@ -2825,7 +2825,7 @@ APP_CSS += """
   top: 28px;
   right: 0;
 }
-.ops-task-segment { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.ops-task-segment { grid-template-columns: minmax(0, 1fr); }
 .ops-toolbar { display: flex; align-items: center; gap: 9px; }
 .ops-task-toolbar {
   display: grid;
@@ -2890,7 +2890,10 @@ APP_CSS += """
   max-width: 100%;
   min-height: 0;
   padding: var(--ui-space-3);
-  overflow: hidden !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .ops-task-row-card,
 .ops-batch-row-card {

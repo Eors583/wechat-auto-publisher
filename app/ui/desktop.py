@@ -433,8 +433,8 @@ def create_desktop_app() -> None:
                         )
                     else:
                         page_state.pending_task_center_entry = {
-                            "initial_view": "inbox",
-                            "initial_bucket": "review",
+                            "initial_view": "batches",
+                            "status_filter": "ready_for_review",
                         }
                     tabs.set_value(tab_jobs)
 
@@ -718,7 +718,7 @@ def create_desktop_app() -> None:
 
         def mount_jobs() -> None:
             task_panel_kwargs: dict[str, Any] = {
-                "initial_view": "inbox",
+                "initial_view": "batches",
                 "show_background_activity": False,
             }
             if open_requested_tasks and requested_batch_id:
@@ -729,7 +729,7 @@ def create_desktop_app() -> None:
                 pending_entry = dict(page_state.pending_task_center_entry)
                 task_panel_kwargs.update(
                     initial_view=str(
-                        pending_entry.get("initial_view") or "inbox"
+                        pending_entry.get("initial_view") or "batches"
                     ),
                     initial_bucket=str(
                         pending_entry.get("initial_bucket") or "review"
@@ -933,12 +933,8 @@ def _build_wizard(
             requested_status = str(status_filter or "")
             if requested_status in {"ready_for_review", "ready_for_draft"}:
                 state.pending_task_center_entry = {
-                    "initial_view": "inbox",
-                    "initial_bucket": (
-                        "review"
-                        if requested_status == "ready_for_review"
-                        else "ready_for_draft"
-                    ),
+                    "initial_view": "batches",
+                    "status_filter": requested_status,
                 }
             else:
                 state.pending_task_center_entry = {

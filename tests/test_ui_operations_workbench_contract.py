@@ -82,7 +82,7 @@ def test_global_background_activity_is_mounted_once_for_all_pages() -> None:
 
 def test_task_queue_keeps_all_required_visible_operations() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
-    row_source = inspect.getsource(tasks._render_inbox_article_card)
+    row_source = inspect.getsource(tasks._render_batch_card)
 
     for label in ("查看后台运行任务", "查看归档"):
         assert f'"{label}"' in source
@@ -99,7 +99,7 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
     assert '"active": "生成中"' in source
     assert 'status_in.value = "active"' in source
     assert "archived_in.value = show_archived" in source
-    assert '"initial_view": "inbox"' in inspect.getsource(
+    assert '"initial_view": "batches"' in inspect.getsource(
         desktop.create_desktop_app
     )
     batch_source = inspect.getsource(tasks._render_batch_card)
@@ -129,6 +129,8 @@ def test_task_queue_width_chain_and_breakpoints_cannot_push_sidebar_offscreen() 
         "grid-auto-rows: minmax(var(--ui-task-row-height), auto)"
         in task_list_css[:700]
     )
+    assert "overflow-y: auto !important" in task_list_css[:700]
+    assert "overflow-x: hidden !important" in task_list_css[:700]
 
     narrow_css = APP_CSS[APP_CSS.rindex("@media (max-width: 860px)") :]
     assert (
@@ -163,7 +165,7 @@ def test_task_rows_expose_direct_batch_archive_actions() -> None:
         assert '"ops-task-row-archive-action"' in source
     assert '"取消归档" if archived else "归档"' in batch_source
     assert "service.archive_batch(batch_id, archived=archived)" in confirm_source
-    assert '“待我处理”和“全部批次”' in confirm_source
+    assert '从“全部批次”中隐藏' in confirm_source
     assert ".ops-task-row-archive-action" in APP_CSS
     assert "width: var(--ui-task-archive-action-width)" in APP_CSS
     assert "var(--ui-task-actions-column)" in APP_CSS

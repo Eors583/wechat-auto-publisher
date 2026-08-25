@@ -101,6 +101,8 @@ INBOX_BUCKETS = {
     },
 }
 
+TASK_BATCH_PAGE_SIZE = 30
+
 
 def _format_progress(value: Any) -> tuple[float, str]:
     """Return a safe progress value and its user-facing percentage."""
@@ -345,13 +347,13 @@ def build_tasks_panel(
     initial_batch_id: str | None = None,
     initial_job_id: int | None = None,
     initial_entry_mode: str = "activity",
-    initial_view: str = "inbox",
+    initial_view: str = "batches",
     initial_bucket: str = "review",
     initial_status_filter: str = "",
     show_background_activity: bool = True,
     on_open_review: Callable[[str, int], None] | None = None,
 ) -> None:
-    """Review-first task center backed by the shared batch service."""
+    """Unified batch task center backed by the shared batch service."""
     service = BatchService(
         load_config(),
         owner_user_id=str(getattr(state, "current_user_id", "") or ""),
@@ -364,18 +366,10 @@ def build_tasks_panel(
         }}
 
     account_options = load_account_options()
-    initial_view_mode = "batches" if initial_view == "batches" else "inbox"
     initial_status = str(initial_status_filter or "")
-    initial_segment = (
-        initial_bucket
-        if initial_view_mode == "inbox" and initial_bucket in {"review", "ready_for_draft"}
-        else initial_status
-        if initial_status in {"active", "failed"}
-        else "batches"
-    )
     view_in = ui.toggle(
-        {"inbox": "待处理", "batches": "全部批次"},
-        value="batches" if initial_view == "batches" else "inbox",
+        {"batches": "全部批次"},
+        value="batches",
     ).classes("ops-hidden-control")
     status_in = ui.select(
             options={
@@ -404,14 +398,8 @@ def build_tasks_panel(
             icon="archive",
         ).props("outline dense color=primary no-caps")
     queue_segment = ui.toggle(
-        {
-            "review": "待我处理",
-            "active": "生成中",
-            "ready_for_draft": "可写草稿",
-            "failed": "失败",
-            "batches": "全部批次",
-        },
-        value=initial_segment,
+        {"batches": "全部批次"},
+        value="batches",
     ).classes("ops-segment ops-task-segment").props(
         "no-caps unelevated toggle-color=white toggle-text-color=dark"
     )
@@ -439,10 +427,10 @@ def build_tasks_panel(
         with ui.element("section").classes("ops-panel ops-list-panel"):
             with ui.element("div").classes("ops-panel-heading"):
                 with ui.column().classes("gap-0"):
-                    queue_title_label = ui.label("待我处理").classes(
+                    queue_title_label = ui.label("全部批次").classes(
                         "ops-panel-title"
                     )
-                    ui.label("每条任务保持统一行高，按下一步动作排序").classes(
+                    ui.label("统一查看全部批次，按下一步动作排序").classes(
                         "ops-panel-subtitle"
                     )
                 queue_count_label = ui.badge("0 条").classes("ops-badge")
@@ -468,7 +456,7 @@ def build_tasks_panel(
                 ui.button(
                     "查看后台运行任务",
                     icon="monitor_heart",
-                    on_click=lambda: queue_segment.set_value("active"),
+                    on_click=lambda: show_running_tasks(),
                 ).classes("w-full").props(
                     "flat dense color=primary no-caps"
                 )
@@ -481,11 +469,8 @@ def build_tasks_panel(
             if initial_entry_mode == "completion" and not initial_job_id
             else ""
         ),
-        "visible_limit": 4,
+        "visible_limit": TASK_BATCH_PAGE_SIZE,
         "syncing_controls": False,
-        "inbox_bucket": (
-            initial_bucket if initial_bucket in INBOX_BUCKETS else "review"
-        ),
     }
     if on_open_review is not None:
         runtime["open_review_page"] = on_open_review
@@ -496,8 +481,6 @@ def build_tasks_panel(
     def render_task_center_guide(batch: dict[str, Any] | None = None) -> None:
         workflow_host.clear()
         stage = task_center_workflow_stage(batch)
-        if batch is None and str(runtime.get("inbox_bucket") or "") == "ready_for_draft":
-            stage = "draft"
         note = (
             "全部文章已确认，可以安全写入公众号草稿箱"
             if stage == "draft"
@@ -715,23 +698,17 @@ def build_tasks_panel(
     def show_batch(batch_id: str) -> None:
         runtime["completion_batch_id"] = ""
         runtime["focus_batch_id"] = str(batch_id)
-        runtime["visible_limit"] = 4
+        runtime["visible_limit"] = TASK_BATCH_PAGE_SIZE
         view_in.value = "batches"
         status_in.set_visibility(True)
         batch_only_filters.set_visibility(True)
-        render()
-
-    def select_inbox_bucket(bucket: str) -> None:
-        runtime["completion_batch_id"] = ""
-        runtime["inbox_bucket"] = bucket
-        runtime["visible_limit"] = 4
         render()
 
     def render() -> None:
         host.clear()
         archived_only = bool(archived_in.value)
         archive_tasks_btn.set_text("退出归档" if archived_only else "查看归档")
-        queue_title_label.set_text("已归档批次" if archived_only else "待我处理")
+        queue_title_label.set_text("已归档批次" if archived_only else "全部批次")
         completion_batch_id = str(runtime.get("completion_batch_id") or "")
         if completion_batch_id:
             for control in (view_in, search_in, account_in):
@@ -797,7 +774,7 @@ def build_tasks_panel(
                                     "unelevated color=teal-9 no-caps icon=rate_review"
                                 )
                             ui.button(
-                                "返回待处理收件箱",
+                                "返回全部批次",
                                 on_click=lambda: (
                                     runtime.__setitem__("completion_batch_id", ""),
                                     runtime.__setitem__("focus_batch_id", ""),
@@ -818,81 +795,8 @@ def build_tasks_panel(
                 return
         for control in (view_in, search_in, account_in):
             control.set_visibility(True)
-        view_mode = str(view_in.value or "inbox")
-        status_in.set_visibility(view_mode == "batches")
-        batch_only_filters.set_visibility(view_mode == "batches")
-        if view_mode == "inbox":
-            has_active_batches = getattr(service, "has_active_batches", None)
-            runtime["has_active_batch"] = (
-                bool(has_active_batches())
-                if callable(has_active_batches)
-                else False
-            )
-            payload = _load_review_inbox(
-                service,
-                bucket=str(runtime["inbox_bucket"]),
-                account_id=str(account_in.value or ""),
-                search=str(search_in.value or ""),
-                limit=int(runtime["visible_limit"]),
-            )
-            items = list(payload.get("items") or [])
-            queue_count_label.set_text(f"{len(items)} 条")
-            with host:
-                if not items:
-                    current = INBOX_BUCKETS[str(runtime["inbox_bucket"])]["label"]
-                    with ui.element("div").classes("card w-full"):
-                        ui.label(f"当前没有{current}文章").classes(
-                            "text-weight-medium"
-                        )
-                        ui.label(
-                            "新任务完成后会自动出现在这里；历史记录可切换到“全部批次”。"
-                        ).classes("muted")
-                        if runtime["focus_batch_id"]:
-                            ui.button(
-                                "查看刚完成的批次",
-                                on_click=lambda: show_batch(
-                                    str(runtime["focus_batch_id"])
-                                ),
-                            ).props(
-                                "outline color=teal-9 no-caps icon=inventory_2"
-                            )
-                    return
-                focused_card = None
-                for item in items:
-                    card = _render_inbox_article_card(
-                        state,
-                        service,
-                        item,
-                        render,
-                        review_runtime=runtime,
-                        on_show_batch=show_batch,
-                    )
-                    if (
-                        focused_card is None
-                        and str(item.get("batch_id") or "")
-                        == str(runtime["focus_batch_id"])
-                    ):
-                        focused_card = card
-                if focused_card is not None:
-                    focused_card.run_method(
-                        "scrollIntoView",
-                        {"behavior": "smooth", "block": "start"},
-                    )
-                    runtime["focus_batch_id"] = ""
-                if payload.get("next_cursor"):
-                    ui.button(
-                        "加载更多文章",
-                        on_click=lambda: (
-                            runtime.__setitem__(
-                                "visible_limit",
-                                int(runtime["visible_limit"]) + 4,
-                            ),
-                            render(),
-                        ),
-                    ).props(
-                        "outline color=teal-9 no-caps icon=expand_more"
-                    ).classes("ops-hidden-control")
-            return
+        status_in.set_visibility(True)
+        batch_only_filters.set_visibility(True)
 
         batches = service.list_batches(
             limit=300,
@@ -913,7 +817,7 @@ def build_tasks_panel(
         )]
         filtered_total = len(batches)
         visible_batches = batches[: int(runtime["visible_limit"])]
-        queue_count_label.set_text(f"{len(visible_batches)} 条")
+        queue_count_label.set_text(f"{filtered_total} 条")
         with host:
             if not visible_batches:
                 with ui.element("div").classes("card w-full"):
@@ -952,7 +856,7 @@ def build_tasks_panel(
                     on_click=lambda: (
                         runtime.__setitem__(
                             "visible_limit",
-                            int(runtime["visible_limit"]) + 4,
+                            int(runtime["visible_limit"]) + TASK_BATCH_PAGE_SIZE,
                         ),
                         render(),
                     ),
@@ -968,75 +872,31 @@ def build_tasks_panel(
         entry_mode: str = "activity",
     ) -> None:
         """Show a newly created batch even when stale filters were active."""
+        runtime["completion_batch_id"] = ""
+        search_in.value = ""
+        account_in.value = ""
+        archived_in.value = False
+        runtime["visible_limit"] = TASK_BATCH_PAGE_SIZE
+        view_in.value = "batches"
+        queue_segment.value = "batches"
         if batch_id:
-            search_in.value = ""
             status_in.value = ""
-            account_in.value = ""
             today_only.value = False
-            archived_in.value = False
             runtime["focus_batch_id"] = str(batch_id)
             runtime["completion_batch_id"] = (
                 str(batch_id) if entry_mode == "completion" else ""
             )
-            requested_status = str(status_filter or "")
-            inbox_bucket = (
-                "ready_for_draft"
-                if requested_status == "ready_for_draft"
-                else "review"
-            )
-            runtime["inbox_bucket"] = inbox_bucket
-            runtime["visible_limit"] = 4
-            view_in.value = "inbox"
-            queue_segment.set_value(inbox_bucket)
-            status_in.set_visibility(False)
-            batch_only_filters.set_visibility(False)
         elif status_filter is not None or today is not None:
-            runtime["completion_batch_id"] = ""
-            search_in.value = ""
-            account_in.value = ""
-            archived_in.value = False
             today_only.value = bool(today)
-            runtime["visible_limit"] = 4
-            requested_status = str(status_filter or "")
-            if requested_status in {"ready_for_review", "ready_for_draft"}:
-                inbox_bucket = (
-                    "review"
-                    if requested_status == "ready_for_review"
-                    else "ready_for_draft"
-                )
-                runtime["inbox_bucket"] = inbox_bucket
-                view_in.value = "inbox"
-                queue_segment.set_value(inbox_bucket)
-                status_in.value = ""
-                status_in.set_visibility(False)
-                batch_only_filters.set_visibility(False)
-            else:
-                view_in.value = "batches"
-                status_in.value = requested_status
-                queue_segment.set_value(
-                    requested_status
-                    if requested_status in {"active", "failed"}
-                    else "batches"
-                )
-                status_in.set_visibility(True)
-                batch_only_filters.set_visibility(True)
+            status_in.value = str(status_filter or "")
+        status_in.set_visibility(True)
+        batch_only_filters.set_visibility(True)
         render()
 
     def reset_and_render(_: Any = None) -> None:
         if runtime.get("syncing_controls"):
             return
-        runtime["visible_limit"] = 4
-        render()
-        hide_interaction_feedback(owner_client)
-
-    def switch_view(event: Any) -> None:
-        if runtime.get("syncing_controls"):
-            return
-        runtime["completion_batch_id"] = ""
-        show_batches = str(event.value or "inbox") == "batches"
-        status_in.set_visibility(show_batches)
-        batch_only_filters.set_visibility(show_batches)
-        runtime["visible_limit"] = 4
+        runtime["visible_limit"] = TASK_BATCH_PAGE_SIZE
         render()
         hide_interaction_feedback(owner_client)
 
@@ -1045,6 +905,7 @@ def build_tasks_panel(
         runtime["syncing_controls"] = True
         try:
             view_in.value = "batches"
+            queue_segment.value = "batches"
             status_in.value = "active"
             archived_in.value = False
             today_only.value = False
@@ -1052,7 +913,7 @@ def build_tasks_panel(
             batch_only_filters.set_visibility(True)
         finally:
             runtime["syncing_controls"] = False
-        runtime["visible_limit"] = 4
+        runtime["visible_limit"] = TASK_BATCH_PAGE_SIZE
         render()
         hide_interaction_feedback(owner_client)
 
@@ -1070,38 +931,9 @@ def build_tasks_panel(
             batch_only_filters.set_visibility(True)
         finally:
             runtime["syncing_controls"] = False
-        runtime["visible_limit"] = 4
+        runtime["visible_limit"] = TASK_BATCH_PAGE_SIZE
         render()
         hide_interaction_feedback(owner_client)
-
-    def switch_queue_segment(event: Any) -> None:
-        value = str(event.value or "review")
-        runtime["completion_batch_id"] = ""
-        runtime["visible_limit"] = 4
-        runtime["syncing_controls"] = True
-        try:
-            archived_in.value = False
-            today_only.value = False
-            if value in {"review", "ready_for_draft"}:
-                view_in.value = "inbox"
-                runtime["inbox_bucket"] = value
-                status_in.value = ""
-            elif value == "active":
-                view_in.value = "batches"
-                status_in.value = "active"
-            elif value == "failed":
-                view_in.value = "batches"
-                status_in.value = "failed"
-            else:
-                view_in.value = "batches"
-                status_in.value = ""
-        finally:
-            runtime["syncing_controls"] = False
-        render()
-        hide_interaction_feedback(owner_client)
-
-    view_in.on_value_change(switch_view)
-    queue_segment.on_value_change(switch_queue_segment)
     for element in (search_in, status_in, today_only, archived_in):
         element.on_value_change(reset_and_render)
 
@@ -1113,11 +945,6 @@ def build_tasks_panel(
             value=current if current in options else "",
         )
 
-    attach_interaction_feedback(
-        queue_segment,
-        "正在加载任务列表",
-        event="update:model-value",
-    )
     attach_interaction_feedback(
         account_in,
         "正在筛选公众号任务",
@@ -4985,7 +4812,7 @@ def _open_archive_confirmation(
             "text-h6 text-weight-bold"
         )
         ui.label(
-            "归档后，该批次会从“待我处理”和“全部批次”中隐藏，可在“查看归档”中恢复。"
+            "归档后，该批次会从“全部批次”中隐藏，可在“查看归档”中恢复。"
             if archived
             else "取消归档后，该批次会重新出现在任务列表中。"
         ).classes("muted")
