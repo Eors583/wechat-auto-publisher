@@ -54,8 +54,6 @@ class TitleResult:
 def build_rewrite_user_prompt(topic: str, raw_content: str, instruction: str) -> str:
     return (
         f"{instruction}\n\n{EMPHASIS_PROMPT}\n\n"
-        "正文必须直接进入文章内容，禁止说明联网、工具、资料来源、写作过程、"
-        "扩写任务、结构安排或‘以下从几个观点展开’。\n\n"
         "【标题候选硬性协议】最终结构化结果中的 titles 必须包含恰好 "
         f"{TITLE_CANDIDATE_COUNT} 个互不重复的主标题，subtitles 必须包含恰好 "
         f"{SUBTITLE_CANDIDATE_COUNT} 个互不重复的副标题。不得把 JSON 字段名、"

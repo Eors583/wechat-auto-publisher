@@ -83,6 +83,10 @@ class ParseTests(unittest.TestCase):
 
         self.assertNotIn("不联网", cleaned)
         self.assertTrue(cleaned.startswith("## 会议只是入场券"))
+        self.assertNotIn(
+            "不联网",
+            build_rewrite_user_prompt("话题", "原文", "用户要求"),
+        )
 
     def test_legitimate_article_opening_that_mentions_tools_is_preserved(self) -> None:
         body = "本文分析企业为什么不应依赖外部工具。\n\n正文继续讨论组织能力。"
