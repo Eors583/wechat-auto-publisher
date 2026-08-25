@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -41,28 +41,20 @@ def fetch_latest_benchmark_record(
     cfg = config.get("benchmark") or {}
     if not cfg.get("enabled", False):
         return None
-    max_age_hours = max(1, int(cfg.get("official_max_age_hours") or 36))
-
     cache_path = _cache_path(config, cfg)
     admin_cookie = str(cfg.get("admin_cookie") or "").strip()
     admin_token = _admin_token(str(cfg.get("admin_token") or cfg.get("admin_url") or ""))
     if admin_cookie and admin_token:
         try:
             record = fetch_admin_publish_record(admin_cookie, admin_token)
-            if benchmark_record_is_fresh(record, max_age_hours=max_age_hours):
-                _save_cache(cache_path, record)
-                return record
-            logger.warning("benchmark admin publish record is stale")
+            _save_cache(cache_path, record)
+            return record
         except Exception as exc:  # noqa: BLE001
             logger.warning("benchmark admin publish fetch failed: %s", exc)
 
     cached = _load_cache(cache_path)
-    cached_is_fresh = bool(
-        cached
-        and benchmark_record_is_fresh(cached, max_age_hours=max_age_hours)
-    )
     if not bool(cfg.get("official_fallback_enabled", False)):
-        return cached if cached_is_fresh else None
+        return cached
 
     app_id = str(cfg.get("app_id") or "").strip()
     app_secret = str(cfg.get("app_secret") or "").strip()
@@ -74,33 +66,14 @@ def fetch_latest_benchmark_record(
                 app_id,
                 app_secret,
             )
-            record = fetch_official_publish_record(client)
-            if record and benchmark_record_is_fresh(
-                record, max_age_hours=max_age_hours
-            ):
+            record = fetch_latest_official_record(client)
+            if record:
                 _save_cache(cache_path, record)
                 return record
         except Exception as exc:  # noqa: BLE001
             logger.warning("benchmark official publish fetch failed: %s", exc)
 
-    return cached if cached_is_fresh else None
-
-
-def benchmark_record_is_fresh(
-    record: BenchmarkRecord,
-    *,
-    max_age_hours: int = 36,
-    now: datetime | None = None,
-) -> bool:
-    """Return whether a published group is recent enough for current ads."""
-
-    if int(record.published_at or 0) <= 0:
-        return False
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    published = datetime.fromtimestamp(record.published_at, timezone.utc)
-    return published >= current - timedelta(hours=max(1, int(max_age_hours)))
+    return cached
 
 
 def fetch_admin_publish_record(cookie: str, token: str) -> BenchmarkRecord:
@@ -185,6 +158,43 @@ def fetch_official_publish_record(client: WeChatClient) -> BenchmarkRecord | Non
                     "official_freepublish",
                 )
             )
+    return max(records, key=lambda x: x.published_at) if records else None
+
+
+def fetch_official_draft_record(client: WeChatClient) -> BenchmarkRecord | None:
+    data = client.request(
+        "POST",
+        "/cgi-bin/draft/batchget",
+        json_body={"offset": 0, "count": 20, "no_content": 0},
+    )
+    records: list[BenchmarkRecord] = []
+    for item in data.get("item") or []:
+        content = item.get("content") or {}
+        articles = [_article_from_mapping(x) for x in content.get("news_item") or []]
+        articles = [x for x in articles if x.title]
+        if articles:
+            records.append(
+                BenchmarkRecord(
+                    int(item.get("update_time") or content.get("update_time") or 0),
+                    articles,
+                    "official_draft",
+                )
+            )
+    return max(records, key=lambda x: x.published_at) if records else None
+
+
+def fetch_latest_official_record(client: WeChatClient) -> BenchmarkRecord | None:
+    """Return the newest group across live drafts and published records."""
+
+    records: list[BenchmarkRecord] = []
+    for fetch in (fetch_official_draft_record, fetch_official_publish_record):
+        try:
+            record = fetch(client)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("benchmark live source fetch failed: %s", exc)
+            continue
+        if record and record.articles:
+            records.append(record)
     return max(records, key=lambda x: x.published_at) if records else None
 
 

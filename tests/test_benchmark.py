@@ -10,8 +10,8 @@ from unittest.mock import patch
 from app.benchmark import (
     BenchmarkArticle,
     BenchmarkRecord,
-    benchmark_record_is_fresh,
     fetch_latest_benchmark_record,
+    fetch_latest_official_record,
     parse_admin_publish_response,
     sync_secondary_titles,
 )
@@ -19,6 +19,42 @@ from app.layout.composer import is_ad_titled, parse_ad_number, strip_ad_title_pr
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_latest_draft_wins_over_older_published_record(self) -> None:
+        class Client:
+            def request(self, _method, path, **_kwargs):
+                if path == "/cgi-bin/draft/batchget":
+                    return {
+                        "item": [
+                            {
+                                "update_time": 200,
+                                "content": {
+                                    "news_item": [
+                                        {"title": "最新草稿头条"},
+                                        {"title": "最新广告标题"},
+                                    ]
+                                },
+                            }
+                        ]
+                    }
+                return {
+                    "item": [
+                        {
+                            "update_time": 100,
+                            "content": {"news_item": [{"title": "旧发表头条"}]},
+                        }
+                    ]
+                }
+
+        result = fetch_latest_official_record(Client())
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.source, "official_draft")
+        self.assertEqual(
+            [article.title for article in result.articles],
+            ["最新草稿头条", "最新广告标题"],
+        )
+
     def test_live_official_record_wins_over_fresh_cache(self) -> None:
         now = datetime.now(timezone.utc)
         live = BenchmarkRecord(
@@ -60,26 +96,6 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.articles[0].title, "刚刚发布")
-
-    def test_stale_publish_record_is_not_current_advertising(self) -> None:
-        now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
-        recent = BenchmarkRecord(
-            published_at=int((now - timedelta(hours=2)).timestamp()),
-            articles=[BenchmarkArticle("最新文章")],
-            source="test",
-        )
-        stale = BenchmarkRecord(
-            published_at=int((now - timedelta(days=12)).timestamp()),
-            articles=[BenchmarkArticle("十二天前文章")],
-            source="test",
-        )
-
-        self.assertTrue(
-            benchmark_record_is_fresh(recent, max_age_hours=36, now=now)
-        )
-        self.assertFalse(
-            benchmark_record_is_fresh(stale, max_age_hours=36, now=now)
-        )
 
     def test_ad_marker_can_appear_inside_title(self) -> None:
         title = "课程广告4：华为如何洞察客户需求？"
