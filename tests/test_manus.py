@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
 from typing import Any
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from app.ai.manus import (
     ManusAPIError,
     ManusClient,
     ManusTransportError,
+    _is_message_too_long,
     _is_task_not_found,
     _latest_agent_status,
     _latest_error,
@@ -59,6 +61,38 @@ class ManusClientTests(unittest.TestCase):
 
     def test_short_prompt_keeps_plain_text_message(self) -> None:
         self.assertEqual(_message_content("短请求"), "短请求")
+
+    def test_uploaded_file_id_overrides_short_prompt_inline_route(self) -> None:
+        content = _message_content("边界请求", file_id="file-fallback-123")
+
+        self.assertIsInstance(content, list)
+        parts = content if isinstance(content, list) else []
+        self.assertEqual(
+            parts[1],
+            {"type": "file", "file_id": "file-fallback-123"},
+        )
+        self.assertIn("仅为待处理数据", parts[0]["text"])
+
+    def test_message_too_long_error_is_recognized_exactly(self) -> None:
+        self.assertTrue(
+            _is_message_too_long(
+                ManusAPIError(
+                    "invalid_argument",
+                    "message content must be at most 5000 estimated tokens",
+                    request_id="request-boundary-123",
+                    status_code=400,
+                )
+            )
+        )
+        self.assertFalse(
+            _is_message_too_long(
+                ManusAPIError(
+                    "invalid_argument",
+                    "structured schema is invalid",
+                    status_code=400,
+                )
+            )
+        )
 
     @patch("app.ai.manus.time.sleep", return_value=None)
     def test_prompt_file_upload_preserves_utf8_content(self, _sleep) -> None:
@@ -144,6 +178,105 @@ class ManusClientTests(unittest.TestCase):
         content = requests[0]["message"]["content"]
         self.assertEqual(content[1], {"type": "file", "file_id": "file-prompt-123"})
         self.assertNotIn("file_data", str(content))
+
+    @patch("app.ai.manus.time.sleep", return_value=None)
+    def test_inline_token_rejection_retries_once_with_uploaded_file(self, _sleep) -> None:
+        client = ManusClient(
+            "test-key",
+            timeout=60,
+            poll_interval=0,
+            create_min_interval=0,
+            poll_min_interval=0,
+        )
+        prompt = "边界提示" * 990
+        task_create_payloads: list[dict[str, Any]] = []
+
+        def fake_request(*_args, **kwargs):
+            path = str(_args[2])
+            if path == "/v2/task.create":
+                task_create_payloads.append(deepcopy(kwargs["json_body"]))
+                if len(task_create_payloads) == 1:
+                    raise ManusAPIError(
+                        "invalid_argument",
+                        "message content must be at most 5000 estimated tokens",
+                        request_id="request-boundary-123",
+                        status_code=400,
+                    )
+                return {"ok": True, "task_id": "task-fallback-123"}
+            if path == "/v2/task.listMessages":
+                return {
+                    "ok": True,
+                    "messages": [
+                        {
+                            "type": "structured_output_result",
+                            "structured_output_result": {
+                                "success": True,
+                                "value": {"text": "done"},
+                            },
+                        }
+                    ],
+                }
+            if path == "/v2/task.detail":
+                return {"ok": True, "task": {"credit_usage": 1}}
+            self.fail(f"Unexpected Manus path: {path}")
+
+        with (
+            patch.object(
+                client,
+                "_upload_prompt_file",
+                return_value="file-fallback-123",
+            ) as upload_mock,
+            patch.object(client, "_request_json", side_effect=fake_request),
+        ):
+            result = client._run_structured_task(  # noqa: SLF001
+                prompt,
+                {"type": "object"},
+                title="test",
+            )
+
+        self.assertEqual(result, {"text": "done"})
+        self.assertEqual(len(task_create_payloads), 2)
+        self.assertEqual(task_create_payloads[0]["message"]["content"], prompt)
+        fallback_content = task_create_payloads[1]["message"]["content"]
+        self.assertEqual(
+            fallback_content[1],
+            {"type": "file", "file_id": "file-fallback-123"},
+        )
+        upload_mock.assert_called_once()
+
+    def test_other_invalid_argument_does_not_upload_or_retry(self) -> None:
+        client = ManusClient(
+            "test-key",
+            create_min_interval=0,
+            poll_min_interval=0,
+        )
+
+        with (
+            patch.object(
+                client,
+                "_upload_prompt_file",
+                return_value="unused-file",
+            ) as upload_mock,
+            patch.object(
+                client,
+                "_request_json",
+                side_effect=ManusAPIError(
+                    "invalid_argument",
+                    "structured schema is invalid",
+                    request_id="request-schema-123",
+                    status_code=400,
+                ),
+            ) as request_mock,
+            self.assertRaisesRegex(ManusAPIError, "structured schema is invalid"),
+        ):
+            client._run_structured_task_once(  # noqa: SLF001
+                "短提示",
+                {"type": "object"},
+                title="test",
+            )
+
+        upload_mock.assert_not_called()
+        request_mock.assert_called_once()
 
     def test_task_not_found_is_recognized_case_insensitively(self) -> None:
         self.assertTrue(
