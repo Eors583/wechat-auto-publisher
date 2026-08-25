@@ -56,6 +56,12 @@ def test_delivery_and_review_use_the_same_secondary_resolver() -> None:
 def test_review_page_renders_responsive_secondary_article_preview() -> None:
     source = inspect.getsource(tasks.build_review_page)
 
+    assert 'secondary_preview_tab = ui.tab("广告栏预览")' in source
+    assert "with ui.tab_panel(secondary_preview_tab)" in source
+    preview_panel = source.index("with ui.tab_panel(preview_tab)")
+    secondary_panel = source.index("with ui.tab_panel(secondary_preview_tab)")
+    edit_panel = source.index("with ui.tab_panel(edit_tab)")
+    assert preview_panel < secondary_panel < edit_panel
     assert 'ui.label("广告栏预览")' in source
     assert "service._preview_secondary_articles(batch_id, job_id)" in source
     assert "wechat_image_proxy_url(thumb_url)" in source
@@ -63,6 +69,7 @@ def test_review_page_renders_responsive_secondary_article_preview() -> None:
     assert ".ops-secondary-preview-row" in APP_CSS
     assert "minmax(0, 1fr)" in APP_CSS
     assert "overflow-wrap: anywhere" in APP_CSS
+    assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in APP_CSS
     assert (
         ".ops-review-document-panels .ops-review-mode-panel { "
         "padding: 0 !important; overflow: auto;"

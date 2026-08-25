@@ -71,7 +71,7 @@ body, .q-page, .nicegui-content {
   min-width: 0;
 }
 .feishu-status-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 .feishu-status-item {
   min-width: 0;

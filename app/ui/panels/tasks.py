@@ -2298,6 +2298,7 @@ def build_review_page(
     )
     with review_tabs:
         preview_tab = ui.tab("成品预览")
+        secondary_preview_tab = ui.tab("广告栏预览")
         edit_tab = ui.tab("正文编辑")
         assets_tab = ui.tab("标题与图片")
         history_tab = ui.tab("历史版本")
@@ -2394,6 +2395,9 @@ def build_review_page(
                             sanitize=False,
                         ).classes("ops-document-canvas")
 
+                with ui.tab_panel(secondary_preview_tab).classes(
+                    "ops-review-mode-panel"
+                ):
                     with ui.element("section").classes("ops-secondary-preview"):
                         with ui.element("div").classes(
                             "ops-secondary-preview-heading"
