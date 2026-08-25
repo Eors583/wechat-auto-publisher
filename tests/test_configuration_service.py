@@ -449,6 +449,39 @@ def test_benchmark_preview_reads_selected_account_without_exposing_secret(
     _assert_no_credentials(result)
 
 
+def test_benchmark_preview_rejects_stale_published_group(tmp_path, monkeypatch) -> None:
+    db = Database(tmp_path / "configuration-stale-benchmark-preview.db")
+    service = ConfigurationService(
+        db,
+        {"ai": {}, "benchmark": {"official_max_age_hours": 36}},
+    )
+    source = service.save_account(
+        name="过期对标公众号",
+        app_id="wx-stale-preview-source",
+        app_secret="preview-secret",
+        model_id="",
+    )
+    monkeypatch.setattr(
+        "app.services.configuration.build_wechat_client",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.configuration.fetch_official_publish_record",
+        lambda _client: type(
+            "Record",
+            (),
+            {
+                "published_at": 1,
+                "source": "official_freepublish",
+                "articles": [type("Article", (), {"title": "旧文章"})()],
+            },
+        )(),
+    )
+
+    with pytest.raises(ValueError, match="已超过 36 小时"):
+        service.preview_account_benchmark(str(source["id"]))
+
+
 def test_model_lifecycle_and_connection_test_are_wrapped(tmp_path, monkeypatch) -> None:
     db = Database(tmp_path / "configuration-model-test.db")
     service = ConfigurationService(db, {"ai": {}})

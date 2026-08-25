@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from app.benchmark import (
     BenchmarkArticle,
     BenchmarkRecord,
+    benchmark_record_is_fresh,
+    fetch_latest_benchmark_record,
     parse_admin_publish_response,
     sync_secondary_titles,
 )
@@ -14,6 +19,68 @@ from app.layout.composer import is_ad_titled, parse_ad_number, strip_ad_title_pr
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_live_official_record_wins_over_fresh_cache(self) -> None:
+        now = datetime.now(timezone.utc)
+        live = BenchmarkRecord(
+            published_at=int((now - timedelta(minutes=5)).timestamp()),
+            articles=[BenchmarkArticle("刚刚发布")],
+            source="official_freepublish",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "benchmark.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "published_at": int(
+                            (now - timedelta(hours=2)).timestamp()
+                        ),
+                        "source": "cache",
+                        "articles": [{"title": "两小时前缓存"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "benchmark": {
+                    "enabled": True,
+                    "cache_path": str(cache_path),
+                    "official_fallback_enabled": True,
+                    "official_max_age_hours": 36,
+                    "app_id": "wx-live",
+                    "app_secret": "secret",
+                }
+            }
+            with (
+                patch("app.benchmark.build_wechat_client", return_value=object()),
+                patch("app.benchmark.fetch_official_publish_record", return_value=live),
+            ):
+                result = fetch_latest_benchmark_record(config, object())
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.articles[0].title, "刚刚发布")
+
+    def test_stale_publish_record_is_not_current_advertising(self) -> None:
+        now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+        recent = BenchmarkRecord(
+            published_at=int((now - timedelta(hours=2)).timestamp()),
+            articles=[BenchmarkArticle("最新文章")],
+            source="test",
+        )
+        stale = BenchmarkRecord(
+            published_at=int((now - timedelta(days=12)).timestamp()),
+            articles=[BenchmarkArticle("十二天前文章")],
+            source="test",
+        )
+
+        self.assertTrue(
+            benchmark_record_is_fresh(recent, max_age_hours=36, now=now)
+        )
+        self.assertFalse(
+            benchmark_record_is_fresh(stale, max_age_hours=36, now=now)
+        )
+
     def test_ad_marker_can_appear_inside_title(self) -> None:
         title = "课程广告4：华为如何洞察客户需求？"
         self.assertTrue(is_ad_titled(title))

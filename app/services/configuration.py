@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,10 @@ from app.ai.model_registry import (
     save_model as persist_model,
     test_model_connection,
 )
-from app.benchmark import fetch_official_publish_record
+from app.benchmark import (
+    benchmark_record_is_fresh,
+    fetch_official_publish_record,
+)
 from app.config import load_config
 from app.db import Database
 from app.layout_profiles import normalize_layout
@@ -33,6 +37,7 @@ from app.prompt_templates import (
     public_prompt_templates,
     save_prompt_template as persist_prompt_template,
 )
+from app.time_utils import BUSINESS_TIMEZONE
 from app.wechat.factory import build_wechat_client
 
 
@@ -278,6 +283,27 @@ class ConfigurationService:
         record = fetch_official_publish_record(client)
         if record is None or not record.articles:
             raise ValueError("对标公众号暂未返回可识别的发表记录")
+        max_age_hours = max(
+            1,
+            int(
+                (self.config.get("benchmark") or {}).get(
+                    "official_max_age_hours"
+                )
+                or 36
+            ),
+        )
+        if not benchmark_record_is_fresh(
+            record,
+            max_age_hours=max_age_hours,
+        ):
+            published = datetime.fromtimestamp(
+                record.published_at,
+                timezone.utc,
+            ).astimezone(BUSINESS_TIMEZONE)
+            raise ValueError(
+                f"对标公众号最新发表记录停留在 {published:%Y-%m-%d %H:%M}，"
+                f"已超过 {max_age_hours} 小时，不能作为当前广告栏"
+            )
         return {
             "source_account_id": str(source["id"]),
             "source_account_name": str(source.get("name") or "对标公众号"),

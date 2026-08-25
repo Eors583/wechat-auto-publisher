@@ -41,6 +41,7 @@ def fetch_latest_benchmark_record(
     cfg = config.get("benchmark") or {}
     if not cfg.get("enabled", False):
         return None
+    max_age_hours = max(1, int(cfg.get("official_max_age_hours") or 36))
 
     cache_path = _cache_path(config, cfg)
     admin_cookie = str(cfg.get("admin_cookie") or "").strip()
@@ -48,17 +49,20 @@ def fetch_latest_benchmark_record(
     if admin_cookie and admin_token:
         try:
             record = fetch_admin_publish_record(admin_cookie, admin_token)
-            _save_cache(cache_path, record)
-            return record
+            if benchmark_record_is_fresh(record, max_age_hours=max_age_hours):
+                _save_cache(cache_path, record)
+                return record
+            logger.warning("benchmark admin publish record is stale")
         except Exception as exc:  # noqa: BLE001
             logger.warning("benchmark admin publish fetch failed: %s", exc)
 
-    # 当天已经核验过的记录直接使用，避免每次预览都等待开放接口返回旧数据。
     cached = _load_cache(cache_path)
-    if cached and datetime.fromtimestamp(cached.published_at).date() == datetime.now().date():
-        return cached
-    if cached and not bool(cfg.get("official_fallback_enabled", False)):
-        return cached
+    cached_is_fresh = bool(
+        cached
+        and benchmark_record_is_fresh(cached, max_age_hours=max_age_hours)
+    )
+    if not bool(cfg.get("official_fallback_enabled", False)):
+        return cached if cached_is_fresh else None
 
     app_id = str(cfg.get("app_id") or "").strip()
     app_secret = str(cfg.get("app_secret") or "").strip()
@@ -71,15 +75,32 @@ def fetch_latest_benchmark_record(
                 app_secret,
             )
             record = fetch_official_publish_record(client)
-            max_age = int(cfg.get("official_max_age_hours") or 36)
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age)
-            if record and datetime.fromtimestamp(record.published_at, timezone.utc) >= cutoff:
+            if record and benchmark_record_is_fresh(
+                record, max_age_hours=max_age_hours
+            ):
                 _save_cache(cache_path, record)
                 return record
         except Exception as exc:  # noqa: BLE001
             logger.warning("benchmark official publish fetch failed: %s", exc)
 
-    return cached or _load_cache(cache_path)
+    return cached if cached_is_fresh else None
+
+
+def benchmark_record_is_fresh(
+    record: BenchmarkRecord,
+    *,
+    max_age_hours: int = 36,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a published group is recent enough for current ads."""
+
+    if int(record.published_at or 0) <= 0:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    published = datetime.fromtimestamp(record.published_at, timezone.utc)
+    return published >= current - timedelta(hours=max(1, int(max_age_hours)))
 
 
 def fetch_admin_publish_record(cookie: str, token: str) -> BenchmarkRecord:
