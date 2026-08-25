@@ -123,6 +123,8 @@ def test_task_queue_keeps_all_required_visible_operations() -> None:
     assert 'batch.get("generation_usage")' in batch_source
     assert "_generation_usage_text(" in batch_source
     assert 'batch.get("generation_token_usage")' in batch_source
+    assert 'ui.label(generation_token_text).classes("ops-task-row-token")' in batch_source
+    assert 'f" · {generation_token_text}"' not in batch_source
 
 
 def test_task_queue_width_chain_and_breakpoints_cannot_push_sidebar_offscreen() -> None:

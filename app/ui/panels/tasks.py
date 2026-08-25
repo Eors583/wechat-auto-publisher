@@ -4928,13 +4928,12 @@ def _render_batch_card(
             ui.icon("inventory_2", size="20px").classes("ops-semantic-icon")
         with ui.column().classes("ops-task-row-copy"):
             ui.label(topic or "未命名批次").classes("ops-task-row-title")
-            generation_token_text, _generation_token_hint = _generation_usage_text(
+            generation_token_text, generation_token_hint = _generation_usage_text(
                 batch.get("generation_usage"),
                 legacy_tokens=batch.get("generation_token_usage"),
             )
             ui.label(
                 f'批次 #{batch.get("display_id") or ""} · 公众号 {len(jobs)} 个'
-                f" · {generation_token_text}"
             ).classes("ops-task-row-meta")
         ui.badge(_batch_status_text(batch)).props(
             f'color={_batch_color(batch_status)}'
@@ -4943,6 +4942,9 @@ def _render_batch_card(
             f'已审核 {progress.get("reviewed", 0)}/{progress.get("review_total", 0)}'
             f' · 草稿 {progress.get("drafted", 0)} · 失败 {progress.get("failed", 0)}'
         ).classes("ops-task-row-state")
+        ui.label(generation_token_text).classes("ops-task-row-token").tooltip(
+            generation_token_hint
+        )
         with ui.row().classes("ops-task-row-actions"):
             ui.button(
                 action_label,

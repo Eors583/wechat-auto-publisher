@@ -2912,7 +2912,7 @@ APP_CSS += """
   grid-template-columns: 42px minmax(0, 1.5fr) minmax(0, .7fr) minmax(0, .7fr) minmax(120px, .4fr) var(--ui-task-actions-column) !important;
 }
 .ops-batch-row-card {
-  grid-template-columns: 42px minmax(0, 1.5fr) minmax(0, .7fr) minmax(0, .7fr) var(--ui-task-actions-column) !important;
+  grid-template-columns: 42px minmax(0, 1.5fr) minmax(0, .7fr) minmax(0, .7fr) minmax(120px, .4fr) var(--ui-task-actions-column) !important;
 }
 .ops-task-row-icon { position: relative; width: 38px; height: 38px; }
 .ops-task-row-actions .q-btn:last-child { display: none; }
@@ -3459,7 +3459,7 @@ APP_CSS += """
     grid-template-columns: 42px minmax(0, 1fr) minmax(110px, auto) minmax(96px, auto) auto !important;
   }
   .ops-batch-row-card {
-    grid-template-columns: 42px minmax(0, 1fr) minmax(110px, auto) auto !important;
+    grid-template-columns: 42px minmax(0, 1fr) minmax(110px, auto) minmax(120px, auto) auto !important;
   }
   .ops-task-row-state { display: none !important; }
   .ops-inline-comparison { grid-template-columns: minmax(0, 1fr); }
@@ -3536,7 +3536,7 @@ APP_CSS += """
     grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) 12px 164px;
   }
   .ops-task-row-card { grid-template-columns: 38px minmax(0, 1fr) minmax(90px, auto) auto !important; }
-  .ops-batch-row-card { grid-template-columns: 38px minmax(0, 1fr) auto !important; }
+  .ops-batch-row-card { grid-template-columns: 38px minmax(0, 1fr) minmax(110px, auto) auto !important; }
   .ops-task-row-state,
   .ops-task-row-badge { display: none !important; }
   .ops-review-layout { grid-template-columns: minmax(0, 1.35fr) minmax(225px, .65fr); }
@@ -3544,7 +3544,11 @@ APP_CSS += """
 }
 @container (max-width: 720px) {
   .ops-batch-row-card {
-    grid-template-columns: 38px minmax(0, 1fr) 128px !important;
+    grid-template-columns: 38px minmax(0, 1fr) !important;
+    grid-template-rows: auto auto auto;
+    min-height: 112px !important;
+    height: auto !important;
+    row-gap: 2px;
   }
   .ops-task-row-state,
   .ops-task-row-badge { display: none !important; }
@@ -3582,8 +3586,13 @@ APP_CSS += """
     grid-row: 3;
     justify-self: end;
   }
+  .ops-batch-row-card .ops-task-row-icon { grid-column: 1; grid-row: 1 / 4; }
   .ops-batch-row-card .ops-task-row-copy { grid-column: 2; grid-row: 1; }
-  .ops-batch-row-card .ops-task-row-actions { grid-column: 3; grid-row: 1; }
+  .ops-batch-row-card .ops-task-row-actions {
+    grid-column: 2;
+    grid-row: 3;
+    justify-self: end;
+  }
   .ops-task-row-archive-action {
     width: 38px;
     min-width: 38px;
