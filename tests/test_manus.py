@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -13,14 +12,14 @@ from app.ai.manus import (
     ManusAPIError,
     ManusClient,
     ManusTransportError,
-    _message_content,
-    _next_request_at,
-    _wait_for_request_slot,
-    is_non_retryable_manus_error,
     _is_task_not_found,
     _latest_agent_status,
     _latest_error,
+    _message_content,
+    _next_request_at,
     _rewrite_schema,
+    _wait_for_request_slot,
+    is_non_retryable_manus_error,
 )
 from app.ai.usage import bind_usage_recorder
 
@@ -46,18 +45,105 @@ class ManusClientTests(unittest.TestCase):
     def test_long_prompt_moves_to_attachment_without_losing_content(self) -> None:
         prompt = "完整原稿与改写要求" * 1000
 
-        content = _message_content(prompt)
+        content = _message_content(prompt, file_id="file-prompt-123")
 
         self.assertIsInstance(content, list)
         parts = content if isinstance(content, list) else []
         self.assertLess(len(parts[0]["text"]), 4000)
-        encoded = parts[1]["file_data"].split(",", 1)[1]
-        restored = base64.b64decode(encoded).decode()
-        self.assertEqual(restored, prompt)
-        self.assertEqual(parts[1]["filename"], "task-input.txt")
+        self.assertEqual(parts[1], {"type": "file", "file_id": "file-prompt-123"})
+        self.assertNotIn("file_data", parts[1])
+
+    def test_long_prompt_requires_preuploaded_file(self) -> None:
+        with self.assertRaisesRegex(ValueError, "uploaded file_id"):
+            _message_content("长提示" * 2000)
 
     def test_short_prompt_keeps_plain_text_message(self) -> None:
         self.assertEqual(_message_content("短请求"), "短请求")
+
+    @patch("app.ai.manus.time.sleep", return_value=None)
+    def test_prompt_file_upload_preserves_utf8_content(self, _sleep) -> None:
+        class UploadResponse:
+            status_code = 200
+
+        class UploadClient:
+            uploaded: bytes = b""
+
+            def put(self, _url: str, *, content: bytes) -> UploadResponse:
+                self.uploaded = content
+                return UploadResponse()
+
+        prompt = "完整原稿与改写要求\n" * 1000
+        transport = UploadClient()
+        client = ManusClient("test-key", transport_retries=2)
+        responses = iter(
+            [
+                {
+                    "ok": True,
+                    "file": {"id": "file-prompt-123"},
+                    "upload_url": "https://upload.example/prompt",
+                },
+                {"ok": True, "file": {"status": "pending"}},
+                {"ok": True, "file": {"status": "uploaded"}},
+            ]
+        )
+
+        with patch.object(client, "_request_json", side_effect=responses):
+            file_id = client._upload_prompt_file(  # noqa: SLF001
+                transport,  # type: ignore[arg-type]
+                {"x-manus-api-key": "redacted"},
+                prompt,
+            )
+
+        self.assertEqual(file_id, "file-prompt-123")
+        self.assertEqual(transport.uploaded.decode("utf-8"), prompt)
+
+    @patch("app.ai.manus.time.sleep", return_value=None)
+    def test_long_structured_task_references_uploaded_file_id(self, _sleep) -> None:
+        client = ManusClient("test-key", timeout=60, poll_interval=0)
+        prompt = "完整原稿与改写要求" * 1000
+        requests: list[dict[str, Any]] = []
+        responses = iter(
+            [
+                {"ok": True, "task_id": "task-123"},
+                {
+                    "ok": True,
+                    "messages": [
+                        {
+                            "type": "structured_output_result",
+                            "structured_output_result": {
+                                "success": True,
+                                "value": {"text": "done"},
+                            },
+                        }
+                    ],
+                },
+                {"ok": True, "task": {"credit_usage": 1}},
+            ]
+        )
+
+        def fake_request(*_args, **kwargs):
+            if kwargs.get("json_body"):
+                requests.append(dict(kwargs["json_body"]))
+            return next(responses)
+
+        with (
+            patch.object(
+                client,
+                "_upload_prompt_file",
+                return_value="file-prompt-123",
+            ),
+            patch.object(client, "_request_json", side_effect=fake_request),
+        ):
+            result = client._run_structured_task(  # noqa: SLF001
+                prompt,
+                {"type": "object"},
+                title="test",
+            )
+
+        self.assertEqual(result, {"text": "done"})
+        content = requests[0]["message"]["content"]
+        self.assertEqual(content[1], {"type": "file", "file_id": "file-prompt-123"})
+        self.assertNotIn("file_data", str(content))
 
     def test_task_not_found_is_recognized_case_insensitively(self) -> None:
         self.assertTrue(

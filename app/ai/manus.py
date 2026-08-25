@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import base64
+import hashlib
 import json
 import logging
-import hashlib
 import threading
 import time
 from typing import Any
@@ -13,9 +12,9 @@ import httpx
 from . import (
     ARTICLE_DIGEST_PROMPT,
     EMPHASIS_PROMPT,
-    RewriteResult,
     SUBTITLE_CANDIDATE_COUNT,
     TITLE_CANDIDATE_COUNT,
+    RewriteResult,
     TitleResult,
     parse_rewrite_output,
     parse_title_output,
@@ -30,13 +29,18 @@ _next_request_at: dict[tuple[str, str, str], float] = {}
 _INLINE_TEXT_LIMIT = 4000
 
 
-def _message_content(prompt: str) -> str | list[dict[str, str]]:
-    """Move long Manus prompts to an attachment without losing source text."""
+def _message_content(
+    prompt: str,
+    *,
+    file_id: str = "",
+) -> str | list[dict[str, str]]:
+    """Reference long prompts by uploaded file so Base64 is never token-counted."""
 
     text = str(prompt or "")
     if len(text) <= _INLINE_TEXT_LIMIT:
         return text
-    encoded = base64.b64encode(text.encode()).decode("ascii")
+    if not str(file_id or "").strip():
+        raise ValueError("Long Manus prompts require an uploaded file_id")
     return [
         {
             "type": "text",
@@ -47,9 +51,7 @@ def _message_content(prompt: str) -> str | list[dict[str, str]]:
         },
         {
             "type": "file",
-            "file_data": f"data:text/plain;base64,{encoded}",
-            "filename": "task-input.txt",
-            "mime_type": "text/plain",
+            "file_id": str(file_id).strip(),
         },
     ]
 
@@ -329,18 +331,24 @@ class ManusClient:
             "x-manus-api-key": self.api_key,
             "Content-Type": "application/json",
         }
-        payload: dict[str, Any] = {
-            "message": {"content": _message_content(prompt)},
-            "agent_profile": self.model,
-            "interactive_mode": False,
-            "hide_in_task_list": True,
-            "share_visibility": "private",
-            "title": title,
-            "structured_output_schema": schema,
-        }
-
-        deadline = time.monotonic() + self.timeout
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+            file_id = (
+                self._upload_prompt_file(client, headers, prompt)
+                if len(str(prompt or "")) > _INLINE_TEXT_LIMIT
+                else ""
+            )
+            payload: dict[str, Any] = {
+                "message": {
+                    "content": _message_content(prompt, file_id=file_id)
+                },
+                "agent_profile": self.model,
+                "interactive_mode": False,
+                "hide_in_task_list": True,
+                "share_visibility": "private",
+                "title": title,
+                "structured_output_schema": schema,
+            }
+            deadline = time.monotonic() + self.timeout
             created = self._request_json(
                 client,
                 "POST",
@@ -435,6 +443,68 @@ class ManusClient:
             f"Manus task timed out after {int(self.timeout)} seconds "
             f"(last status: {last_status})"
         )
+
+    def _upload_prompt_file(
+        self,
+        client: httpx.Client,
+        headers: dict[str, str],
+        prompt: str,
+    ) -> str:
+        """Upload a long prompt before task.create and return its file ID."""
+
+        created = self._request_json(
+            client,
+            "POST",
+            "/v2/file.upload",
+            headers=headers,
+            json_body={"filename": "task-input.txt"},
+        )
+        file_id = str((created.get("file") or {}).get("id") or "").strip()
+        upload_url = str(created.get("upload_url") or "").strip()
+        if not file_id or not upload_url:
+            raise RuntimeError("Manus file.upload did not return file ID and upload URL")
+
+        payload = str(prompt or "").encode("utf-8")
+        response: httpx.Response | Any | None = None
+        for attempt in range(1, self.transport_retries + 1):
+            try:
+                response = client.put(upload_url, content=payload)
+                if response.status_code < 500:
+                    break
+            except httpx.TransportError as exc:
+                if attempt >= self.transport_retries:
+                    raise ManusTransportError(
+                        "Manus 长提示附件上传失败，请稍后重试",
+                        safe_to_restart_task=True,
+                    ) from exc
+            if attempt < self.transport_retries:
+                time.sleep(min(2 ** (attempt - 1), 8))
+        if response is None or response.status_code >= 400:
+            status_code = getattr(response, "status_code", "unknown")
+            raise RuntimeError(
+                f"Manus prompt attachment upload failed: HTTP {status_code}"
+            )
+
+        for attempt in range(1, 11):
+            detail = self._request_json(
+                client,
+                "GET",
+                "/v2/file.detail",
+                headers=headers,
+                params={"file_id": file_id},
+            )
+            file_detail = dict(detail.get("file") or {})
+            status = str(file_detail.get("status") or "").strip().lower()
+            if status == "uploaded":
+                return file_id
+            if status in {"deleted", "error"}:
+                raise RuntimeError(
+                    "Manus prompt attachment failed: "
+                    + str(file_detail.get("error_message") or status)
+                )
+            if attempt < 10:
+                time.sleep(min(0.25 * attempt, 1.0))
+        raise TimeoutError("Manus prompt attachment was not ready in time")
 
     def _task_credit_usage(
         self,
