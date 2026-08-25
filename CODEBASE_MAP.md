@@ -178,7 +178,7 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `app/ui/loading.py` | `RequestLoading` and `get_request_loading`: request feedback and optional “move to background” behavior. |
 | `app/ui/interaction_feedback.py` | Installs lightweight immediate feedback on interactive controls so network work is not perceived as a frozen click. |
 | `app/ui/lifecycle.py` | Client-owned timers that stop safely when the NiceGUI client is deleted. |
-| `app/ui/navigation.py` | Builds internal UI URLs that preserve the configured reverse-proxy root path. |
+| `app/ui/navigation.py` | Builds reverse-proxy-aware full UI URLs and NiceGUI client-navigation targets. |
 | `app/ui/preflight_repair.py` | Normalizes failed preflight reasons and renders durable repair dialogs with account-scoped configuration links. |
 | `app/ui/auth_persistence.py` | Aligns signed NiceGUI cookie lifetime/security with 30-day database sessions. |
 | `app/ui/local_model_bridge.py` | Transitional browser fallback for user-local models: Chromium loopback permission probe, one active tab per user and DB request relay. Companion-bound models do not depend on an open tab. |
@@ -733,6 +733,55 @@ user authorization. When authorized:
    HTTP status and error-log **counts**. Do not print full logs that may contain
    request credentials.
 
+### 11.1 Production `/publisher` routing fix completed on 2026-08-25
+
+Production now runs `main@a3b0c96dcecf021969707594f9e970b65e7d95bc`
+from `/opt/wechat-publisher/releases/git-a3b0c96dcecf`. This release fixes two
+independent client-navigation loops without changing Nginx, authentication,
+customer data or the public URL contract:
+
+1. `ui_root_url(...)` still returns the complete reverse-proxy-aware URL used by
+   links and persisted/background activity entries, for example
+   `/publisher/?view=review`. NiceGUI's `ui.navigate.to(...)` adds its configured
+   root prefix on the client, so direct navigation must first pass the complete
+   URL through `ui_navigation_target(...)`. The helper removes exactly one
+   configured `/publisher` prefix; this prevents
+   `/publisher/publisher/?view=...` while preserving local-root behavior and
+   external URLs.
+2. The post-startup configuration-health refresh may automatically open the
+   WeChat repair onboarding only when the current user is an administrator and
+   no explicit `view` was requested. `_should_auto_open_onboarding(...)` returns
+   false for `view=onboarding`, configuration/deep-link views and non-admin
+   users, preventing the onboarding page from navigating back to itself.
+
+Relevant ownership and regression points:
+
+- `app/ui/navigation.py`: `ui_root_url`, `ui_navigation_target`.
+- `app/ui/desktop.py`: `_should_auto_open_onboarding` and the asynchronous
+  configuration-health redirect.
+- `app/ui/preflight_repair.py`, `app/ui/panels/onboarding_wizard.py` and
+  `app/ui/panels/tasks.py`: internal `ui.navigate.to(...)` callers use the
+  NiceGUI navigation boundary; ordinary `ui.link(...)` callers keep full URLs.
+- `tests/test_ui_desktop_navigation.py`: production-prefix composition,
+  no-duplicate-prefix contracts and admin/root-only onboarding redirect cases.
+
+Final verification recorded for the release:
+
+- focused navigation/onboarding checks passed;
+- full suite: `1168 passed, 10 skipped`;
+- production API, web and onboarding endpoints returned HTTP 200;
+- the onboarding endpoint returned zero HTTP redirects;
+- API, web, HTTPS web and admin containers reported zero recent
+  `ERROR`/`CRITICAL`/`Traceback` log matches;
+- a 12-second post-release Nginx observation window recorded zero onboarding
+  reload requests and zero `/publisher/publisher/` requests.
+
+The server-to-GitHub HTTPS fetch was unstable during this release. The exact
+already-pushed `origin/main` commit was transferred as a Git bundle into the
+server's existing bare mirror, then the normal immutable release script ran with
+`SKIP_GIT_FETCH=true`. This is a transport fallback only; the production commit
+and `origin/main` commit are identical.
+
 ## 12. Safe change checklist for the next AI
 
 Before editing:
@@ -926,7 +975,7 @@ unless noted.
 | `app/ui/ip_whitelist_guide.py` | WeChat whitelist repair dialog. |
 | `app/ui/lifecycle.py` | Client-safe timers. |
 | `app/ui/loading.py` | Request loading/background dialog. |
-| `app/ui/navigation.py` | Reverse-proxy-root-aware internal UI URLs. |
+| `app/ui/navigation.py` | Reverse-proxy-aware full UI URLs and NiceGUI client-navigation targets. |
 | `app/ui/preflight_repair.py` | Preflight failure reasons, repair labels/routes and durable actionable dialogs. |
 | `app/ui/local_model_bridge.py` | Browser-to-user-local-model bridge. |
 | `app/ui/workflow.py` | UI stage/navigation helpers. |
