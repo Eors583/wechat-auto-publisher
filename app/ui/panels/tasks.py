@@ -1273,7 +1273,7 @@ def _generation_usage_text(
         )
     if estimated:
         return with_points(
-            f"估算 {estimated:,} Token · 非实际",
+            f"估算 {estimated:,} Token",
             "这是本地估算，不是服务商账单 Token，不可用于严格计费",
         )
     if manus_tasks:
