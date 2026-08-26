@@ -37,7 +37,6 @@ def build_billing_panel(state: Any) -> None:
 
     service = BillingService(state.db)
     summary = service.summary()
-    usage = dict(summary.get("usage") or {})
     credits = dict(summary.get("credits") or {})
     mode = str(summary.get("mode") or "shadow")
     with ui.row().classes("ops-billing-notice"):
@@ -50,32 +49,9 @@ def build_billing_panel(state: Any) -> None:
             "正式计费时可用于任务冻结",
         )
         _metric(
-            "已冻结积分",
-            _integer(credits.get("reserved")),
-            "任务完成后结算并退回差额",
-        )
-        _metric(
             "近 30 天已消耗",
             _integer(credits.get("charged")),
             "只统计完成并正式结算的积分",
-        )
-        _metric(
-            "预计积分",
-            _integer(usage.get("estimated_points")),
-            "影子模式仅试算，正式模式展示结算前估值",
-        )
-        _metric(
-            "近 30 天 AI 操作",
-            _integer(usage.get("operations")),
-            "生成、评审、改写和生图均按任务聚合",
-        )
-        _metric(
-            "实际 Token",
-            _integer(
-                int(usage.get("input_tokens") or 0)
-                + int(usage.get("output_tokens") or 0)
-            ),
-            f"缓存输入 {_integer(usage.get('cached_input_tokens'))}",
         )
 
     rows = service.list_usage(limit=100)

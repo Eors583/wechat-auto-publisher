@@ -1941,7 +1941,7 @@ APP_CSS += """
 }
 .ops-billing-metrics {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--ui-space-3);
   width: 100%;
   min-width: 0;
@@ -3467,7 +3467,7 @@ APP_CSS += """
 .ops-document-preview-badge { align-items: center; gap: var(--ui-space-1); }
 
 @media (max-width: 1300px) {
-  .ops-billing-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ops-billing-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ops-task-row-card {
     grid-template-columns: 42px minmax(0, 1fr) minmax(110px, auto) minmax(96px, auto) auto !important;
   }

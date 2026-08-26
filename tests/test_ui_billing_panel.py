@@ -21,7 +21,14 @@ def test_customer_and_admin_have_separate_usage_entries() -> None:
 
 def test_customer_projection_never_renders_internal_cost_fields() -> None:
     source = inspect.getsource(billing.build_billing_panel)
+    metrics_source = source[: source.index("    rows = service.list_usage")]
 
+    assert '"可用积分"' in metrics_source
+    assert '"近 30 天已消耗"' in metrics_source
+    assert '"已冻结积分"' not in metrics_source
+    assert '"预计积分"' not in metrics_source
+    assert '"近 30 天 AI 操作"' not in metrics_source
+    assert '"实际 Token"' not in metrics_source
     assert "provider_cost_micro_cny" not in source
     assert "retail_cost_micro_cny" not in source
     assert "API Key" in source
@@ -47,7 +54,7 @@ def test_billing_layout_has_explicit_scroll_and_long_content_containment() -> No
     billing_css = APP_CSS[APP_CSS.index(".ops-billing-page .ops-page-host") :]
 
     assert "overflow-y: auto" in billing_css[:500]
-    assert "grid-template-columns: repeat(6, minmax(0, 1fr))" in billing_css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in billing_css
     assert "overflow-wrap: anywhere" in billing_css
     assert ".ops-billing-table .q-table__middle" in billing_css
     assert "overflow-x: auto" in billing_css
