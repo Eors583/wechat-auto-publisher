@@ -188,14 +188,14 @@ def test_live_task_only_operation_charges_fixed_points_and_releases_on_failure(
         row["subject_id"]: row for row in db.list_usage_operations(limit=10)
     }
     assert operations["account-success"]["status"] == "succeeded"
-    assert operations["account-success"]["task_base_points"] == 10
-    assert operations["account-success"]["charged_points"] == 10
+    assert operations["account-success"]["task_base_points"] == 20
+    assert operations["account-success"]["charged_points"] == 20
     assert operations["account-failed"]["status"] == "failed"
     assert operations["account-failed"]["charged_points"] == 0
     assert db.credit_wallet_summary() == {
-        "available": 90,
+        "available": 80,
         "reserved": 0,
-        "charged": 10,
+        "charged": 20,
     }
 
 

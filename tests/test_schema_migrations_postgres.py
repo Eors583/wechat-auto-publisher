@@ -203,6 +203,32 @@ def test_platform_jizhile_migration_preserves_legacy_default_owner_setting(
     assert effective_jizhile_settings(upgraded)["key"] == "legacy-platform-secret"
 
 
+def test_followed_article_refresh_upgrade_sets_twenty_point_rate(
+    postgres_database_url: str,
+) -> None:
+    Database(postgres_database_url)
+    with psycopg.connect(postgres_database_url) as conn:
+        conn.execute(
+            """
+            UPDATE billing_task_rates
+            SET base_points = 10, max_reserve_points = 10, version = 1
+            WHERE task_code = 'followed_articles_refresh'
+            """
+        )
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = '20260826_0008'"
+        )
+    _POSTGRES_SCHEMA_INITIALIZED.discard(postgres_database_url)
+
+    upgraded = Database(postgres_database_url)
+    rate = upgraded.get_billing_task_rate("followed_articles_refresh")
+
+    assert rate is not None
+    assert rate["base_points"] == 20
+    assert rate["max_reserve_points"] == 20
+    assert rate["version"] == 2
+
+
 def test_fresh_postgres_schema_records_all_versioned_migrations(
     postgres_database_url: str,
 ) -> None:

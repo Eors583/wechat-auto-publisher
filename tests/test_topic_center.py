@@ -739,10 +739,10 @@ def test_followed_article_refresh_charges_once_and_failure_refunds(
 
     success = service.discover_account(account["id"])
 
-    assert success["points"] == 10
-    assert success["points_charged"] == 10
+    assert success["points"] == 20
+    assert success["points_charged"] == 20
     assert success["billing_status"] == "succeeded"
-    assert db.credit_wallet_summary()["available"] == 90
+    assert db.credit_wallet_summary()["available"] == 80
 
     monkeypatch.setattr(
         "app.services.followed_content.search_backend_account_articles",
@@ -757,9 +757,9 @@ def test_followed_article_refresh_charges_once_and_failure_refunds(
     assert failed["points_charged"] == 0
     assert failed["billing_status"] == "failed"
     assert db.credit_wallet_summary() == {
-        "available": 90,
+        "available": 80,
         "reserved": 0,
-        "charged": 10,
+        "charged": 20,
     }
 
 
@@ -786,7 +786,7 @@ def test_refresh_all_checks_total_points_before_calling_any_provider(
         lambda *_args, **_kwargs: calls.append(True) or [],
     )
 
-    with pytest.raises(InsufficientCreditsError, match="需冻结 20 积分"):
+    with pytest.raises(InsufficientCreditsError, match="需冻结 40 积分"):
         service.discover_all()
 
     assert calls == []

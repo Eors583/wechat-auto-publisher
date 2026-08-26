@@ -20,11 +20,13 @@ from app.schema_migrations import (
     BASELINE_SCHEMA,
     COMMERCIAL_POINTS_BILLING,
     DROP_DUPLICATE_INDEXES,
+    FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS,
     PHASE_ONE_COMPAT,
     PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH,
     SHADOW_BILLING_SCHEMA,
     STRICT_TOKEN_METERING,
     apply_commercial_points_billing_schema,
+    apply_followed_article_refresh_twenty_points,
     apply_platform_jizhile_and_followed_refresh,
     apply_shadow_billing_schema,
     apply_strict_token_metering_schema,
@@ -1249,6 +1251,16 @@ class Database:
                 record_schema_migration(
                     conn,
                     PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH,
+                    applied_at=_utc_now(),
+                )
+            if not migration_applied(
+                conn,
+                FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS,
+            ):
+                apply_followed_article_refresh_twenty_points(conn)
+                record_schema_migration(
+                    conn,
+                    FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS,
                     applied_at=_utc_now(),
                 )
 

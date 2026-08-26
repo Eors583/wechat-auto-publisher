@@ -74,6 +74,11 @@ PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH = SchemaMigration(
         "setting and seed a fixed ten-point followed-article refresh task rate"
     ),
 )
+FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS = SchemaMigration(
+    "20260826_0008",
+    "followed_article_refresh_twenty_points",
+    "raise the fixed followed-article refresh task rate and reserve cap to twenty points",
+)
 
 SCHEMA_MIGRATIONS = (
     BASELINE_SCHEMA,
@@ -83,6 +88,7 @@ SCHEMA_MIGRATIONS = (
     STRICT_TOKEN_METERING,
     COMMERCIAL_POINTS_BILLING,
     PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH,
+    FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS,
 )
 
 
@@ -491,6 +497,22 @@ def apply_platform_jizhile_and_followed_refresh(conn: Any) -> None:
     )
 
 
+def apply_followed_article_refresh_twenty_points(conn: Any) -> None:
+    """Raise one followed-account article refresh to twenty points."""
+
+    conn.execute(
+        """
+        UPDATE billing_task_rates
+        SET base_points = 20,
+            max_reserve_points = 20,
+            version = version + 1,
+            updated_at = ?
+        WHERE task_code = 'followed_articles_refresh'
+        """,
+        ("2026-08-26T00:00:00+00:00",),
+    )
+
+
 def ensure_schema_migrations(conn: Any) -> None:
     conn.execute(
         """
@@ -561,6 +583,7 @@ __all__ = [
     "BASELINE_SCHEMA",
     "COMMERCIAL_POINTS_BILLING",
     "DROP_DUPLICATE_INDEXES",
+    "FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS",
     "PHASE_ONE_COMPAT",
     "PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH",
     "SCHEMA_MIGRATIONS",
@@ -568,6 +591,7 @@ __all__ = [
     "STRICT_TOKEN_METERING",
     "SchemaMigration",
     "apply_commercial_points_billing_schema",
+    "apply_followed_article_refresh_twenty_points",
     "apply_platform_jizhile_and_followed_refresh",
     "apply_shadow_billing_schema",
     "apply_strict_token_metering_schema",
