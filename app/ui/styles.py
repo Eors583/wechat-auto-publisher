@@ -1846,7 +1846,8 @@ APP_CSS += """
 .ops-sidebar-profile { width: 100%; min-width: 0; flex-wrap: nowrap; }
 .ops-sidebar-profile-copy { flex: 1 1 auto; overflow: hidden; }
 .ops-sidebar-profile-name,
-.ops-sidebar-profile-meta {
+.ops-sidebar-profile-role,
+.ops-sidebar-profile-credit {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

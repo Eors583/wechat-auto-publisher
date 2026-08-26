@@ -191,17 +191,16 @@ state: AppState | None = None
 ADD_CUSTOM_MODEL_VALUE = "__add_custom_model__"
 
 
-def _sidebar_profile_meta(db: Any, *, page_is_admin: bool) -> str:
-    role_label = "内容运营" if page_is_admin else "运营用户"
+def _sidebar_credit_text(db: Any) -> str:
     wallet_summary = getattr(db, "credit_wallet_summary", None)
     if not callable(wallet_summary):
-        return f"{role_label} · 0 积分"
+        return "0 积分"
     try:
         available = int(wallet_summary().get("available") or 0)
     except Exception:  # noqa: BLE001
         logger.exception("Unable to load sidebar credit balance")
         available = 0
-    return f"{role_label} · {available:,} 积分"
+    return f"{available:,} 积分"
 
 
 def _should_auto_open_onboarding(
@@ -603,12 +602,12 @@ def create_desktop_app() -> None:
                     ui.label(username).classes(
                         "ops-sidebar-profile-name"
                     ).tooltip(username)
-                    profile_meta = ui.label(
-                        _sidebar_profile_meta(
-                            getattr(page_state, "db", None),
-                            page_is_admin=page_is_admin,
-                        )
-                    ).classes("ops-sidebar-profile-meta")
+                    ui.label(
+                        "内容运营" if page_is_admin else "运营用户"
+                    ).classes("ops-sidebar-profile-role")
+                    profile_credit = ui.label(
+                        _sidebar_credit_text(getattr(page_state, "db", None))
+                    ).classes("ops-sidebar-profile-credit")
                 with ui.button(icon="more_horiz").props(
                     "flat round dense aria-label=用户菜单"
                 ):
@@ -625,14 +624,13 @@ def create_desktop_app() -> None:
 
                 async def refresh_sidebar_points() -> None:
                     text = await run.io_bound(
-                        lambda: _sidebar_profile_meta(
-                            getattr(page_state, "db", None),
-                            page_is_admin=page_is_admin,
+                        lambda: _sidebar_credit_text(
+                            getattr(page_state, "db", None)
                         )
                     )
                     if not bool(getattr(owner_client, "is_deleted", False)):
-                        profile_meta.text = text
-                        profile_meta.update()
+                        profile_credit.text = text
+                        profile_credit.update()
 
                 client_timer(
                     5.0,
