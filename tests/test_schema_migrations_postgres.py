@@ -12,7 +12,11 @@ from psycopg import sql
 
 from app.db import _POSTGRES_SCHEMA_INITIALIZED, Database
 from app.db_audit import audit_database
-from app.schema_migrations import PHASE_ONE_COMPAT, SCHEMA_MIGRATIONS
+from app.schema_migrations import (
+    DATABASE_OBJECT_COMMENTS,
+    PHASE_ONE_COMPAT,
+    SCHEMA_MIGRATIONS,
+)
 from app.services.auth import AuthService
 from app.services.jizhile_settings import (
     effective_jizhile_settings,
@@ -227,6 +231,74 @@ def test_followed_article_refresh_upgrade_sets_twenty_point_rate(
     assert rate["base_points"] == 20
     assert rate["max_reserve_points"] == 20
     assert rate["version"] == 2
+
+
+def test_database_comment_upgrade_restores_table_and_column_descriptions(
+    postgres_database_url: str,
+) -> None:
+    Database(postgres_database_url)
+    with psycopg.connect(postgres_database_url) as conn:
+        conn.execute("COMMENT ON TABLE jobs IS NULL")
+        conn.execute("COMMENT ON COLUMN jobs.body IS NULL")
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = %s",
+            (DATABASE_OBJECT_COMMENTS.version,),
+        )
+    _POSTGRES_SCHEMA_INITIALIZED.discard(postgres_database_url)
+
+    Database(postgres_database_url)
+
+    with psycopg.connect(postgres_database_url) as conn:
+        table_comment, column_comment = conn.execute(
+            """
+            SELECT obj_description('jobs'::regclass, 'pg_class'),
+                   col_description(
+                       'jobs'::regclass,
+                       (SELECT attnum FROM pg_attribute
+                        WHERE attrelid = 'jobs'::regclass AND attname = 'body')
+                   )
+            """
+        ).fetchone()
+    assert table_comment == "单个公众号对应的一篇文章生产任务当前态主表"
+    assert column_comment == "文章正文的结构化或 Markdown 内容"
+
+
+def test_fresh_postgres_schema_comments_every_table_and_column(
+    postgres_database_url: str,
+) -> None:
+    Database(postgres_database_url)
+
+    with psycopg.connect(postgres_database_url) as conn:
+        missing_tables = conn.execute(
+            """
+            SELECT class.relname
+            FROM pg_class AS class
+            JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND class.relkind = 'r'
+              AND COALESCE(obj_description(class.oid, 'pg_class'), '') = ''
+            ORDER BY class.relname
+            """
+        ).fetchall()
+        missing_columns = conn.execute(
+            """
+            SELECT class.relname, attribute.attname
+            FROM pg_class AS class
+            JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace
+            JOIN pg_attribute AS attribute ON attribute.attrelid = class.oid
+            WHERE namespace.nspname = 'public'
+              AND class.relkind = 'r'
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+              AND COALESCE(
+                  col_description(class.oid, attribute.attnum), ''
+              ) = ''
+            ORDER BY class.relname, attribute.attnum
+            """
+        ).fetchall()
+
+    assert missing_tables == []
+    assert missing_columns == []
 
 
 def test_fresh_postgres_schema_records_all_versioned_migrations(

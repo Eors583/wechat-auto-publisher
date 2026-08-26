@@ -19,6 +19,7 @@ from app.db_backend import (
 from app.schema_migrations import (
     BASELINE_SCHEMA,
     COMMERCIAL_POINTS_BILLING,
+    DATABASE_OBJECT_COMMENTS,
     DROP_DUPLICATE_INDEXES,
     FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS,
     PHASE_ONE_COMPAT,
@@ -26,6 +27,7 @@ from app.schema_migrations import (
     SHADOW_BILLING_SCHEMA,
     STRICT_TOKEN_METERING,
     apply_commercial_points_billing_schema,
+    apply_database_object_comments,
     apply_followed_article_refresh_twenty_points,
     apply_platform_jizhile_and_followed_refresh,
     apply_shadow_billing_schema,
@@ -1261,6 +1263,14 @@ class Database:
                 record_schema_migration(
                     conn,
                     FOLLOWED_ARTICLE_REFRESH_TWENTY_POINTS,
+                    applied_at=_utc_now(),
+                )
+            if not migration_applied(conn, DATABASE_OBJECT_COMMENTS):
+                if self.backend == "postgresql":
+                    apply_database_object_comments(conn)
+                record_schema_migration(
+                    conn,
+                    DATABASE_OBJECT_COMMENTS,
                     applied_at=_utc_now(),
                 )
 
