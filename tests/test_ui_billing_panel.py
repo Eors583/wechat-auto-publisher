@@ -32,7 +32,20 @@ def test_customer_projection_never_renders_internal_cost_fields() -> None:
     assert "provider_cost_micro_cny" not in source
     assert "retail_cost_micro_cny" not in source
     assert "API Key" in source
-    assert "实际消耗" in source
+    assert '"消耗积分"' in source
+    assert '"文章标题"' in source
+    assert 'format_business_datetime(row.get("created_at"))' in source
+    for removed_label in (
+        "状态",
+        "输入",
+        "输出",
+        "Token 计量",
+        "Credits",
+        "图片",
+        "预计积分",
+        "实际消耗",
+    ):
+        assert f'"{removed_label}"' not in source
     assert 'row.get("charged_points")' in source
 
 

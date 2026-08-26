@@ -146,6 +146,22 @@ def test_article_generation_tokens_are_projected_to_each_review_inbox_job(
     assert batch["generation_token_usage"] == sum(usage.values())
 
 
+def test_usage_list_includes_the_owner_scoped_article_title(tmp_path) -> None:
+    _root, db, _user_id = _scoped_db(tmp_path)
+    job_id = db.create_job(topic="任务主题")
+    db.update_job(job_id, raw_title="原始标题", selected_title="最终文章标题")
+
+    with BillingService(db).operation(
+        scene="article_generation",
+        subject_type="job",
+        subject_id=str(job_id),
+        job_id=job_id,
+    ):
+        pass
+
+    assert BillingService(db).list_usage()[0]["article_title"] == "最终文章标题"
+
+
 def test_article_usage_never_presents_partial_or_manus_usage_as_total_tokens(
     tmp_path,
 ) -> None:

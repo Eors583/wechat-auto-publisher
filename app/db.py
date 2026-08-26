@@ -7331,6 +7331,12 @@ class Database:
                 """
                 SELECT o.id, o.scene, o.source_channel, o.subject_type,
                        o.subject_id, o.status, o.mode, o.job_id,
+                       COALESCE(
+                           NULLIF(j.selected_title, ''),
+                           NULLIF(j.raw_title, ''),
+                           NULLIF(j.topic, ''),
+                           ''
+                       ) AS article_title,
                        o.task_code, o.task_base_points, o.resource_points,
                        o.estimated_points, o.reserved_points, o.charged_points,
                        o.pricing_snapshot_json,
@@ -7377,9 +7383,13 @@ class Database:
                        ), 0) AS price_missing_events
                 FROM usage_operations AS o
                 LEFT JOIN ai_usage_events AS e ON e.operation_id = o.id
+                LEFT JOIN jobs AS j
+                  ON j.id = o.job_id
+                 AND j.owner_user_id = o.owner_user_id
                 WHERE o.owner_user_id = ?
                 GROUP BY o.id, o.scene, o.source_channel, o.subject_type,
                          o.subject_id, o.status, o.mode, o.job_id,
+                         j.selected_title, j.raw_title, j.topic,
                          o.task_code, o.task_base_points, o.resource_points,
                          o.estimated_points, o.reserved_points, o.charged_points,
                          o.pricing_snapshot_json,

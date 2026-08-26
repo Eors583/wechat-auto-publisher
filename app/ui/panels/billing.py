@@ -9,6 +9,7 @@ from app.services.billing import (
     BillingService,
     live_configuration_issues,
 )
+from app.time_utils import format_business_datetime
 
 _SCENE_LABELS = {
     "article_generation": "文章生成",
@@ -58,43 +59,16 @@ def build_billing_panel(state: Any) -> None:
     columns = [
         {"name": "created_at", "label": "时间", "field": "created_at", "align": "left"},
         {"name": "scene_label", "label": "功能", "field": "scene_label", "align": "left"},
-        {"name": "status_label", "label": "状态", "field": "status_label", "align": "left"},
-        {"name": "input_tokens", "label": "输入", "field": "input_tokens", "align": "right"},
-        {"name": "output_tokens", "label": "输出", "field": "output_tokens", "align": "right"},
-        {"name": "metering", "label": "Token 计量", "field": "metering", "align": "left"},
-        {"name": "provider_credits", "label": "Credits", "field": "provider_credits", "align": "right"},
-        {"name": "image_count", "label": "图片", "field": "image_count", "align": "right"},
-        {"name": "estimated_points", "label": "预计积分", "field": "estimated_points", "align": "right"},
-        {"name": "charged_points", "label": "实际消耗", "field": "charged_points", "align": "right"},
+        {"name": "charged_points", "label": "消耗积分", "field": "charged_points", "align": "right"},
+        {"name": "article_title", "label": "文章标题", "field": "article_title", "align": "left"},
     ]
     public_rows = [
         {
-            **row,
+            "id": row.get("id"),
+            "created_at": format_business_datetime(row.get("created_at")),
             "scene_label": _SCENE_LABELS.get(str(row.get("scene") or ""), str(row.get("scene") or "未知操作")),
-            "status_label": {
-                "succeeded": "完成",
-                "failed": "失败，未扣积分",
-                "pricing_incomplete": "计价待核对，未扣积分",
-                "rejected": "积分不足或配置未完成",
-                "expired": "冻结已退回",
-                "running": "进行中",
-            }.get(str(row.get("status") or ""), "进行中"),
-            "input_tokens": _integer(row.get("input_tokens")),
-            "output_tokens": _integer(row.get("output_tokens")),
-            "metering": (
-                f"实际 {int(row.get('metered_calls') or 0)} 次"
-                if not int(row.get("unavailable_calls") or 0)
-                and not int(row.get("estimated_calls") or 0)
-                else (
-                    f"缺失 {int(row.get('unavailable_calls') or 0)} 次"
-                    if int(row.get("unavailable_calls") or 0)
-                    else f"估算 {int(row.get('estimated_calls') or 0)} 次"
-                )
-            ),
-            "provider_credits": _integer(row.get("provider_credits")),
-            "image_count": _integer(row.get("image_count")),
-            "estimated_points": _integer(row.get("estimated_points")),
             "charged_points": _integer(row.get("charged_points")),
+            "article_title": str(row.get("article_title") or "—"),
         }
         for row in rows
     ]
