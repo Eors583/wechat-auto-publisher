@@ -195,6 +195,22 @@ def test_review_page_contains_long_content_and_exposes_failure_reason() -> None:
     assert "overflow-y: auto" in APP_CSS
 
 
+def test_ai_review_panel_only_appears_in_final_preview() -> None:
+    source = inspect.getsource(tasks.build_review_page)
+
+    assert 'as review_layout' in source
+    assert 'as review_side' in source
+    assert 'event.value == "成品预览"' in source
+    assert "review_side.set_visibility(show_ai_review)" in source
+    assert 'remove="ops-review-layout--single" if show_ai_review else None' in source
+    assert 'add=None if show_ai_review else "ops-review-layout--single"' in source
+    assert (
+        ".ops-review-layout.ops-review-layout--single { "
+        "grid-template-columns: minmax(0, 1fr); }"
+        in APP_CSS
+    )
+
+
 def test_candidate_comparison_replaces_dialog_and_review_conclusion() -> None:
     source = inspect.getsource(tasks.build_review_page)
 

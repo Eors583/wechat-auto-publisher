@@ -2089,7 +2089,7 @@ def build_review_page(
         assets_tab = ui.tab("标题与图片")
         history_tab = ui.tab("历史版本")
 
-    with ui.element("div").classes("ops-review-layout"):
+    with ui.element("div").classes("ops-review-layout") as review_layout:
         with ui.element("article").classes("ops-panel ops-review-document"):
             review_panels = ui.tab_panels(
                 review_tabs,
@@ -2391,7 +2391,7 @@ def build_review_page(
                                 on_click=restore_page_version,
                             ).props("outline dense color=primary no-caps")
 
-        with ui.element("aside").classes("ops-review-side"):
+        with ui.element("aside").classes("ops-review-side") as review_side:
             with ui.element("section").classes(
                 "ops-panel ops-review-ai-panel ops-review-merged-panel"
             ) as review_panel:
@@ -2979,6 +2979,18 @@ def build_review_page(
                             ).classes("w-full").props(
                                 "outline color=primary no-caps"
                             )
+
+    def sync_review_mode(event: Any) -> None:
+        show_ai_review = event.value == "成品预览"
+        review_side.set_visibility(show_ai_review)
+        review_layout.classes(
+            remove="ops-review-layout--single" if show_ai_review else None,
+            add=None if show_ai_review else "ops-review-layout--single",
+        )
+
+    review_tabs.on_value_change(sync_review_mode)
+
+
 def open_review_workbench(
     state: AppState,
     service: BatchService,

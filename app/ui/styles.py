@@ -3268,6 +3268,7 @@ APP_CSS += """
   font-weight: var(--ui-font-weight-regular) !important;
 }
 .ops-review-layout { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(260px, .75fr); gap: var(--ui-review-gap); min-height: 0; height: 100%; overflow: hidden; }
+.ops-review-layout.ops-review-layout--single { grid-template-columns: minmax(0, 1fr); }
 .ops-review-document,
 .ops-review-side { min-height: 0; height: 100%; overflow: hidden; }
 .ops-review-document-panels,
