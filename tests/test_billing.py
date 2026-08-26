@@ -141,6 +141,9 @@ def test_article_generation_tokens_are_projected_to_each_review_inbox_job(
     assert inbox_usage == usage
     batches = batch_service.list_batches()
     assert batches[0]["generation_token_usage"] == sum(usage.values())
+    batch = batch_service.get_batch("batch-token-usage")
+    assert batch["generation_usage"] == batches[0]["generation_usage"]
+    assert batch["generation_token_usage"] == sum(usage.values())
 
 
 def test_article_usage_never_presents_partial_or_manus_usage_as_total_tokens(

@@ -639,7 +639,8 @@ class BatchService:
         batch = self.db.get_batch(batch_id)
         if not batch:
             raise KeyError(f"批次不存在：{batch_id}")
-        return self._public_batch(batch, include_content=include_content)
+        public_batch = self._public_batch(batch, include_content=include_content)
+        return self._attach_generation_usage([public_batch])[0]
 
     def _public_batch(
         self,
@@ -678,6 +679,12 @@ class BatchService:
                 include_archived=include_archived,
             )
         ]
+        return self._attach_generation_usage(batches)
+
+    def _attach_generation_usage(
+        self,
+        batches: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         job_ids = [
             int(job["id"])
             for batch in batches
