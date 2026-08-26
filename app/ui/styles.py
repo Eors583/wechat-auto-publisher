@@ -1117,7 +1117,6 @@ body,
 }
 
 .ops-sidebar-brand-copy,
-.ops-sidebar-health-copy,
 .ops-sidebar-profile-copy {
   min-width: 0;
   gap: 0 !important;
@@ -1198,7 +1197,6 @@ body,
   background: var(--ui-color-surface);
 }
 
-.ops-sidebar-health,
 .ops-sidebar-profile,
 .ops-safe-mode,
 .ops-activity-dock-heading,
@@ -1208,16 +1206,6 @@ body,
   margin: 0;
 }
 
-.ops-sidebar-health {
-  gap: var(--ui-space-2);
-  padding: var(--ui-space-2) var(--ui-space-3);
-  color: var(--ui-color-success);
-  border: 1px solid var(--ui-color-info-border);
-  border-radius: var(--ui-radius-md);
-  background: var(--ui-color-brand-soft);
-}
-.ops-sidebar-health-copy > :first-child { font-weight: var(--ui-font-weight-medium); }
-.ops-sidebar-health-copy > :last-child,
 .ops-sidebar-profile-copy > :last-child {
   color: var(--ui-color-text-sidebar-muted);
   font-size: var(--ui-font-size-xs);
@@ -1704,9 +1692,7 @@ body,
   .ops-sidebar-footer { width: var(--ui-layout-sidebar-compact) !important; }
   .ops-sidebar-brand { justify-content: center; padding: 0; }
   .ops-sidebar-brand-copy,
-  .ops-sidebar-health-copy,
-  .ops-sidebar-profile-copy,
-  .ops-sidebar-health { display: none !important; }
+  .ops-sidebar-profile-copy { display: none !important; }
   .ops-main-nav { padding-inline: var(--ui-space-2) !important; }
   .ops-main-nav .q-tab { justify-content: center; padding-inline: var(--ui-space-2) !important; }
   .ops-main-nav .q-tab .q-tab__content { justify-content: center; }
@@ -1733,8 +1719,7 @@ body,
   .ops-sidebar-brand { min-height: 58px; height: 58px; }
   .ops-topbar { flex: 0 0 58px; }
   .ops-main-nav { top: 58px; bottom: 58px; padding-block: var(--ui-space-3) !important; }
-  .ops-sidebar-footer { min-height: 58px; }
-  .ops-sidebar-health { display: none !important; }
+  .ops-sidebar-footer { min-height: 0; }
   .ops-topbar { flex-basis: 58px; padding-block: var(--ui-space-2); }
   .ops-main-panels > .q-panel-parent > .q-panel > .q-tab-panel { padding-block: var(--ui-space-3) !important; }
 }
@@ -1745,6 +1730,7 @@ APP_CSS += """
 /* Approved operations workbench visual contract -------------------------- */
 .ops-visually-hidden,
 .ops-hidden-control,
+.ops-feishu-route-tab,
 .ops-review-route-tab {
   display: none !important;
 }
@@ -1799,7 +1785,7 @@ APP_CSS += """
 
 .ops-main-nav {
   top: var(--ui-layout-topbar-height);
-  bottom: 182px;
+  bottom: 84px;
   padding: var(--ui-space-5) var(--ui-space-4) !important;
 }
 .ops-main-nav .q-tabs__content::before {
@@ -1832,17 +1818,12 @@ APP_CSS += """
   left: var(--ui-space-4);
   gap: var(--ui-space-3);
   width: calc(var(--ui-layout-sidebar-width) - 32px);
-  min-height: 148px;
-  height: 148px;
+  min-height: 0;
+  height: auto;
   padding: 0;
   border: 0;
   background: transparent;
 }
-.ops-sidebar-health {
-  display: block !important;
-  padding: var(--ui-space-3);
-}
-.ops-sidebar-health-copy > :last-child { margin-top: var(--ui-space-1); }
 .ops-sidebar-profile { width: 100%; min-width: 0; flex-wrap: nowrap; }
 .ops-sidebar-profile-copy { flex: 1 1 auto; overflow: hidden; }
 .ops-sidebar-profile-name,
@@ -3478,7 +3459,6 @@ APP_CSS += """
   .ops-workbench-shell { padding-left: var(--ui-layout-sidebar-width) !important; }
   .ops-main-nav { top: 58px; bottom: 58px; padding-block: 14px !important; }
   .ops-sidebar-footer { min-height: 58px; }
-  .ops-sidebar-health { display: none !important; }
   .ops-main-panels .q-tab-panel.ops-page { padding: 11px 16px 13px !important; }
   .ops-page-description { display: none; }
   .ops-panel-heading { min-height: 56px; padding: 10px 13px; }
@@ -3503,7 +3483,6 @@ APP_CSS += """
   .ops-main-nav .q-tabs__content::before,
   .ops-main-nav .q-tab__label,
   .ops-main-nav .q-tab--active::after,
-  .ops-sidebar-health,
   .ops-sidebar-profile-copy,
   .ops-sidebar-profile > .q-btn { display: none !important; }
   .ops-main-nav { padding-inline: 10px !important; }

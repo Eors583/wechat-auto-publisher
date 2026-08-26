@@ -291,7 +291,7 @@ def test_every_authenticated_user_has_a_real_feishu_settings_entry() -> None:
     source = inspect.getsource(desktop.create_desktop_app)
 
     assert 'tab_feishu = ui.tab("飞书机器人", icon="forum")' in source
-    assert 'aria-label="飞书机器人" title="飞书机器人"' in source
+    assert '"ops-feishu-route-tab"' in source
     assert '"我的飞书机器人"' in source
     assert "on_click=lambda: tabs.set_value(tab_feishu)" in source
     assert "def mount_feishu() -> None:" in source

@@ -18,9 +18,13 @@ def test_confirmed_four_entry_information_architecture_and_review_route() -> Non
     for label in ("创作台", "选题雷达", "任务队列", "公众号"):
         assert f'ui.tab("{label}"' in source
     assert 'ui.tab("文章审核", icon="rate_review").classes(' in source
+    assert 'ui.tab("飞书机器人", icon="forum").classes(' in source
+    assert '"ops-feishu-route-tab"' in source
     assert '"ops-review-route-tab"' in source
     route_css = APP_CSS[APP_CSS.index(".ops-review-route-tab") :]
     assert "display: none !important" in route_css[:300]
+    assert "系统就绪" not in source
+    assert "公众号配置与后台任务可用" not in source
     for icon in (
         "auto_awesome",
         "radar",

@@ -576,8 +576,8 @@ def create_desktop_app() -> None:
             tab_accounts = ui.tab("公众号", icon="campaign").props(
                 'aria-label="公众号" title="公众号"'
             )
-            tab_feishu = ui.tab("飞书机器人", icon="forum").props(
-                'aria-label="飞书机器人" title="飞书机器人"'
+            tab_feishu = ui.tab("飞书机器人", icon="forum").classes(
+                "ops-feishu-route-tab"
             )
             tab_billing = ui.tab("积分与用量", icon="toll").props(
                 'aria-label="积分与用量" title="积分与用量"'
@@ -587,10 +587,6 @@ def create_desktop_app() -> None:
             )
 
         with ui.element("div").classes("ops-sidebar-footer"):
-            with ui.row().classes("ops-sidebar-health"):
-                with ui.column().classes("ops-sidebar-health-copy"):
-                    ui.label("系统就绪")
-                    ui.label("公众号配置与后台任务可用")
             with ui.row().classes("ops-sidebar-profile"):
                 username = str(page_state.current_user["username"])
                 ui.avatar(
