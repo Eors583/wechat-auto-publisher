@@ -35,7 +35,8 @@ def test_desktop_only_mounts_the_initial_workspace_on_first_paint() -> None:
 def test_inactive_workspaces_are_mounted_from_tab_changes() -> None:
     source = DESKTOP.read_text(encoding="utf-8")
 
-    assert "tabs.on_value_change(lambda event: schedule_tab(event.value))" in source
+    assert "tabs.on_value_change(on_tab_change)" in source
+    assert "schedule_tab(selected_tab)" in source
     assert "scheduled_tabs.add(tab_name)" in source
     assert "page_loading_overlay.set_visibility(True)" in source
     assert "page_loading_overlay.set_visibility(False)" in source

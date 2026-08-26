@@ -2092,17 +2092,10 @@ APP_CSS += """
 /* Create page */
 .wizard-layout {
   display: grid !important;
-  grid-template-areas:
-    "heading heading"
-    ". ."
-    "metrics metrics"
-    ". ."
-    "workflow priority"
-    ". ."
-    "recent recent";
-  grid-template-columns: minmax(0, 1.55fr) minmax(270px, .85fr);
-  grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) 12px 164px;
-  gap: 0 var(--ui-layout-page-gap) !important;
+  grid-template-areas: "workflow";
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0 !important;
   align-items: stretch !important;
   align-content: stretch;
 }
@@ -3488,20 +3481,6 @@ APP_CSS += """
   .ops-sidebar-health { display: none !important; }
   .ops-main-panels .q-tab-panel.ops-page { padding: 11px 16px 13px !important; }
   .ops-page-description { display: none; }
-  .wizard-layout {
-    grid-template-areas:
-      "heading heading"
-      ". ."
-      "metrics metrics"
-      ". ."
-      "workflow priority";
-    grid-template-rows: 60px 9px 64px 9px minmax(0, 1fr);
-    gap: 0 9px !important;
-  }
-  .ops-metric-grid { height: 64px; max-height: 64px; }
-  .ops-metric-item { min-height: 64px; padding: 9px 10px; }
-  .ops-metric-hint { display: none; }
-  .ops-recent-panel { display: none; }
   .ops-panel-heading { min-height: 56px; padding: 10px 13px; }
   .ops-panel-subtitle { display: none; }
   .ops-create-form-body { padding: 10px 11px; }
@@ -3530,24 +3509,8 @@ APP_CSS += """
   .ops-main-nav { padding-inline: 10px !important; }
   .ops-main-nav .q-tab { justify-content: center; padding-inline: var(--ui-space-2) !important; }
   .ops-sidebar-profile { justify-content: center; }
-  .ops-metric-icon { width: 32px; height: 32px; border-radius: 9px; }
-  .ops-metric-item { grid-template-columns: 32px minmax(0, 1fr); gap: 7px; }
-  .ops-metric-hint { display: none; }
-  .ops-create-priority-panel { display: none; }
   .ops-queue-workspace { grid-template-columns: minmax(0, 1fr); }
   .ops-flow-panel { display: none; }
-  .wizard-layout {
-    grid-template-areas:
-      "heading"
-      "."
-      "metrics"
-      "."
-      "workflow"
-      "."
-      "recent";
-    grid-template-columns: 1fr;
-    grid-template-rows: 83px 12px 104px 12px minmax(0, 1fr) 12px 164px;
-  }
   .ops-task-row-card { grid-template-columns: 38px minmax(0, 1fr) minmax(90px, auto) auto !important; }
   .ops-batch-row-card { grid-template-columns: 38px minmax(0, 1fr) minmax(110px, auto) auto !important; }
   .ops-task-row-state,

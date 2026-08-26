@@ -71,7 +71,6 @@ from app.ui.panels.onboarding_wizard import (
     configuration_health_needs_refresh,
     should_show_onboarding,
 )
-from app.ui.panels.overview import build_overview_cards
 from app.ui.panels.prompts import build_prompt_templates_panel
 from app.ui.panels.review_jury import enabled_profile_options
 from app.ui.panels.settings_hub import (
@@ -418,7 +417,7 @@ def create_desktop_app() -> None:
                 ui.label("蓝血内容台")
                 ui.label("Content OS")
 
-        with ui.element("header").classes("hero ops-topbar"):
+        with ui.element("header").classes("hero ops-topbar") as topbar:
             with ui.column().classes("gap-0"):
                 ui.label("公众号运营空间").classes("ops-topbar-title")
                 now = datetime.now()
@@ -653,6 +652,7 @@ def create_desktop_app() -> None:
             if open_requested_config or open_requested_admin
             else tab_wizard
         )
+        topbar.set_visibility(initial_tab is not tab_wizard)
         panels = ui.tab_panels(
             tabs,
             value=initial_tab,
@@ -721,22 +721,9 @@ def create_desktop_app() -> None:
                 if action is not None:
                     action()
 
-        def _render_safe_mode_status() -> None:
-            with ui.row().classes("ops-inline-status"):
-                ui.icon("verified_user", size="17px").classes(
-                    "ops-semantic-icon"
-                )
-                ui.label("安全模式：只写草稿，不自动群发")
-
         def mount_wizard() -> None:
             wizard_host.clear()
             with wizard_host:
-                render_page_heading(
-                    "TODAY'S PRODUCTION",
-                    "今天准备做什么内容？",
-                    "从素材到草稿，每一步都能看见、暂停和恢复。",
-                    action=lambda: _render_safe_mode_status(),
-                )
                 _build_wizard(tabs, tab_topics, tab_jobs, state=page_state)
 
         def mount_topics() -> None:
@@ -917,8 +904,18 @@ def create_desktop_app() -> None:
 
         # Only the requested panel contributes elements to the initial
         # NiceGUI payload. Hidden workspaces are built on their first visit.
+        def on_tab_change(event: Any) -> None:
+            selected_tab = event.value
+            selected_name = str(
+                selected_tab.props["name"]
+                if hasattr(selected_tab, "props")
+                else selected_tab
+            )
+            topbar.set_visibility(selected_name != str(tab_wizard.props["name"]))
+            schedule_tab(selected_tab)
+
         mount_tab(initial_tab)
-        tabs.on_value_change(lambda event: schedule_tab(event.value))
+        tabs.on_value_change(on_tab_change)
 
 
 def _build_wizard(
@@ -980,11 +977,6 @@ def _build_wizard(
                     "status_filter": requested_status,
                 }
         tabs.set_value(tab_jobs)
-
-    build_overview_cards(
-        state,
-        on_go_tasks=open_task_center,
-    )
 
     with ui.element("div").classes("topic-card ops-hidden-create-topic-card"):
         ui.html(step_title_html(1, "选择本次内容"), sanitize=False)
@@ -2506,145 +2498,6 @@ def _build_wizard(
         background_btn.on_click(open_background_generation)
 
     account_section.move(workflow_panel)
-
-    _render_creation_priority_and_recent(
-        state,
-        tabs=tabs,
-        tab_jobs=tab_jobs,
-        on_open_tasks=open_task_center,
-    )
-
-
-def _render_creation_priority_and_recent(
-    state: AppState,
-    *,
-    tabs: Any,
-    tab_jobs: Any,
-    on_open_tasks: Callable[[str, bool], Any],
-) -> None:
-    """Render the approved right-side priorities and three recent tasks."""
-
-    service = BatchService(
-        load_config(),
-        owner_user_id=str(getattr(state, "current_user_id", "") or ""),
-        recover_stale_work=False,
-    )
-    try:
-        batches = list(service.list_batches(limit=20))
-        inbox_counts = dict(
-            service.list_review_inbox(bucket="review", limit=1).get("counts")
-            or {}
-        )
-    except Exception:  # noqa: BLE001
-        batches = []
-        inbox_counts = {}
-
-    def go_tasks(status: str = "") -> None:
-        on_open_tasks(status, False)
-        tabs.set_value(tab_jobs)
-
-    pending_review = int(inbox_counts.get("review") or 0)
-    ready_for_draft = int(inbox_counts.get("ready_for_draft") or 0)
-    failed = int(inbox_counts.get("write_failed") or 0) + int(
-        inbox_counts.get("generation_failed") or 0
-    )
-
-    with ui.element("aside").classes("ops-panel ops-create-priority-panel"):
-        with ui.element("div").classes("ops-panel-heading"):
-            with ui.column().classes("gap-0"):
-                ui.label("今天先处理这些").classes("ops-panel-title")
-                ui.label("按运营优先级排序").classes("ops-panel-subtitle")
-            ui.badge(f"{pending_review + ready_for_draft + failed} 项").classes(
-                "ops-badge ops-badge-warm"
-            )
-        with ui.element("div").classes("ops-panel-body ops-priority-body"):
-            for number, title, detail, action, status in (
-                (
-                    "01",
-                    "审核待确认文章",
-                    f"当前有 {pending_review} 篇等待人工审核",
-                    "继续",
-                    "ready_for_review",
-                ),
-                (
-                    "02",
-                    "确认草稿写入",
-                    f"{ready_for_draft} 篇文章已可进入草稿",
-                    "查看",
-                    "ready_for_draft",
-                ),
-                (
-                    "03",
-                    "恢复失败任务",
-                    f"{failed} 项可从失败阶段恢复",
-                    "修复",
-                    "failed",
-                ),
-            ):
-                with ui.element("div").classes("ops-priority-row"):
-                    ui.label(number).classes("ops-priority-number")
-                    with ui.column().classes("ops-flex-copy gap-0"):
-                        ui.label(title).classes("ops-priority-title")
-                        ui.label(detail).classes("ops-priority-detail")
-                    ui.button(
-                        action,
-                        on_click=lambda _=None, value=status: go_tasks(value),
-                    ).props("flat dense no-caps color=primary")
-            with ui.element("div").classes("ops-tip"):
-                ui.icon("lightbulb", size="17px").classes("ops-semantic-icon")
-                ui.label(
-                    "先完成有阻断项的审核，再统一写入草稿，能减少来回切换。"
-                )
-
-    with ui.element("section").classes("ops-panel ops-recent-panel"):
-        with ui.element("div").classes("ops-panel-heading"):
-            with ui.column().classes("gap-0"):
-                ui.label("最近任务").classes("ops-panel-title")
-                ui.label("继续处理今天正在流转的内容").classes(
-                    "ops-panel-subtitle"
-                )
-            ui.button("查看全部", on_click=go_tasks).props(
-                "flat dense no-caps color=primary"
-            )
-        with ui.element("div").classes("ops-panel-body ops-recent-grid"):
-            recent_items: list[tuple[str, str, str, str]] = []
-            for batch in batches:
-                jobs = list(batch.get("jobs") or [])
-                title = str(
-                    next(
-                        (
-                            job.get("selected_title")
-                            for job in jobs
-                            if job.get("selected_title")
-                        ),
-                        batch.get("topic") or "未命名内容任务",
-                    )
-                )
-                progress = dict(batch.get("progress") or {})
-                status = str(batch.get("status") or "")
-                if int(progress.get("failed") or 0):
-                    icon, tone, detail = "broken_image", "orange", "任务失败 · 可原地恢复"
-                elif int(progress.get("ready_for_draft") or 0):
-                    icon, tone, detail = "task_alt", "green", "已确认 · 等待写入草稿"
-                elif status in {"pending", "processing", "injecting"}:
-                    icon, tone, detail = "sync", "blue", "后台运行中 · 可查看进度"
-                else:
-                    icon, tone, detail = "description", "purple", "等待下一步处理"
-                recent_items.append((title, detail, icon, tone))
-                if len(recent_items) == 3:
-                    break
-            if not recent_items:
-                recent_items.append(("暂无最近任务", "创建任务后会显示在这里", "description", "blue"))
-            for title, detail, icon, tone in recent_items:
-                with ui.element("article").classes(
-                    f"ops-recent-item ops-recent-{tone}"
-                ):
-                    with ui.element("span").classes("ops-recent-icon"):
-                        ui.icon(icon, size="18px").classes("ops-semantic-icon")
-                    with ui.column().classes("ops-flex-copy gap-0"):
-                        ui.label(title).classes("ops-recent-title")
-                        ui.label(detail).classes("ops-recent-detail")
-
 
 def _build_accounts_panel(
     state: AppState | None = None,

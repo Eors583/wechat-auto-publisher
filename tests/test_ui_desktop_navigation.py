@@ -218,20 +218,9 @@ def test_generation_can_move_to_the_background_task_center() -> None:
 def test_workbench_contains_compact_entry_points_without_legacy_topic_toggle(
     monkeypatch: Any,
 ) -> None:
-    overview_calls: list[object] = []
-
-    def fake_overview(
-        state: Any,
-        *,
-        on_go_tasks: Any,
-    ) -> None:
-        overview_calls.append((state, on_go_tasks))
-        ui.label("今日运营概览")
-
     monkeypatch.setattr(desktop, "state", _FakeState())
     monkeypatch.setattr(desktop.ui, "refreshable", _synchronous_refreshable)
     monkeypatch.setattr(desktop.ui, "timer", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(desktop, "build_overview_cards", fake_overview)
 
     try:
         desktop._build_wizard(_FakeTabs(), object(), object())
@@ -259,8 +248,8 @@ def test_workbench_contains_compact_entry_points_without_legacy_topic_toggle(
         }
     ]
 
-    assert overview_calls
-    assert "今日运营概览" in texts
+    assert "今天先处理这些" not in texts
+    assert "最近任务" not in texts
     assert "从选题库选择" in texts
     assert "文章主题（可选）" in field_labels
     assert len(legacy_topic_toggles) == 1

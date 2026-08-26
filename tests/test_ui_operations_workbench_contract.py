@@ -473,11 +473,18 @@ def test_account_and_creation_directories_show_every_account_with_inner_scroll()
 
 def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> None:
     source = inspect.getsource(desktop._build_wizard)
+    app_source = inspect.getsource(desktop.create_desktop_app)
     assert '"ops-panel ops-create-workflow-panel"' in source
     assert "source_section.move(workflow_panel)" in source
     assert "account_section.move(workflow_panel)" in source
+    assert "build_overview_cards" not in source
+    assert "今天先处理这些" not in source
+    assert "最近任务" not in source
+    assert "今天准备做什么内容" not in app_source
+    assert "topbar.set_visibility" in app_source
 
-    assert '"workflow priority"' in APP_CSS
+    assert 'grid-template-areas: "workflow"' in APP_CSS
+    assert '"workflow priority"' not in APP_CSS
     assert '"source priority"' not in APP_CSS
     assert '"account priority"' not in APP_CSS
     assert "margin: 295px 0 0 !important" not in APP_CSS
