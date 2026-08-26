@@ -2227,7 +2227,6 @@ APP_CSS += """
 }
 .ops-compact-hint { display: none; }
 .source-mode-toggle.ops-segment,
-.ops-task-segment,
 .ops-topic-view-segment,
 .ops-config-tabs,
 .ops-review-mode-tabs {
@@ -2270,7 +2269,6 @@ APP_CSS += """
   background: var(--ui-color-surface) !important;
 }
 .ops-workbench-shell .source-mode-toggle.ops-segment .q-btn.bg-primary.text-white[aria-pressed="true"],
-.ops-workbench-shell .ops-task-segment.ops-segment .q-btn.bg-primary.text-white[aria-pressed="true"],
 .ops-workbench-shell .ops-config-tabs.ops-segment .q-btn.bg-primary.text-white[aria-pressed="true"] {
   border-color: transparent !important;
   color: var(--ui-color-text-primary) !important;
@@ -2278,7 +2276,6 @@ APP_CSS += """
   background-color: var(--ui-color-surface) !important;
 }
 .ops-workbench-shell .source-mode-toggle.ops-segment.q-btn-toggle,
-.ops-workbench-shell .ops-task-segment.ops-segment.q-btn-toggle,
 .ops-workbench-shell .ops-topic-view-segment.ops-segment.q-btn-toggle,
 .ops-workbench-shell .ops-config-tabs.ops-segment.q-btn-toggle {
   border-radius: var(--ui-radius-sm) !important;
@@ -2816,7 +2813,7 @@ APP_CSS += """
 /* Task queue */
 .ops-tasks-page .ops-page-host {
   display: grid !important;
-  grid-template-rows: 79px var(--ui-segment-height) var(--ui-control-height-button) minmax(0, 1fr);
+  grid-template-rows: 79px var(--ui-control-height-button) minmax(0, 1fr);
   gap: var(--ui-layout-page-gap) !important;
 }
 .ops-task-page-actions {
@@ -2825,7 +2822,6 @@ APP_CSS += """
   top: 28px;
   right: 0;
 }
-.ops-task-segment { grid-template-columns: minmax(0, 1fr); }
 .ops-toolbar { display: flex; align-items: center; gap: 9px; }
 .ops-task-toolbar {
   display: grid;

@@ -97,8 +97,8 @@ def test_final_confirmation_focuses_batch_in_the_unified_queue() -> None:
     panel_source = inspect.getsource(tasks.build_tasks_panel)
     review_source = inspect.getsource(tasks.build_review_page)
     workbench_source = inspect.getsource(tasks.open_review_workbench)
-    assert 'queue_segment.value = "batches"' in panel_source
     assert 'status_in.value = ""' in panel_source
+    assert "queue_segment" not in panel_source
     assert "_show_confirmed_batch_in_draft_queue(" in review_source
     assert "_show_confirmed_batch_in_draft_queue(" in workbench_source
 
@@ -107,8 +107,8 @@ def test_task_center_does_not_reference_removed_refresh_button() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
 
     assert "refresh_btn" not in source
-    assert 'view_in.value = "batches"' in source
-    assert 'queue_segment.value = "batches"' in source
+    assert "view_in" not in source
+    assert "queue_segment" not in source
     assert 'runtime["inbox_bucket"]' not in source
 
 

@@ -367,10 +367,6 @@ def build_tasks_panel(
 
     account_options = load_account_options()
     initial_status = str(initial_status_filter or "")
-    view_in = ui.toggle(
-        {"batches": "全部批次"},
-        value="batches",
-    ).classes("ops-hidden-control")
     status_in = ui.select(
             options={
                 "": "全部状态",
@@ -397,12 +393,6 @@ def build_tasks_panel(
             "查看归档",
             icon="archive",
         ).props("outline dense color=primary no-caps")
-    queue_segment = ui.toggle(
-        {"batches": "全部批次"},
-        value="batches",
-    ).classes("ops-segment ops-task-segment").props(
-        "no-caps unelevated toggle-color=white toggle-text-color=dark"
-    )
     with ui.row().classes("ops-toolbar ops-task-toolbar"):
         search_in = ui.input(
             placeholder="搜索标题、公众号或批次号"
@@ -699,7 +689,6 @@ def build_tasks_panel(
         runtime["completion_batch_id"] = ""
         runtime["focus_batch_id"] = str(batch_id)
         runtime["visible_limit"] = TASK_BATCH_PAGE_SIZE
-        view_in.value = "batches"
         status_in.set_visibility(True)
         batch_only_filters.set_visibility(True)
         render()
@@ -711,7 +700,7 @@ def build_tasks_panel(
         queue_title_label.set_text("已归档批次" if archived_only else "全部批次")
         completion_batch_id = str(runtime.get("completion_batch_id") or "")
         if completion_batch_id:
-            for control in (view_in, search_in, account_in):
+            for control in (search_in, account_in):
                 control.set_visibility(False)
             status_in.set_visibility(False)
             batch_only_filters.set_visibility(False)
@@ -793,7 +782,7 @@ def build_tasks_panel(
                         auto_expand=True,
                     )
                 return
-        for control in (view_in, search_in, account_in):
+        for control in (search_in, account_in):
             control.set_visibility(True)
         status_in.set_visibility(True)
         batch_only_filters.set_visibility(True)
@@ -877,8 +866,6 @@ def build_tasks_panel(
         account_in.value = ""
         archived_in.value = False
         runtime["visible_limit"] = TASK_BATCH_PAGE_SIZE
-        view_in.value = "batches"
-        queue_segment.value = "batches"
         if batch_id:
             status_in.value = ""
             today_only.value = False
@@ -904,8 +891,6 @@ def build_tasks_panel(
         runtime["completion_batch_id"] = ""
         runtime["syncing_controls"] = True
         try:
-            view_in.value = "batches"
-            queue_segment.value = "batches"
             status_in.value = "active"
             archived_in.value = False
             today_only.value = False
@@ -922,8 +907,6 @@ def build_tasks_panel(
         show_archived = not bool(archived_in.value)
         runtime["syncing_controls"] = True
         try:
-            view_in.value = "batches"
-            queue_segment.value = "batches"
             status_in.value = ""
             archived_in.value = show_archived
             today_only.value = False

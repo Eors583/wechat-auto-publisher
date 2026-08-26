@@ -324,11 +324,19 @@ def test_legacy_service_fallback_projects_all_inbox_buckets() -> None:
     assert account_filtered["counts"]["generation_failed"] == 0
 
 
-def test_task_center_uses_one_all_batches_queue() -> None:
+def test_task_center_uses_one_all_batches_list_without_a_redundant_selector() -> None:
     source = inspect.getsource(tasks.build_tasks_panel)
+    task_page_css = APP_CSS[APP_CSS.index(".ops-tasks-page .ops-page-host {") :]
 
     assert 'initial_view: str = "batches"' in source
-    assert source.count('{"batches": "全部批次"}') == 2
+    assert "ops-task-segment" not in source
+    assert "queue_segment" not in source
+    assert "view_in" not in source
+    assert ".ops-task-segment" not in APP_CSS
+    assert (
+        "grid-template-rows: 79px var(--ui-control-height-button) minmax(0, 1fr);"
+        in task_page_css[:300]
+    )
     for removed_queue in ("待我处理", "可写草稿"):
         assert f'"{removed_queue}"' not in source
     assert 'runtime["inbox_bucket"]' not in source
