@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+from types import SimpleNamespace
 from typing import Any
 
 from nicegui import ui
@@ -9,8 +11,28 @@ from app.ui import desktop
 
 
 class _AccountDB:
+    def __init__(self) -> None:
+        self.account: dict[str, Any] = {}
+        self.user_settings: dict[str, str] = {}
+        self.settings: dict[str, str] = {}
+
     def list_jobs(self, _limit: int) -> list[dict[str, Any]]:
         return []
+
+    def get_user_setting(self, key: str) -> str | None:
+        return self.user_settings.get(key)
+
+    def set_user_setting(self, key: str, value: str) -> None:
+        self.user_settings[key] = value
+
+    def get_setting(self, key: str) -> str | None:
+        return self.settings.get(key)
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.settings[key] = value
+
+    def get_official_account(self, _account_id: str) -> dict[str, Any]:
+        return dict(self.account)
 
 
 class _AccountState:
@@ -141,6 +163,7 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
         "enabled_profile_options",
         lambda _service: {"review-profile": "专业深度型"},
     )
+    state.db.account = dict(account)
 
     try:
         refresh = desktop._build_accounts_panel()
@@ -158,9 +181,9 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
         assert {
             "添加公众号",
             "检测连接",
-            "保存配置",
             "恢复上个版本",
         }.issubset(visible_button_texts)
+        assert "保存配置" not in visible_button_texts
         assert any(
             type(element).__name__ == "Button"
             and str(getattr(element, "_props", {}).get("icon") or "")
@@ -190,6 +213,21 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
             for element in advanced_selects.values()
         )
         assert advanced_selects["内容定位 / 创作方案"].value == "plan-1"
+        assert all(
+            bool(select._change_handlers)
+            for select in advanced_selects.values()
+        )
+        intensity_select = advanced_selects["默认改写强度"]
+        intensity_select.value = "strong"
+        intensity_select._change_handlers[-1](SimpleNamespace(value="strong"))
+        saved_defaults = json.loads(
+            state.db.user_settings["ui.account_defaults.account-1"]
+        )
+        assert saved_defaults["rewrite_intensity"] == "strong"
+        assert any(
+            "自动保存 · 创作默认值" in value
+            for value in state.db.settings.values()
+        )
 
         structured_rule_labels = {
             str(getattr(element, "text", "") or "")

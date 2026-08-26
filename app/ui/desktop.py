@@ -4094,6 +4094,7 @@ def _build_accounts_panel(
                 type="positive",
                 timeout=10000 if template_message else 5000,
             )
+            save_account_version(account_id, "自动保存 · 创作方案")
             render_accounts()
         except Exception as exc:
             ui.notify(f"应用创作方案失败：{exc}", type="negative", timeout=10000)
@@ -5181,7 +5182,7 @@ def _render_account_config_workspace(
                         if versions
                         else "尚未保存版本"
                     )
-                    ui.label(f"最后保存：{last_saved}").classes(
+                    last_saved_label = ui.label(f"最后保存：{last_saved}").classes(
                         "ops-panel-subtitle"
                     )
                 with ui.row().classes("ops-config-header-actions"):
@@ -5299,6 +5300,40 @@ def _render_account_config_workspace(
                                 "value": model_value or None
                             }
 
+                            def save_model_selection(selected_value: str) -> None:
+                                if not selected_value or selected_value == model_value:
+                                    return
+                                try:
+                                    record = (
+                                        state.db.get_official_account(account_id) or {}
+                                    )
+                                    save_account(
+                                        state.db,
+                                        account_id=account_id,
+                                        name=str(
+                                            record.get("name") or selected["name"]
+                                        ),
+                                        app_id=str(record.get("app_id") or ""),
+                                        app_secret=None,
+                                        model_id=selected_value,
+                                        enabled=bool(record.get("enabled", True)),
+                                    )
+                                    on_save_version(
+                                        account_id,
+                                        "自动保存 · 默认模型",
+                                    )
+                                    ui.notify(
+                                        "默认模型已自动保存",
+                                        type="positive",
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    ui.notify(
+                                        f"自动保存失败：{sanitize_failure_text(exc)}",
+                                        type="negative",
+                                        timeout=10000,
+                                    )
+                                on_refresh()
+
                             def refreshed_model_options() -> dict[str, str]:
                                 fresh = state.model_options(include_default=False)
                                 fresh[ADD_CUSTOM_MODEL_VALUE] = "＋ 添加自定义模型"
@@ -5331,16 +5366,8 @@ def _render_account_config_workspace(
 
                             def use_saved_model(saved: dict[str, Any]) -> None:
                                 saved_id = str(saved.get("id") or "")
-                                fresh_options = refreshed_model_options()
                                 previous_model_value["value"] = saved_id
-                                model_select.set_options(
-                                    fresh_options,
-                                    value=saved_id,
-                                )
-                                ui.notify(
-                                    "自定义模型已选中，请点击下方“保存配置”完成公众号绑定",
-                                    type="positive",
-                                )
+                                save_model_selection(saved_id)
 
                             open_custom_model_editor = build_models_panel(
                                 state,
@@ -5357,9 +5384,14 @@ def _render_account_config_workspace(
                                     )
                                     open_custom_model_editor()
                                     return
+                                previous_value = str(
+                                    previous_model_value["value"] or ""
+                                )
                                 previous_model_value["value"] = (
                                     selected_value or None
                                 )
+                                if selected_value != previous_value:
+                                    save_model_selection(selected_value)
 
                             model_select.on_value_change(handle_model_choice)
 
@@ -5469,6 +5501,58 @@ def _render_account_config_workspace(
                                 ),
                                 label="目标字数",
                             ).props("outlined dense hide-bottom-space")
+
+                            def save_creation_defaults() -> None:
+                                try:
+                                    state.db.set_user_setting(
+                                        f"ui.account_defaults.{account_id}",
+                                        json.dumps(
+                                            {
+                                                "rewrite_intensity": str(
+                                                    intensity_select.value
+                                                    or "standard"
+                                                ),
+                                                "target_words": str(
+                                                    word_count_input.value
+                                                    or "1800–2200 字"
+                                                ),
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    )
+                                    on_save_version(
+                                        account_id,
+                                        "自动保存 · 创作默认值",
+                                    )
+                                    last_saved_label.set_text(
+                                        "最后保存："
+                                        + time.strftime("%Y-%m-%d %H:%M:%S")
+                                    )
+                                    ui.notify(
+                                        "创作默认值已自动保存",
+                                        type="positive",
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    ui.notify(
+                                        f"自动保存失败：{sanitize_failure_text(exc)}",
+                                        type="negative",
+                                        timeout=10000,
+                                    )
+
+                            intensity_select.on_value_change(
+                                lambda _: save_creation_defaults()
+                            )
+                            word_count_input.on(
+                                "change",
+                                lambda _: save_creation_defaults(),
+                            )
+
+                        plan_select.on_value_change(
+                            lambda event: on_plan(
+                                account_id,
+                                str(event.value or ""),
+                            )
+                        )
 
                     with ui.element("div").classes(
                         "ops-config-entry-grid ops-config-entry-grid-single"
@@ -5611,58 +5695,13 @@ def _render_account_config_workspace(
                                     "ops-config-entry-detail ops-wrap-anywhere"
                                 )
 
-            def save_current_configuration() -> None:
-                try:
-                    if str(model_select.value or "") == ADD_CUSTOM_MODEL_VALUE:
-                        raise ValueError("请先完成自定义模型配置")
-                    if str(model_select.value or "") != model_value:
-                        record = state.db.get_official_account(account_id) or {}
-                        save_account(
-                            state.db,
-                            account_id=account_id,
-                            name=str(record.get("name") or selected["name"]),
-                            app_id=str(record.get("app_id") or ""),
-                            app_secret=None,
-                            model_id=str(model_select.value or ""),
-                            enabled=bool(record.get("enabled", True)),
-                        )
-                    if str(plan_select.value or "") != selected_plan_id:
-                        on_plan(account_id, str(plan_select.value or ""))
-                    state.db.set_user_setting(
-                        f"ui.account_defaults.{account_id}",
-                        json.dumps(
-                            {
-                                "rewrite_intensity": str(
-                                    intensity_select.value or "standard"
-                                ),
-                                "target_words": str(
-                                    word_count_input.value or "1800–2200 字"
-                                ),
-                            },
-                            ensure_ascii=False,
-                        ),
-                    )
-                    on_save_version(account_id, "手动保存")
-                    ui.notify("公众号配置已保存", type="positive")
-                    on_refresh()
-                except Exception as exc:  # noqa: BLE001
-                    ui.notify(
-                        f"保存配置失败：{sanitize_failure_text(exc)}",
-                        type="negative",
-                        timeout=10000,
-                    )
-
             with ui.element("div").classes("ops-config-footer"):
-                ui.label("所有配置使用结构化表单保存，不需要编辑 JSON。")
+                ui.label("每次修改都会自动保存，不需要编辑 JSON。")
                 with ui.row().classes("ops-config-footer-actions"):
                     ui.button(
                         "恢复上个版本",
                         on_click=lambda: on_versions(account_id),
                     ).props("outline dense color=primary no-caps")
-                    ui.button(
-                        "保存配置",
-                        on_click=save_current_configuration,
-                    ).props("unelevated dense color=primary no-caps")
 
 
 def _build_help_panel() -> None:

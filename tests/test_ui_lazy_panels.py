@@ -95,5 +95,6 @@ def test_account_workspace_replaces_the_legacy_settings_tab_stack() -> None:
     assert "_build_accounts_panel(" in source
     assert '· 配置中心' in source
     assert 'ui.button("检测连接")' in source
-    assert '"保存配置",' in source
+    assert '"保存配置",' not in source
+    assert "每次修改都会自动保存" in source
     assert "def schedule_settings_tab(tab: Any) -> None:" not in source
