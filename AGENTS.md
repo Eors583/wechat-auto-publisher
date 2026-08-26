@@ -33,4 +33,9 @@ Mandatory working rules:
    service, UI, Feishu capability/tool mapping, and tests together when a shared
    operation changes.
 6. Run focused tests first, then `python -m pytest -q`. Commit only explicit
-   task files. Production deployment is not implied unless the user asks for it.
+   task files. After every completed change request, commit and push the intended
+   files to `main`, deploy that exact `main` commit to production, and independently
+   verify the release, container health, public HTTP endpoints, and recent error-log
+   counts. Skip deployment only when the latest user request explicitly says not to
+   deploy, asks for local/design acceptance first, or otherwise sets a pre-production
+   stopping boundary.
