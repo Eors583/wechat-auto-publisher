@@ -18,6 +18,9 @@ class _FakeDb:
     def list_jobs(self, _limit: int) -> list[dict[str, Any]]:
         return []
 
+    def credit_wallet_summary(self) -> dict[str, int]:
+        return {"available": 12_345, "reserved": 0, "charged": 0}
+
 
 class _FakeState:
     def __init__(self) -> None:
@@ -94,6 +97,24 @@ def test_primary_navigation_uses_account_embedded_model_settings() -> None:
         "文章审核",
     ]
     assert "模型配置" not in labels
+
+
+def test_sidebar_profile_shows_current_user_credit_balance() -> None:
+    assert desktop._sidebar_profile_meta(  # noqa: SLF001
+        _FakeDb(), page_is_admin=False
+    ) == "运营用户 · 12,345 积分"
+    assert desktop._sidebar_profile_meta(  # noqa: SLF001
+        _FakeDb(), page_is_admin=True
+    ) == "内容运营 · 12,345 积分"
+
+
+def test_sidebar_profile_contains_long_names_and_balance() -> None:
+    from app.ui.styles import APP_CSS
+
+    assert ".ops-sidebar-profile-copy { flex: 1 1 auto; overflow: hidden; }" in APP_CSS
+    assert ".ops-sidebar-profile-name," in APP_CSS
+    assert "text-overflow: ellipsis" in APP_CSS
+    assert ".ops-sidebar-profile > .q-btn { flex: 0 0 auto;" in APP_CSS
 
 
 def test_public_urls_preserve_the_production_ui_root_path(

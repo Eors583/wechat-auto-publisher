@@ -191,6 +191,19 @@ state: AppState | None = None
 ADD_CUSTOM_MODEL_VALUE = "__add_custom_model__"
 
 
+def _sidebar_profile_meta(db: Any, *, page_is_admin: bool) -> str:
+    role_label = "内容运营" if page_is_admin else "运营用户"
+    wallet_summary = getattr(db, "credit_wallet_summary", None)
+    if not callable(wallet_summary):
+        return f"{role_label} · 0 积分"
+    try:
+        available = int(wallet_summary().get("available") or 0)
+    except Exception:  # noqa: BLE001
+        logger.exception("Unable to load sidebar credit balance")
+        available = 0
+    return f"{role_label} · {available:,} 积分"
+
+
 def _should_auto_open_onboarding(
     *,
     page_is_admin: bool,
@@ -581,13 +594,21 @@ def create_desktop_app() -> None:
                     ui.label("系统就绪")
                     ui.label("公众号配置与后台任务可用")
             with ui.row().classes("ops-sidebar-profile"):
+                username = str(page_state.current_user["username"])
                 ui.avatar(
-                    str(page_state.current_user["username"] or "用")[:1],
+                    str(username or "用")[:1],
                     size="30px",
                 ).classes("ops-sidebar-avatar")
                 with ui.column().classes("ops-sidebar-profile-copy"):
-                    ui.label(str(page_state.current_user["username"]))
-                    ui.label("内容运营" if page_is_admin else "运营用户")
+                    ui.label(username).classes(
+                        "ops-sidebar-profile-name"
+                    ).tooltip(username)
+                    profile_meta = ui.label(
+                        _sidebar_profile_meta(
+                            getattr(page_state, "db", None),
+                            page_is_admin=page_is_admin,
+                        )
+                    ).classes("ops-sidebar-profile-meta")
                 with ui.button(icon="more_horiz").props(
                     "flat round dense aria-label=用户菜单"
                 ):
@@ -599,6 +620,25 @@ def create_desktop_app() -> None:
                                 ui.navigate.reload(),
                             ),
                         )
+
+                owner_client = ui.context.client
+
+                async def refresh_sidebar_points() -> None:
+                    text = await run.io_bound(
+                        lambda: _sidebar_profile_meta(
+                            getattr(page_state, "db", None),
+                            page_is_admin=page_is_admin,
+                        )
+                    )
+                    if not bool(getattr(owner_client, "is_deleted", False)):
+                        profile_meta.text = text
+                        profile_meta.update()
+
+                client_timer(
+                    5.0,
+                    refresh_sidebar_points,
+                    immediate=False,
+                )
 
         initial_tab = (
             tab_review

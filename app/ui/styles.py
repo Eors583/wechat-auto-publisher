@@ -1843,8 +1843,16 @@ APP_CSS += """
   padding: var(--ui-space-3);
 }
 .ops-sidebar-health-copy > :last-child { margin-top: var(--ui-space-1); }
-.ops-sidebar-profile { flex-wrap: nowrap; }
-.ops-sidebar-profile > .q-btn { margin-left: auto; }
+.ops-sidebar-profile { width: 100%; min-width: 0; flex-wrap: nowrap; }
+.ops-sidebar-profile-copy { flex: 1 1 auto; overflow: hidden; }
+.ops-sidebar-profile-name,
+.ops-sidebar-profile-meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ops-sidebar-profile > .q-btn { flex: 0 0 auto; margin-left: auto; }
 .ops-sidebar-avatar {
   color: var(--ui-color-surface) !important;
   background: linear-gradient(145deg, var(--ui-color-purple), var(--ui-color-purple-dark)) !important;
