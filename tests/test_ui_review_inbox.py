@@ -388,7 +388,7 @@ def test_inbox_row_shows_per_article_token_usage_in_gold_without_hiding_it() -> 
 
 
 def test_generation_usage_copy_hides_provider_metering_without_points() -> None:
-    text, _ = tasks._generation_usage_text(  # noqa: SLF001
+    text = tasks._generation_usage_text(  # noqa: SLF001
         {"known_tokens": 23_410, "api_call_count": 5, "complete": True}
     )
 
@@ -396,7 +396,7 @@ def test_generation_usage_copy_hides_provider_metering_without_points() -> None:
 
 
 def test_generation_usage_copy_leads_with_estimated_or_charged_points() -> None:
-    estimated_tokens, _ = tasks._generation_usage_text(  # noqa: SLF001
+    estimated_tokens = tasks._generation_usage_text(  # noqa: SLF001
         {
             "estimated_tokens": 9_000,
             "api_call_count": 1,
@@ -404,7 +404,7 @@ def test_generation_usage_copy_leads_with_estimated_or_charged_points() -> None:
             "complete": False,
         }
     )
-    estimated, estimated_hint = tasks._generation_usage_text(  # noqa: SLF001
+    estimated = tasks._generation_usage_text(  # noqa: SLF001
         {
             "known_tokens": 9_000,
             "api_call_count": 1,
@@ -413,7 +413,7 @@ def test_generation_usage_copy_leads_with_estimated_or_charged_points() -> None:
             "complete": True,
         }
     )
-    charged, charged_hint = tasks._generation_usage_text(  # noqa: SLF001
+    charged = tasks._generation_usage_text(  # noqa: SLF001
         {
             "known_tokens": 9_000,
             "api_call_count": 1,
@@ -427,9 +427,7 @@ def test_generation_usage_copy_leads_with_estimated_or_charged_points() -> None:
 
     assert estimated_tokens == "预计 155 积分"
     assert estimated == "预计 155 积分"
-    assert "不会实际扣除" in estimated_hint
     assert charged == "消耗 155 积分"
-    assert "已结算的最终积分" in charged_hint
 
 
 def test_legacy_review_entry_redirects_to_the_full_page_route() -> None:

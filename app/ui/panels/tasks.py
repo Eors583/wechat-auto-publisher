@@ -1195,9 +1195,9 @@ def _generation_usage_text(
     usage: Any,
     *,
     legacy_tokens: Any = None,
-) -> tuple[str, str]:
+) -> str:
     if not isinstance(usage, dict):
-        return "积分待统计", "尚未取得本篇文章的积分记录"
+        return "积分待统计"
 
     estimated_points = int(usage.get("estimated_points") or 0)
     reserved_points = int(usage.get("reserved_points") or 0)
@@ -1206,14 +1206,14 @@ def _generation_usage_text(
     live_pricing = bool(usage.get("live_pricing"))
 
     if reserved_points:
-        return f"已冻结 {reserved_points:,} 积分", "任务完成后自动结算并退回差额"
+        return f"已冻结 {reserved_points:,} 积分"
     if charged_points:
-        return f"消耗 {charged_points:,} 积分", "这是本篇文章已结算的最终积分"
+        return f"消耗 {charged_points:,} 积分"
     if live_pricing and pricing_incomplete:
-        return "积分待核对 · 未扣除", "计量或价格配置不完整，本次未扣积分"
+        return "积分待核对 · 未扣除"
     if estimated_points:
-        return f"预计 {estimated_points:,} 积分", "当前为积分试算，不会实际扣除"
-    return "积分待统计", "尚未取得本篇文章的积分记录"
+        return f"预计 {estimated_points:,} 积分"
+    return "积分待统计"
 
 
 def _render_inbox_article_card(
@@ -1295,7 +1295,7 @@ def _render_inbox_article_card(
     source_url = str(item.get("source_url") or "")
     body_chars = int(item.get("body_chars") or 0)
     priority_reason = str(item.get("priority_reason") or "")
-    generation_token_text, generation_token_hint = _generation_usage_text(
+    generation_token_text = _generation_usage_text(
         item.get("generation_usage"),
         legacy_tokens=item.get("generation_token_usage"),
     )
@@ -1842,9 +1842,7 @@ def _render_inbox_article_card(
             recommended_action
             or (failure_recommendation if failure else "状态已同步")
         ).classes("ops-task-row-state")
-        ui.label(generation_token_text).classes("ops-task-row-token").tooltip(
-            generation_token_hint
-        )
+        ui.label(generation_token_text).classes("ops-task-row-token")
         with ui.row().classes("ops-task-row-actions"):
             ui.button(
                 primary_label,
@@ -4683,7 +4681,7 @@ def _render_batch_card(
             ui.icon("inventory_2", size="20px").classes("ops-semantic-icon")
         with ui.column().classes("ops-task-row-copy"):
             ui.label(topic or "未命名批次").classes("ops-task-row-title")
-            generation_token_text, generation_token_hint = _generation_usage_text(
+            generation_token_text = _generation_usage_text(
                 batch.get("generation_usage"),
                 legacy_tokens=batch.get("generation_token_usage"),
             )
@@ -4697,9 +4695,7 @@ def _render_batch_card(
             f'已审核 {progress.get("reviewed", 0)}/{progress.get("review_total", 0)}'
             f' · 草稿 {progress.get("drafted", 0)} · 失败 {progress.get("failed", 0)}'
         ).classes("ops-task-row-state")
-        ui.label(generation_token_text).classes("ops-task-row-token").tooltip(
-            generation_token_hint
-        )
+        ui.label(generation_token_text).classes("ops-task-row-token")
         with ui.row().classes("ops-task-row-actions"):
             ui.button(
                 action_label,
