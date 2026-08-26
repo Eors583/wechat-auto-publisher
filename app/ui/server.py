@@ -22,7 +22,7 @@ def main() -> None:
         root=create_desktop_app,
         host="0.0.0.0",
         port=int(os.getenv("WECHAT_PUBLISHER_UI_PORT") or "18765"),
-        title="公众号智能运营助手",
+        title="微信公众号系统",
         native=False,
         show=False,
         reload=False,
