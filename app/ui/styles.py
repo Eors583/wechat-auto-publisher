@@ -3258,8 +3258,19 @@ APP_CSS += """
   width: 100%;
 }
 .ops-review-mode-tabs .q-tab {
+  align-items: center;
+  justify-content: center;
   width: 100%;
   max-width: none;
+  padding-block: 0 !important;
+  text-align: center;
+}
+.ops-review-mode-tabs .q-tab__content {
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding-block: 0;
 }
 .ops-workbench-shell .ops-review-mode-tabs .q-tab--active {
   color: var(--ui-color-text-primary) !important;
