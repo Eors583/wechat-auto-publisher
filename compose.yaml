@@ -38,6 +38,7 @@ services:
       FEISHU_ENABLED: "false"
       WECHAT_RELAY_ENABLED: "false"
       WECHAT_PUBLISHER_LAUNCH_SESSION_ID: local-compose
+      WECHAT_PUBLISHER_SIGNUP_CREDITS: ${WECHAT_PUBLISHER_SIGNUP_CREDITS:-1000}
       PYTHONUNBUFFERED: "1"
     depends_on:
       postgres:

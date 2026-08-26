@@ -18,6 +18,14 @@ _USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 _PBKDF2_ITERATIONS = 310_000
 
 
+def _signup_credit_points() -> int:
+    raw = str(os.getenv("WECHAT_PUBLISHER_SIGNUP_CREDITS") or "0").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -119,6 +127,15 @@ class AuthService:
             if self.db.get_user_by_username(clean_username):
                 raise ValueError("该用户名已注册，请直接登录") from exc
             raise
+        signup_points = _signup_credit_points()
+        if signup_points:
+            self.db.for_user(str(user["id"])).grant_credit_points(
+                points=signup_points,
+                source_type="signup",
+                source_id="welcome",
+                actor_user_id="system",
+                reason="新用户体验积分",
+            )
         return public_user(user)
 
     def login(self, username: str, password: str) -> dict[str, Any]:

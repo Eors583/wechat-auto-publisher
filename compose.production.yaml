@@ -55,6 +55,7 @@ services:
       # Keep live job leases valid across the API and both web processes in
       # this release. A new release receives a new APP_VERSION lease owner.
       WECHAT_PUBLISHER_LAUNCH_SESSION_ID: ${APP_VERSION:-production}
+      WECHAT_PUBLISHER_SIGNUP_CREDITS: ${WECHAT_PUBLISHER_SIGNUP_CREDITS:-1000}
       PYTHONUNBUFFERED: "1"
     volumes:
       - app_data:/app/data

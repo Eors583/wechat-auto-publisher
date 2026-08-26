@@ -309,6 +309,21 @@ def test_token_fixed_unit_and_byok_modes_share_one_cost_unit(tmp_path) -> None:
     assert fixed["pricing_status"] == "fixed_price"
     assert unit["provider_cost_micro_cny"] == 74_000
     assert unit["pricing_status"] == "unit_priced"
+    zero_unit = calculate_resource_price(
+        UsageRecord(
+            provider="manus",
+            provider_model="manus-1.6",
+            modality="text",
+            usage=fixed_usage(provider_credits=0),
+        ),
+        {
+            "metering_mode": "UNIT",
+            "provider_unit_micro_cny_each": 50_000,
+        },
+        policy,
+    )
+    assert zero_unit["provider_cost_micro_cny"] == 0
+    assert zero_unit["pricing_status"] == "unit_priced"
     assert byok == {
         "provider_cost_micro_cny": 0,
         "retail_cost_micro_cny": 0,

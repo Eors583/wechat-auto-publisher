@@ -33,6 +33,23 @@ def test_default_admin_registration_and_persisted_login(tmp_path) -> None:
     assert service.authenticate(login["token"]) is None
 
 
+def test_registration_grants_configured_signup_credits(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WECHAT_PUBLISHER_SIGNUP_CREDITS", "1000")
+    db = Database(tmp_path / "signup-credits.db")
+
+    user = AuthService(db).register("welcome_user", "secret123")
+    user_db = db.for_user(str(user["id"]))
+
+    assert user_db.credit_wallet_summary()["available"] == 1000
+    ledger = user_db.list_credit_ledger(limit=10)
+    assert [(row["amount_points"], row["event_type"], row["reason"]) for row in ledger] == [
+        (1000, "grant", "新用户体验积分")
+    ]
+
+
 def test_auth_api_and_admin_model_boundary(tmp_path) -> None:
     config = {
         "_root": str(tmp_path),

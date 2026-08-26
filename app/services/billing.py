@@ -224,13 +224,16 @@ def calculate_resource_price(
         )
         pricing_status = "fixed_price" if provider_cost > 0 else "price_missing"
     elif metering_mode == "UNIT":
-        units = (
-            int(usage.provider_credits)
-            if usage.provider_credits is not None
-            else int(usage.fixed_units)
+        provider_reported_units = usage.provider_credits is not None
+        units = int(usage.provider_credits) if provider_reported_units else int(
+            usage.fixed_units
         )
         provider_cost = units * int(card.get("provider_unit_micro_cny_each") or 0)
-        pricing_status = "unit_priced" if units > 0 and provider_cost > 0 else "unit_missing"
+        pricing_status = (
+            "unit_priced"
+            if provider_reported_units or (units > 0 and provider_cost > 0)
+            else "unit_missing"
+        )
     elif usage.source == "estimated":
         pricing_status = "usage_estimated"
     else:
