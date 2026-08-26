@@ -379,41 +379,12 @@ def test_inbox_row_shows_per_article_token_usage_in_gold_without_hiding_it() -> 
     assert "display: none" not in narrow_css[narrow_css.index(".ops-task-row-token") :][:250]
 
 
-def test_generation_usage_copy_distinguishes_actual_partial_and_manus_credit() -> None:
-    actual, _ = tasks._generation_usage_text(  # noqa: SLF001
-        {
-            "known_tokens": 23_410,
-            "api_call_count": 5,
-            "metered_calls": 5,
-            "complete": True,
-        }
-    )
-    partial, partial_hint = tasks._generation_usage_text(  # noqa: SLF001
-        {
-            "known_tokens": 18_920,
-            "api_call_count": 5,
-            "metered_calls": 4,
-            "unavailable_calls": 1,
-            "complete": False,
-        }
-    )
-    manus, manus_hint = tasks._generation_usage_text(  # noqa: SLF001
-        {
-            "api_call_count": 1,
-            "metered_calls": 0,
-            "unavailable_calls": 1,
-            "manus_tasks": 1,
-            "provider_credits": 37,
-            "credit_metered_calls": 1,
-            "complete": False,
-        }
+def test_generation_usage_copy_hides_provider_metering_without_points() -> None:
+    text, _ = tasks._generation_usage_text(  # noqa: SLF001
+        {"known_tokens": 23_410, "api_call_count": 5, "complete": True}
     )
 
-    assert actual == "实际 23,410 Token · 5/5"
-    assert partial == "已确认 18,920 Token · 4/5"
-    assert "不可作为文章总 Token" in partial_hint
-    assert manus == "Manus 37 Credits · 无 Token"
-    assert "服务商没有提供" in manus_hint
+    assert text == "积分待统计"
 
 
 def test_generation_usage_copy_leads_with_estimated_or_charged_points() -> None:
@@ -446,10 +417,10 @@ def test_generation_usage_copy_leads_with_estimated_or_charged_points() -> None:
         }
     )
 
-    assert estimated_tokens == "预计 155 积分 · 估算 9,000 Token"
-    assert estimated == "预计 155 积分 · 实际 9,000 Token · 1/1"
+    assert estimated_tokens == "预计 155 积分"
+    assert estimated == "预计 155 积分"
     assert "不会实际扣除" in estimated_hint
-    assert charged == "消耗 155 积分 · 实际 9,000 Token · 1/1"
+    assert charged == "消耗 155 积分"
     assert "已结算的最终积分" in charged_hint
 
 
