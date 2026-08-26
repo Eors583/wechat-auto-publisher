@@ -4,21 +4,18 @@ import logging
 from typing import Any
 
 from app.ai import TITLE_CANDIDATE_COUNT, clean_candidate_list
+from app.benchmark import fetch_latest_benchmark_record, sync_secondary_titles
 from app.cover import invalidate_generated_cover
-from app.benchmark import fetch_latest_benchmark_record
-from app.layout import compose_articles
-from app.layout.composer import strip_ad_title_prefix
+from app.layout import compose_articles, select_secondary_articles
 from app.services.failures import sanitize_failure_text
 from app.services.wechat_delivery import deliver_draft_once
 from app.wechat import (
     build_article_from_job,
     submit_publish,
 )
-from app.wechat.draft import article_from_news_item
 
 from .context import WorkflowContext
 from .rendering import RenderingStep
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,27 +28,33 @@ def resolve_secondary_articles(
 ) -> list[dict[str, Any]]:
     """Resolve the secondary articles exactly as the delivery path will."""
 
+    secondaries = select_secondary_articles(
+        client,
+        config.get("layout") or {},
+        exclude_titles=[str(job.get("selected_title") or "")],
+    )
     benchmark_cfg = config.get("benchmark") or {}
-    if not benchmark_cfg.get("enabled", False):
-        return []
-    record = fetch_latest_benchmark_record(config, db)
-    if not record:
-        return []
-    layout_cfg = config.get("layout") or {}
-    requested = int(layout_cfg.get("secondary_count") or 0)
-    limit = min(7, requested) if requested > 0 else 7
-    secondaries: list[dict[str, Any]] = []
-    for source in record.articles[1 : limit + 1]:
-        if not source.payload:
-            continue
-        article = article_from_news_item(source.payload)
-        if not article.get("thumb_media_id") or not article.get("content"):
-            continue
-        article["title"] = strip_ad_title_prefix(str(article.get("title") or ""))
-        article["_benchmark_source"] = record.source
-        article["_benchmark_published_at"] = record.published_at
-        secondaries.append(article)
-    return secondaries
+    if not benchmark_cfg.get("enabled", False) or not secondaries:
+        return secondaries
+    try:
+        record = fetch_latest_benchmark_record(config, db)
+        matched = sync_secondary_titles(
+            secondaries,
+            record,
+            threshold=float(benchmark_cfg.get("image_match_threshold") or 0.90),
+            matched_only=bool(benchmark_cfg.get("matched_only", False)),
+            follow_source_order=bool(benchmark_cfg.get("follow_source_order", True)),
+            deduplicate_by_image=bool(
+                benchmark_cfg.get("deduplicate_by_image", True)
+            ),
+        )
+        return matched or secondaries
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "benchmark ad-title sync failed; using default draft ads: %s",
+            sanitize_failure_text(exc),
+        )
+        return secondaries
 
 
 class DeliverySteps:

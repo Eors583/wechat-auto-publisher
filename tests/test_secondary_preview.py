@@ -2,43 +2,46 @@ from __future__ import annotations
 
 import inspect
 
+from app.benchmark import BenchmarkArticle, BenchmarkRecord
 from app.ui.panels import tasks
 from app.ui.styles import APP_CSS
 from app.workflows import delivery
 
 
-def test_secondary_preview_reuses_delivery_resolution(monkeypatch) -> None:
-    calls: dict[str, object] = {}
+def test_secondary_preview_reuses_target_draft_ads_and_benchmark_titles(
+    monkeypatch,
+) -> None:
+    local_ad = {
+        "title": "默认广告标题",
+        "thumb_media_id": "target-cover",
+        "thumb_url": "target-cover-url",
+        "content": "本公众号草稿箱广告正文",
+    }
     monkeypatch.setattr(
         delivery,
-        "article_from_news_item",
-        lambda payload: dict(payload),
+        "select_secondary_articles",
+        lambda client, layout, exclude_titles: [dict(local_ad)],
     )
-
     config = {
         "layout": {"enabled": True},
         "benchmark": {"enabled": True, "follow_source_order": True},
     }
-    record = __import__("app.benchmark", fromlist=["BenchmarkRecord"])
-    calls["record"] = record.BenchmarkRecord(
+    record = BenchmarkRecord(
         published_at=300,
         source="official_freepublish",
         articles=[
-            record.BenchmarkArticle("最新头条", payload={"title": "最新头条"}),
-            record.BenchmarkArticle(
-                "广告1：最新广告标题",
-                payload={
-                    "title": "广告1：最新广告标题",
-                    "thumb_media_id": "cover-a",
-                    "content": "广告正文",
-                },
-            ),
+            BenchmarkArticle("最新头条"),
+            BenchmarkArticle("最新广告标题", cover_url="source-cover-url"),
         ],
     )
     monkeypatch.setattr(
         delivery,
         "fetch_latest_benchmark_record",
-        lambda config, db: calls["record"],
+        lambda config, db: record,
+    )
+    monkeypatch.setattr(
+        "app.benchmark._download_hashes",
+        lambda urls: [0xAA],
     )
 
     result = delivery.resolve_secondary_articles(
@@ -46,8 +49,60 @@ def test_secondary_preview_reuses_delivery_resolution(monkeypatch) -> None:
     )
 
     assert [item["title"] for item in result] == ["最新广告标题"]
-    assert result[0]["content"] == "广告正文"
+    assert result[0]["content"] == "本公众号草稿箱广告正文"
+    assert result[0]["thumb_media_id"] == "target-cover"
     assert result[0]["_benchmark_source"] == "official_freepublish"
+
+
+def test_secondary_resolver_uses_default_draft_ads_without_benchmark(
+    monkeypatch,
+) -> None:
+    local_ads = [
+        {
+            "title": "默认广告标题",
+            "thumb_media_id": "target-cover",
+            "content": "本公众号草稿箱广告正文",
+        }
+    ]
+    monkeypatch.setattr(
+        delivery,
+        "select_secondary_articles",
+        lambda client, layout, exclude_titles: local_ads,
+    )
+    monkeypatch.setattr(
+        delivery,
+        "fetch_latest_benchmark_record",
+        lambda config, db: None,
+    )
+
+    result = delivery.resolve_secondary_articles(
+        "client",
+        {"layout": {"enabled": True}, "benchmark": {"enabled": True}},
+        "db",
+        {"selected_title": "主文章"},
+    )
+
+    assert result == local_ads
+
+
+def test_secondary_resolver_uses_default_draft_ads_when_benchmark_disabled(
+    monkeypatch,
+) -> None:
+    local_ads = [{"title": "默认广告标题"}]
+    monkeypatch.setattr(
+        delivery,
+        "select_secondary_articles",
+        lambda client, layout, exclude_titles: local_ads,
+    )
+
+    result = delivery.resolve_secondary_articles(
+        "client",
+        {"layout": {"enabled": True}, "benchmark": {"enabled": False}},
+        "db",
+        {"selected_title": "主文章"},
+    )
+
+    assert result == local_ads
 
 
 def test_delivery_and_review_use_the_same_secondary_resolver() -> None:
