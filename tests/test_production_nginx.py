@@ -4,15 +4,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_admin_subpath_is_added_exactly_once() -> None:
+def test_admin_subpath_is_available_on_api_certificate_host() -> None:
     compose = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
     nginx = (
         ROOT / "deploy" / "production" / "nginx.conf.example"
     ).read_text(encoding="utf-8")
 
     assert "WECHAT_PUBLISHER_ADMIN_ROOT_PATH: /admin" in compose
-    assert "location /admin/" in nginx
-    assert "proxy_pass http://127.0.0.1:18777/;" in nginx
+    api_host = nginx.split("server_name api.bluebloodlab.cn;", 1)[1].split(
+        "server {", 1
+    )[0]
+    assert "location /admin/" in api_host
+    assert "proxy_pass http://127.0.0.1:18777/;" in api_host
     assert "X-Forwarded-Prefix" not in nginx
 
 
