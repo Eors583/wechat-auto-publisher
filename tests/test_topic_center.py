@@ -12,7 +12,9 @@ import pytest
 from app.ai.model_registry import encrypt_api_key
 from app.db import Database, customer_data_scope
 from app.services.auth import AuthService
+from app.services.billing import InsufficientCreditsError
 from app.services.followed_content import FollowedContentService, group_articles
+from app.services.jizhile_settings import save_jizhile_settings
 from app.services.topic_sources import (
     TopicSourcePayloadError,
     TopicSourceService,
@@ -499,7 +501,8 @@ def test_jizhile_articles_enter_the_followed_pool_with_trusted_account(
             "enabled": True,
         }
     )
-    service.save_jizhile_api_settings(
+    save_jizhile_settings(
+        service.db,
         enabled=True,
         key="private-key",
         verifycode="private-code",
@@ -567,7 +570,8 @@ def test_backend_search_falls_back_to_jizhile_when_login_state_expires(
         token="expired-token",
         cookie="session=expired",
     )
-    service.save_jizhile_api_settings(
+    save_jizhile_settings(
+        service.db,
         enabled=True,
         key="working-key",
         verifycode="working-code",
@@ -623,7 +627,7 @@ def test_jizhile_falls_back_to_backend_search_when_api_is_unavailable(
             "enabled": True,
         }
     )
-    service.save_jizhile_api_settings(enabled=True, key="unavailable-key")
+    save_jizhile_settings(service.db, enabled=True, key="unavailable-key")
     service.save_backend_search_settings(
         enabled=True,
         token="working-token",
@@ -679,7 +683,7 @@ def test_followed_account_reports_all_enabled_source_failures(
         token="expired-token",
         cookie="session=expired",
     )
-    service.save_jizhile_api_settings(enabled=True, key="invalid-key")
+    save_jizhile_settings(service.db, enabled=True, key="invalid-key")
     monkeypatch.setattr(
         "app.services.followed_content.search_backend_account_articles",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("登录态失效")),
@@ -697,6 +701,99 @@ def test_followed_account_reports_all_enabled_source_failures(
     assert [item["status"] for item in report["attempts"]] == ["failed", "failed"]
 
 
+def test_followed_article_refresh_charges_once_and_failure_refunds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _config(tmp_path)
+    root = Database(config["_db_path"])
+    user = AuthService(root).register("refresh-billing-user", "secure-pass-123")
+    db = root.for_user(str(user["id"]))
+    service = FollowedContentService(db, config)
+    policy = root.get_billing_pricing_policy()
+    root.upsert_billing_pricing_policy({**policy, "mode": "live"})
+    db.grant_credit_points(points=100, source_type="test")
+    account = service.save_account(
+        {
+            "name": "积分测试公众号",
+            "fetch_method": "backend_search",
+            "enabled": True,
+        }
+    )
+    service.save_backend_search_settings(
+        enabled=True,
+        token="working-token",
+        cookie="session=working",
+    )
+    monkeypatch.setattr(
+        "app.services.followed_content.search_backend_account_articles",
+        lambda *_args, **_kwargs: [
+            {
+                "title": "计费成功文章",
+                "url": "https://mp.weixin.qq.com/s/billed-refresh",
+                "account_name": "积分测试公众号",
+                "published_at": "2026-08-26T08:00:00+00:00",
+            }
+        ],
+    )
+
+    success = service.discover_account(account["id"])
+
+    assert success["points"] == 10
+    assert success["points_charged"] == 10
+    assert success["billing_status"] == "succeeded"
+    assert db.credit_wallet_summary()["available"] == 90
+
+    monkeypatch.setattr(
+        "app.services.followed_content.search_backend_account_articles",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("上游暂时不可用")
+        ),
+    )
+    failed = service.discover_account(account["id"])
+
+    assert failed["error"]
+    assert failed["points"] == 0
+    assert failed["points_charged"] == 0
+    assert failed["billing_status"] == "failed"
+    assert db.credit_wallet_summary() == {
+        "available": 90,
+        "reserved": 0,
+        "charged": 10,
+    }
+
+
+def test_refresh_all_checks_total_points_before_calling_any_provider(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _config(tmp_path)
+    config["topics"]["peers"] = []
+    root = Database(config["_db_path"])
+    user = AuthService(root).register("batch-refresh-user", "secure-pass-123")
+    db = root.for_user(str(user["id"]))
+    service = FollowedContentService(db, config)
+    policy = root.get_billing_pricing_policy()
+    root.upsert_billing_pricing_policy({**policy, "mode": "live"})
+    db.grant_credit_points(points=10, source_type="test")
+    for name in ("批量公众号一", "批量公众号二"):
+        service.save_account(
+            {"name": name, "fetch_method": "backend_search", "enabled": True}
+        )
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "app.services.followed_content.search_backend_account_articles",
+        lambda *_args, **_kwargs: calls.append(True) or [],
+    )
+
+    with pytest.raises(InsufficientCreditsError, match="需冻结 20 积分"):
+        service.discover_all()
+
+    assert calls == []
+    assert db.list_usage_operations() == []
+    assert db.credit_wallet_summary()["available"] == 10
+
+
 def test_working_preferred_source_does_not_charge_fallback_source(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -710,7 +807,7 @@ def test_working_preferred_source_does_not_charge_fallback_source(
         token="working-token",
         cookie="session=working",
     )
-    service.save_jizhile_api_settings(enabled=True, key="paid-api-key")
+    save_jizhile_settings(service.db, enabled=True, key="paid-api-key")
     monkeypatch.setattr(
         "app.services.followed_content.search_backend_account_articles",
         lambda *_args, **_kwargs: [

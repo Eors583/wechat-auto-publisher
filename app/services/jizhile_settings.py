@@ -5,8 +5,9 @@ from typing import Any
 
 from app.ai.model_registry import decrypt_api_key, encrypt_api_key
 from app.db import Database
+from app.providers.jizhile_api import test_jizhile_api
 
-SETTING_KEY = "jizhile_api"
+SETTING_KEY = "platform.jizhile_api"
 
 
 def public_jizhile_settings(db: Database) -> dict[str, Any]:
@@ -31,6 +32,7 @@ def save_jizhile_settings(
     remain_money: Any = None,
     checked_at: str = "",
 ) -> None:
+    _require_platform_scope(db)
     current = _load(db)
     key_value = str(key or "").strip()
     verifycode_value = str(verifycode or "").strip()
@@ -64,6 +66,7 @@ def effective_jizhile_settings(db: Database) -> dict[str, Any]:
 
 
 def clear_jizhile_settings(db: Database) -> None:
+    _require_platform_scope(db)
     db.set_setting(
         SETTING_KEY,
         json.dumps(
@@ -76,6 +79,22 @@ def clear_jizhile_settings(db: Database) -> None:
     )
 
 
+def test_saved_jizhile_settings(
+    db: Database,
+    *,
+    key: str = "",
+    verifycode: str = "",
+) -> dict[str, Any]:
+    """Test platform credentials without exposing them to customer services."""
+
+    _require_platform_scope(db)
+    current = effective_jizhile_settings(db)
+    return test_jizhile_api(
+        key=str(key or current.get("key") or ""),
+        verifycode=str(verifycode or current.get("verifycode") or ""),
+    )
+
+
 def _load(db: Database) -> dict[str, Any]:
     raw = db.get_setting(SETTING_KEY)
     if not raw:
@@ -85,3 +104,8 @@ def _load(db: Database) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _require_platform_scope(db: Database) -> None:
+    if db.owner_user_id:
+        raise PermissionError("极致了 API 只能由平台管理员统一配置")

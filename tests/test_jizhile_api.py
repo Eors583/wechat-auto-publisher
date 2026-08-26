@@ -16,6 +16,7 @@ from app.providers.jizhile_api import (
 from app.providers.jizhile_api import (
     test_jizhile_api as verify_jizhile_api,
 )
+from app.schema_migrations import apply_platform_jizhile_and_followed_refresh
 from app.services.auth import AuthService
 from app.services.jizhile_settings import (
     clear_jizhile_settings,
@@ -162,16 +163,15 @@ def test_invalid_key_is_reported_without_exposing_key(monkeypatch) -> None:
     assert "private-value" not in str(exc.value)
 
 
-def test_jizhile_settings_encrypt_secrets_and_are_customer_scoped(
+def test_jizhile_settings_encrypt_secrets_and_are_platform_scoped(
     tmp_path: Path,
 ) -> None:
     root = Database(tmp_path / "jizhile-settings.db")
     auth = AuthService(root)
     user_a = auth.register("jizhile-user-a", "secret1")
     user_b = auth.register("jizhile-user-b", "secret2")
-    db = root.for_user(str(user_a["id"]))
     save_jizhile_settings(
-        db,
+        root,
         enabled=True,
         key="private-key",
         verifycode="private-code",
@@ -180,13 +180,13 @@ def test_jizhile_settings_encrypt_secrets_and_are_customer_scoped(
         checked_at="2026-08-11 16:30:00",
     )
 
-    raw = db.get_setting("jizhile_api") or ""
+    raw = root.get_setting("platform.jizhile_api") or ""
     assert "private-key" not in raw
     assert "private-code" not in raw
     assert json.loads(raw)["key_encrypted"]
-    assert effective_jizhile_settings(db)["key"] == "private-key"
-    assert effective_jizhile_settings(db)["verifycode"] == "private-code"
-    assert public_jizhile_settings(db) == {
+    assert effective_jizhile_settings(root.for_user(str(user_a["id"])))["key"] == "private-key"
+    assert effective_jizhile_settings(root.for_user(str(user_b["id"])))["verifycode"] == "private-code"
+    assert public_jizhile_settings(root.for_user(str(user_a["id"]))) == {
         "enabled": True,
         "has_key": True,
         "has_verifycode": True,
@@ -194,7 +194,31 @@ def test_jizhile_settings_encrypt_secrets_and_are_customer_scoped(
         "remain_money": 9.5,
         "checked_at": "2026-08-11 16:30:00",
     }
-    assert public_jizhile_settings(root.for_user(str(user_b["id"])))["has_key"] is False
+    with pytest.raises(PermissionError, match="平台管理员"):
+        save_jizhile_settings(
+            root.for_user(str(user_a["id"])),
+            enabled=True,
+            key="customer-cannot-overwrite",
+        )
 
-    clear_jizhile_settings(db)
-    assert public_jizhile_settings(db)["has_key"] is False
+    clear_jizhile_settings(root)
+    assert public_jizhile_settings(root)["has_key"] is False
+
+
+def test_platform_migration_preserves_default_admin_legacy_jizhile_secret(
+    tmp_path: Path,
+) -> None:
+    root = Database(tmp_path / "legacy-jizhile-settings.db")
+    user = AuthService(root).register("legacy-jizhile-admin", "secret1")
+    save_jizhile_settings(root, enabled=True, key="legacy-private-key")
+    legacy_value = root.get_setting("platform.jizhile_api") or ""
+    root.set_setting("migration.customer_data_owner.v1", str(user["id"]))
+    root.for_user(str(user["id"])).set_user_setting("jizhile_api", legacy_value)
+
+    with root.connect() as conn:
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = 'platform.jizhile_api'"
+        )
+        apply_platform_jizhile_and_followed_refresh(conn)
+
+    assert effective_jizhile_settings(root)["key"] == "legacy-private-key"

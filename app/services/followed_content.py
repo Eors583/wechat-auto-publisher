@@ -13,10 +13,7 @@ import httpx
 
 from app.ai.model_registry import decrypt_api_key
 from app.db import Database
-from app.providers.jizhile_api import (
-    fetch_jizhile_account_articles,
-    test_jizhile_api,
-)
+from app.providers.jizhile_api import fetch_jizhile_account_articles
 from app.providers.public_wechat import (
     fetch_public_article_metadata,
     normalize_article_url,
@@ -27,12 +24,8 @@ from app.providers.wechat_backend_search import (
     search_backend_account_articles,
     test_backend_session,
 )
-from app.services.jizhile_settings import (
-    clear_jizhile_settings,
-    effective_jizhile_settings,
-    public_jizhile_settings,
-    save_jizhile_settings,
-)
+from app.services.billing import BillingService
+from app.services.jizhile_settings import effective_jizhile_settings
 from app.services.wechat_backend_settings import (
     clear_backend_session,
     effective_backend_settings,
@@ -67,6 +60,14 @@ ARTICLE_SOURCE_LABELS = {
     "rss": "公众号官网 / RSS",
     "third_party": "第三方正式数据 API",
 }
+
+FOLLOWED_ARTICLES_REFRESH_TASK = "followed_articles_refresh"
+
+
+class _FollowedArticleFetchFailed(RuntimeError):
+    def __init__(self, report: dict[str, Any]) -> None:
+        super().__init__(str(report.get("error") or "获取公众号文章失败"))
+        self.report = report
 
 
 class FollowedContentService:
@@ -219,45 +220,9 @@ class FollowedContentService:
         clear_backend_session(self.db)
         return public_backend_settings(self.db)
 
-    def get_jizhile_settings(self) -> dict[str, Any]:
-        return public_jizhile_settings(self.db)
-
-    def save_jizhile_api_settings(
-        self,
-        *,
-        enabled: bool,
-        key: str = "",
-        verifycode: str = "",
-        session_label: str = "",
-        remain_money: Any = None,
-        checked_at: str = "",
-    ) -> dict[str, Any]:
-        save_jizhile_settings(
-            self.db,
-            enabled=enabled,
-            key=key,
-            verifycode=verifycode,
-            session_label=session_label,
-            remain_money=remain_money,
-            checked_at=checked_at,
-        )
-        return public_jizhile_settings(self.db)
-
-    def clear_jizhile_api_settings(self) -> dict[str, Any]:
-        clear_jizhile_settings(self.db)
-        return public_jizhile_settings(self.db)
-
-    def test_jizhile_api_settings(
-        self,
-        *,
-        key: str = "",
-        verifycode: str = "",
-    ) -> dict[str, Any]:
-        current = effective_jizhile_settings(self.db)
-        return test_jizhile_api(
-            key=str(key or current.get("key") or ""),
-            verifycode=str(verifycode or current.get("verifycode") or ""),
-        )
+    def article_refresh_points(self) -> int:
+        rate = self.db.get_billing_task_rate(FOLLOWED_ARTICLES_REFRESH_TASK) or {}
+        return max(0, int(rate.get("base_points") or 0))
 
     def _migrate_legacy_public_search_accounts(self) -> int:
         """Permanently retire the old Sogou/Baidu followed-account source."""
@@ -290,16 +255,104 @@ class FollowedContentService:
             ),
         )
 
-    def discover_all(self, *, limit_per_account: int = 8) -> dict[str, Any]:
+    def discover_all(
+        self,
+        *,
+        limit_per_account: int = 8,
+        source_channel: str = "topic_radar",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
         reports: list[dict[str, Any]] = []
         total = 0
-        for account in self.db.list_followed_accounts(enabled_only=True):
-            report = self.discover_account(str(account["id"]), limit=limit_per_account)
+        accounts = self.db.list_followed_accounts(enabled_only=True)
+        BillingService(self.db).ensure_task_capacity(
+            FOLLOWED_ARTICLES_REFRESH_TASK,
+            count=sum(
+                1
+                for account in accounts
+                if str(account.get("fetch_method") or "") != "manual"
+            ),
+        )
+        for account in accounts:
+            account_id = str(account["id"])
+            report = self.discover_account(
+                account_id,
+                limit=limit_per_account,
+                source_channel=source_channel,
+                idempotency_key=(
+                    f"{idempotency_key}:{account_id}" if idempotency_key else ""
+                ),
+            )
             reports.append(report)
             total += int(report.get("added") or 0)
-        return {"added": total, "accounts": reports}
+        return {
+            "added": total,
+            "points": sum(int(item.get("points") or 0) for item in reports),
+            "points_charged": sum(
+                int(item.get("points_charged") or 0) for item in reports
+            ),
+            "accounts": reports,
+        }
 
-    def discover_account(self, account_id: str, *, limit: int = 8) -> dict[str, Any]:
+    def discover_account(
+        self,
+        account_id: str,
+        *,
+        limit: int = 8,
+        source_channel: str = "topic_radar",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        account = self.db.get_followed_account(account_id)
+        if not account:
+            raise KeyError("关注公众号不存在")
+        if str(account.get("fetch_method") or "") == "manual":
+            return self._with_billing_result(
+                self._discover_account(account_id, limit=limit),
+                None,
+            )
+
+        operation_id: str | None = None
+        try:
+            with BillingService(self.db).operation(
+                scene="followed_articles_refresh",
+                task_code=FOLLOWED_ARTICLES_REFRESH_TASK,
+                subject_type="followed_account",
+                subject_id=account_id,
+                source_channel=source_channel,
+                idempotency_key=idempotency_key,
+                task_only=True,
+            ) as operation_id:
+                report = self._discover_account(account_id, limit=limit)
+                if report.get("error"):
+                    raise _FollowedArticleFetchFailed(report)
+        except _FollowedArticleFetchFailed as exc:
+            return self._with_billing_result(exc.report, operation_id)
+        return self._with_billing_result(report, operation_id)
+
+    def _with_billing_result(
+        self,
+        report: dict[str, Any],
+        operation_id: str | None,
+    ) -> dict[str, Any]:
+        result = dict(report)
+        operation = (
+            self.db.get_usage_operation(operation_id) if operation_id else None
+        ) or {}
+        mode = str(operation.get("mode") or "off")
+        estimated = int(operation.get("estimated_points") or 0)
+        charged = int(operation.get("charged_points") or 0)
+        result.update(
+            {
+                "billing_mode": mode,
+                "billing_status": str(operation.get("status") or "not_billed"),
+                "points": charged if mode == "live" else estimated,
+                "points_charged": charged,
+                "points_estimated": estimated,
+            }
+        )
+        return result
+
+    def _discover_account(self, account_id: str, *, limit: int = 8) -> dict[str, Any]:
         account = self.db.get_followed_account(account_id)
         if not account:
             raise KeyError("关注公众号不存在")
@@ -466,7 +519,7 @@ class FollowedContentService:
         if method == "jizhile_api":
             jizhile = effective_jizhile_settings(self.db)
             if not jizhile.get("enabled"):
-                raise ValueError("极致了 API 尚未启用，请先配置并测试 API Key")
+                raise ValueError("平台极致了 API 尚未启用，请联系平台管理员")
             return fetch_jizhile_account_articles(
                 str(account["name"]),
                 wechat_id=str(account.get("wechat_id") or ""),

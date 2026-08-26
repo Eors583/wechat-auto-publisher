@@ -155,6 +155,50 @@ def test_live_mode_blocks_business_call_when_points_are_insufficient(tmp_path) -
     assert db.list_usage_operations()[0]["status"] == "rejected"
 
 
+def test_live_task_only_operation_charges_fixed_points_and_releases_on_failure(
+    tmp_path,
+) -> None:
+    root, db, _user_id = _commercial_db(tmp_path)
+    _enable_live(root)
+    db.grant_credit_points(points=100, source_type="test")
+    service = BillingService(db)
+
+    with service.operation(
+        scene="followed_articles_refresh",
+        task_code="followed_articles_refresh",
+        subject_type="followed_account",
+        subject_id="account-success",
+        idempotency_key="fixed-success",
+        task_only=True,
+    ):
+        pass
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        with service.operation(
+            scene="followed_articles_refresh",
+            task_code="followed_articles_refresh",
+            subject_type="followed_account",
+            subject_id="account-failed",
+            idempotency_key="fixed-failed",
+            task_only=True,
+        ):
+            raise RuntimeError("provider failed")
+
+    operations = {
+        row["subject_id"]: row for row in db.list_usage_operations(limit=10)
+    }
+    assert operations["account-success"]["status"] == "succeeded"
+    assert operations["account-success"]["task_base_points"] == 10
+    assert operations["account-success"]["charged_points"] == 10
+    assert operations["account-failed"]["status"] == "failed"
+    assert operations["account-failed"]["charged_points"] == 0
+    assert db.credit_wallet_summary() == {
+        "available": 90,
+        "reserved": 0,
+        "charged": 10,
+    }
+
+
 def test_live_idempotency_key_cannot_repeat_provider_work_or_charge(tmp_path) -> None:
     root, db, _user_id = _commercial_db(tmp_path)
     _enable_live(root)

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.feishu.tool_modules.common import compact, optional_bool, optional_int, string_list
+from app.feishu.tool_modules.common import (
+    compact,
+    optional_bool,
+    optional_int,
+    string_list,
+)
 
 
 class DiscoveryToolMixin:
@@ -122,16 +127,30 @@ class DiscoveryToolMixin:
                 raise ValueError("没有找到该公众号序号，请先查询关注公众号列表")
         self.reply_text(message_id, "正在从公众号来源获取近期公开文章……")
         if account_id:
-            report = service.discover_account(account_id, limit=limit)
+            report = service.discover_account(
+                account_id,
+                limit=limit,
+                source_channel="feishu",
+                idempotency_key=message_id,
+            )
             lines = [
                 f'公众号：{report.get("name")}',
                 f'发现 {report.get("found", 0)} 篇，入池 {report.get("added", 0)} 篇。',
             ]
             if report.get("error"):
                 lines.append(f'提示：{report.get("error")}')
+            elif report.get("points"):
+                lines.append(f'本次积分：{report.get("points")}')
         else:
-            report = service.discover_all(limit_per_account=limit)
-            lines = [f'全部关注公众号刷新完成，新入池 {report.get("added", 0)} 篇。']
+            report = service.discover_all(
+                limit_per_account=limit,
+                source_channel="feishu",
+                idempotency_key=message_id,
+            )
+            lines = [
+                f'全部关注公众号刷新完成，新入池 {report.get("added", 0)} 篇，'
+                f'本次积分 {report.get("points", 0)}。'
+            ]
             for item in report.get("accounts") or []:
                 lines.append(
                     f'• {item.get("name")}：发现 {item.get("found", 0)}，入池 {item.get("added", 0)}'
@@ -425,11 +444,16 @@ class DiscoveryToolMixin:
         new_limit = min(100, int(windows.get(account_id) or 0) + increment)
         windows[account_id] = new_limit
         self.sessions.update(chat_id, followed_article_fetch_limits=windows)
-        report = service.discover_account(account_id, limit=new_limit)
+        report = service.discover_account(
+            account_id,
+            limit=new_limit,
+            source_channel="feishu",
+            idempotency_key=message_id,
+        )
         self.reply_text(
             message_id,
             f'已扩大到最近 {new_limit} 条搜索窗口：发现 {report.get("found", 0)}，'
-            f'新入池 {report.get("added", 0)}。',
+            f'新入池 {report.get("added", 0)}，本次积分 {report.get("points", 0)}。',
         )
         self._tool_list_followed_articles(
             {

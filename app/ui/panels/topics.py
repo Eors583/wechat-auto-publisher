@@ -6,20 +6,18 @@ from typing import Any
 
 from nicegui import run, ui
 
-from app.config import load_config
 from app.services import FollowedContentService, TopicSourceService
 from app.services.followed_content import (
     FETCH_METHODS,
     FOLLOWED_PUBLICATION_METHODS,
 )
 from app.services.topic_sources import SOURCE_TYPES
-from app.ui.panels.followed_articles import open_followed_articles_dialog
 from app.ui.interaction_feedback import (
     attach_interaction_feedback,
     hide_interaction_feedback,
 )
+from app.ui.panels.followed_articles import open_followed_articles_dialog
 from app.ui.state import AppState, set_button_loading
-
 
 TOPIC_CENTER_TABS = ("我的关注", "选题内容", "来源管理")
 
@@ -539,15 +537,19 @@ def _build_followed_accounts(
         str(item["id"]): str(item["name"])
         for item in service.db.list_official_accounts()
     }
+    article_refresh_points = service.article_refresh_points()
+    refresh_price = f"{article_refresh_points}积分"
     with ui.row().classes("w-full items-center justify-between"):
         with ui.column().classes("gap-0"):
             ui.label("关注公众号").classes("text-h5 text-weight-bold")
             ui.label(
-                "非自有公众号可选择极致了 API 或公众号后台登录态获取微信原文，"
-                "不再调用搜狗或百度。"
+                "平台极致了数据源或你的公众号后台登录态可用于获取微信原文；"
+                f"每次获取一个公众号消耗 {refresh_price}。"
             ).classes("muted")
         with ui.row().classes("items-center gap-2"):
-            refresh_all_btn = ui.button("刷新全部", icon="sync").props("outline color=teal-9 no-caps")
+            refresh_all_btn = ui.button(
+                f"刷新全部 · 每个公众号{refresh_price}", icon="sync"
+            ).props("outline color=teal-9 no-caps")
             import_owned_btn = ui.button("导入自有公众号", icon="cloud_download").props("outline color=teal-9 no-caps")
             add_btn = ui.button("添加关注公众号", icon="add").props("unelevated color=teal-9 no-caps")
 
@@ -575,21 +577,10 @@ def _build_followed_accounts(
                 with ui.column().classes("gap-1 col"):
                     ui.label("极致了 API").classes("text-subtitle1 text-weight-bold")
                     ui.label(
-                        "通过极致了实时历史文章接口，按公众号名称、原始 ID 或示例文章链接"
-                        "获取近期公开文章。接口按极致了账户规则计费。"
+                        "由平台管理员统一配置并加密保管，用于选题雷达获取近期公开文章；"
+                        "普通用户无需也不能填写 API Key。"
                     ).classes("muted")
-                    jizhile_status_label = ui.label("").classes("text-caption")
-                jizhile_status_badge = ui.badge("")
-            with ui.row().classes("items-center gap-2 q-mt-sm"):
-                jizhile_config_btn = ui.button("配置 API", icon="key").props(
-                    "outline dense color=teal-9 no-caps"
-                )
-                jizhile_test_btn = ui.button("测试连接", icon="wifi_tethering").props(
-                    "flat dense color=teal-9 no-caps"
-                )
-                jizhile_clear_btn = ui.button("清除配置", icon="delete_outline").props(
-                    "flat dense color=red-7 no-caps"
-                )
+                ui.badge("平台统一管理", color="teal-8")
 
     host = ui.column().classes("w-full gap-3")
 
@@ -612,7 +603,6 @@ def _build_followed_accounts(
             target_account_count=len(state.account_options()),
             on_queue=queue_article,
             on_configure_backend=backend_config_dialog,
-            on_configure_jizhile=jizhile_config_dialog,
         )
 
     def refresh_backend_status() -> None:
@@ -628,31 +618,6 @@ def _build_followed_accounts(
             (f"会话备注：{session_label}。" if session_label else "")
             + "Token 和 Cookie 使用 Windows 当前用户加密保存，界面不会回显明文。"
         )
-
-    def refresh_jizhile_status() -> None:
-        settings = service.get_jizhile_settings()
-        configured = bool(settings.get("has_key"))
-        enabled = bool(settings.get("enabled") and configured)
-        jizhile_status_badge.set_text(
-            "已启用" if enabled else ("已配置，未启用" if configured else "未配置")
-        )
-        jizhile_status_badge.props(
-            "color=green-7"
-            if enabled
-            else ("color=orange-7" if configured else "color=grey-6")
-        )
-        label = str(settings.get("session_label") or "").strip()
-        balance = settings.get("remain_money")
-        checked_at = str(settings.get("checked_at") or "").strip()
-        details = []
-        if label:
-            details.append(f"备注：{label}")
-        if balance is not None:
-            details.append(f"最近余额：{balance}")
-        if checked_at:
-            details.append(f"检测时间：{checked_at}")
-        details.append("API Key 与附加码已加密保存，界面不会回显明文。")
-        jizhile_status_label.set_text(" · ".join(details))
 
     def backend_config_dialog() -> None:
         saved = service.get_backend_search_settings()
@@ -823,123 +788,6 @@ def _build_followed_accounts(
             save_btn.on_click(test_and_save)
         dialog.open()
 
-    def jizhile_config_dialog() -> None:
-        saved = service.get_jizhile_settings()
-        configured = bool(saved.get("has_key"))
-        with ui.dialog() as dialog, ui.card().classes(
-            "w-full ops-dialog-md ops-dialog-scroll"
-        ):
-            ui.label("配置极致了 API").classes("text-h6 text-weight-bold")
-            ui.label(
-                "用于关注公众号的近期文章获取。连接测试只查询账户余额；"
-                "真正点击获取文章时才调用历史文章接口。"
-            ).classes("muted")
-            ui.link(
-                "查看极致了历史文章接口文档",
-                "https://s.apifox.cn/410674f9-f451-4b4f-957a-5f54f243bc83/199746415e0",
-                new_tab=True,
-            ).classes("text-teal-9")
-            key = ui.input(
-                "API Key" + ("（已保存，留空表示不修改）" if saved.get("has_key") else ""),
-                password=True,
-                password_toggle_button=True,
-                placeholder="粘贴极致了账户提供的 API Key",
-            ).classes("w-full").props("outlined stack-label autocomplete=new-password")
-            verifycode = ui.input(
-                "附加码（可选）"
-                + ("（已保存，留空表示不修改）" if saved.get("has_verifycode") else ""),
-                password=True,
-                password_toggle_button=True,
-                placeholder="账户未设置附加码时留空",
-            ).classes("w-full").props("outlined stack-label autocomplete=new-password")
-            session_label = ui.input(
-                "配置备注（可选）",
-                value=str(saved.get("session_label") or ""),
-                placeholder="例如：运营团队极致了账户",
-            ).classes("w-full").props("outlined stack-label")
-            enabled = ui.switch(
-                "验证成功后启用极致了 API",
-                value=bool(saved.get("enabled")) if configured else True,
-            )
-            ui.label(
-                "安全提醒：API Key 与附加码属于敏感凭证，请勿发送到聊天或截图中。"
-                "程序使用当前登录账号的加密配置保存，页面不会回显明文。"
-            ).classes("text-negative text-caption")
-            result_label = ui.label(
-                "尚未验证本次输入" if not configured else "已有配置；可留空后重新测试"
-            ).classes("muted")
-            with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("取消", on_click=dialog.close).props("flat no-caps")
-                test_input_btn = ui.button("仅测试", icon="wifi_tethering").props(
-                    "outline color=teal-9 no-caps"
-                )
-                save_btn = ui.button("测试并保存", icon="verified").props(
-                    "unelevated color=teal-9 no-caps"
-                )
-
-            async def test_input() -> None:
-                set_button_loading(test_input_btn, True, "正在验证极致了 API…")
-                save_btn.disable()
-                try:
-                    result = await run.io_bound(
-                        lambda: service.test_jizhile_api_settings(
-                            key=str(key.value or ""),
-                            verifycode=str(verifycode.value or ""),
-                        )
-                    )
-                    result_label.set_text(
-                        f'验证成功，当前余额：{result.get("remain_money", "-")}'
-                    )
-                    result_label.classes(replace="text-positive")
-                    ui.notify("极致了 API 连接正常", type="positive")
-                except Exception as exc:  # noqa: BLE001
-                    result_label.set_text(str(exc))
-                    result_label.classes(replace="text-negative")
-                    ui.notify(str(exc), type="negative", timeout=15000)
-                finally:
-                    save_btn.enable()
-                    set_button_loading(test_input_btn, False)
-
-            async def test_and_save() -> None:
-                set_button_loading(save_btn, True, "正在测试并安全保存…")
-                test_input_btn.disable()
-                try:
-                    key_value = str(key.value or "")
-                    verifycode_value = str(verifycode.value or "")
-                    label_value = str(session_label.value or "")
-                    should_enable = bool(enabled.value)
-
-                    def verify_and_save() -> None:
-                        result = service.test_jizhile_api_settings(
-                            key=key_value,
-                            verifycode=verifycode_value,
-                        )
-                        service.save_jizhile_api_settings(
-                            enabled=should_enable,
-                            key=key_value,
-                            verifycode=verifycode_value,
-                            session_label=label_value,
-                            remain_money=result.get("remain_money"),
-                            checked_at=str(result.get("request_time") or ""),
-                        )
-
-                    await run.io_bound(verify_and_save)
-                    ui.notify("连接成功，极致了 API 配置已加密保存", type="positive")
-                    dialog.close()
-                    refresh_jizhile_status()
-                    render()
-                except Exception as exc:  # noqa: BLE001
-                    result_label.set_text(str(exc))
-                    result_label.classes(replace="text-negative")
-                    ui.notify(str(exc), type="negative", timeout=15000)
-                finally:
-                    test_input_btn.enable()
-                    set_button_loading(save_btn, False)
-
-            test_input_btn.on_click(test_input)
-            save_btn.on_click(test_and_save)
-        dialog.open()
-
     async def test_saved_backend() -> None:
         set_button_loading(backend_test_btn, True, "正在测试连接…")
         try:
@@ -954,36 +802,10 @@ def _build_followed_accounts(
         finally:
             set_button_loading(backend_test_btn, False)
 
-    async def test_saved_jizhile() -> None:
-        set_button_loading(jizhile_test_btn, True, "正在测试连接…")
-        try:
-            result = await run.io_bound(service.test_jizhile_api_settings)
-            saved = service.get_jizhile_settings()
-            service.save_jizhile_api_settings(
-                enabled=bool(saved.get("enabled")),
-                session_label=str(saved.get("session_label") or ""),
-                remain_money=result.get("remain_money"),
-                checked_at=str(result.get("request_time") or ""),
-            )
-            refresh_jizhile_status()
-            ui.notify(
-                f'极致了 API 连接正常，当前余额：{result.get("remain_money", "-")}',
-                type="positive",
-            )
-        except Exception as exc:  # noqa: BLE001
-            ui.notify(str(exc), type="negative", timeout=15000)
-        finally:
-            set_button_loading(jizhile_test_btn, False)
-
     def clear_backend() -> None:
         service.clear_backend_search_settings()
         refresh_backend_status()
         ui.notify("后台登录态已清除", type="positive")
-
-    def clear_jizhile() -> None:
-        service.clear_jizhile_api_settings()
-        refresh_jizhile_status()
-        ui.notify("极致了 API 配置已清除", type="positive")
 
     backend_config_btn.on_click(backend_config_dialog)
     backend_test_btn.on_click(test_saved_backend)
@@ -991,11 +813,6 @@ def _build_followed_accounts(
     refresh_backend_status()
     if open_backend_config:
         backend_config_dialog()
-    jizhile_config_btn.on_click(jizhile_config_dialog)
-    jizhile_test_btn.on_click(test_saved_jizhile)
-    jizhile_clear_btn.on_click(clear_jizhile)
-    refresh_jizhile_status()
-
     def edit_dialog(existing: dict[str, Any] | None = None) -> None:
         row = dict(existing or {})
         with ui.dialog() as dialog, ui.card().classes("w-full ops-dialog-md"):
@@ -1090,9 +907,9 @@ def _build_followed_accounts(
                         ui.badge("已启用" if account.get("enabled") else "已停用").props("color=green-7" if account.get("enabled") else "color=grey-6")
                     with ui.row().classes("items-center gap-2 q-mt-sm"):
                         refresh_btn = ui.button(
-                            "同步官方发布记录"
+                            f"同步官方发布记录 · {refresh_price}"
                             if str(account.get("fetch_method") or "") == "official"
-                            else "获取近期文章（自动切换）",
+                            else f"获取近期文章 · {refresh_price}",
                             icon="sync" if str(account.get("fetch_method") or "") == "official" else "search",
                         ).props("outline dense color=teal-9 no-caps")
 
@@ -1115,7 +932,8 @@ def _build_followed_accounts(
                                 else:
                                     source_label = str(report.get("source_label") or "可用数据源")
                                     ui.notify(
-                                        f'已通过{source_label}发现并同步 {report["added"]} 篇文章',
+                                        f'已通过{source_label}发现并同步 {report["added"]} 篇文章，'
+                                        f'本次 {report.get("points", article_refresh_points)} 积分',
                                         type="positive",
                                     )
                                     if report.get("warning"):
@@ -1145,7 +963,11 @@ def _build_followed_accounts(
         set_button_loading(refresh_all_btn, True, "正在刷新全部关注公众号…")
         try:
             report = await run.io_bound(service.discover_all)
-            ui.notify(f'刷新完成，共发现并同步 {report["added"]} 篇文章', type="positive")
+            ui.notify(
+                f'刷新完成，共发现并同步 {report["added"]} 篇文章，'
+                f'本次 {report.get("points", 0)} 积分',
+                type="positive",
+            )
             render()
         except Exception as exc:  # noqa: BLE001
             ui.notify(f"刷新失败：{exc}", type="negative")

@@ -160,11 +160,12 @@ def test_followed_article_fetch_failure_uses_persistent_configuration_dialog() -
     assert 'ui.dialog().props("persistent")' in source
     assert '"获取公众号文章失败"' in source
     assert '"去配置登录态"' in source
-    assert '"配置极致了 API"' in source
+    assert '"极致了 API 由平台管理员统一维护' in source
+    assert '"配置极致了 API"' not in source
     assert "dialog.close()" in source
     assert "on_configure_backend()" in source
-    assert "on_configure_jizhile()" in source
-    assert '"获取最新文章（自动切换）"' in source
+    assert "on_configure_jizhile" not in source
+    assert 'f"获取最新文章 · {refresh_price}"' in source
     assert 'ui.notify(f"获取失败：' not in source
     assert 'ui.notify(f"加载更多失败：' not in source
 

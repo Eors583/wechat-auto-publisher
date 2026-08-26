@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any
 
 import pytest
 from nicegui import ui
 
+from app.admin import server as admin_server
 from app.providers.wechat_backend_search import (
     WechatBackendSearchError,
     normalize_backend_cookie,
     normalize_backend_token,
 )
 from app.ui.panels import topics
+from app.ui.panels.jizhile import build_admin_jizhile_panel
 
 
 class _FakeDb:
@@ -33,15 +36,8 @@ class _FakeFollowedContentService:
     def list_accounts(self) -> list[dict[str, Any]]:
         return []
 
-    def get_jizhile_settings(self) -> dict[str, Any]:
-        return {
-            "enabled": False,
-            "has_key": False,
-            "has_verifycode": False,
-            "session_label": "",
-            "remain_money": None,
-            "checked_at": "",
-        }
+    def article_refresh_points(self) -> int:
+        return 10
 
 
 class _FakeState:
@@ -110,7 +106,7 @@ def test_backend_login_dialog_contains_embedded_beginner_tutorial() -> None:
     assert "留空输入框会保留已保存内容" in snapshot
 
 
-def test_followed_accounts_exposes_jizhile_api_configuration() -> None:
+def test_followed_accounts_keeps_jizhile_configuration_in_admin_backend() -> None:
     try:
         topics._build_followed_accounts(
             _FakeState(),
@@ -118,20 +114,29 @@ def test_followed_accounts_exposes_jizhile_api_configuration() -> None:
             workspace_tabs=object(),
             tab_wizard=object(),
         )
-        _click_button("配置 API")
         snapshot = _snapshot()
     finally:
         ui.context.client.remove_all_elements()
 
     assert "更多设置：文章获取数据源" in snapshot
     assert "极致了 API" in snapshot
-    assert "配置极致了 API" in snapshot
-    assert "API Key" in snapshot
-    assert "附加码（可选）" in snapshot
-    assert "历史文章接口文档" in snapshot
-    assert "连接测试只查询账户余额" in snapshot
-    assert "测试并保存" in snapshot
-    assert "页面不会回显明文" in snapshot
+    assert "平台统一管理" in snapshot
+    assert "普通用户无需也不能填写 API Key" in snapshot
+    assert "配置极致了 API" not in snapshot
+    assert "配置 API" not in snapshot
+    assert "刷新全部 · 每个公众号10积分" in snapshot
+
+
+def test_admin_backend_owns_jizhile_credentials() -> None:
+    admin_source = inspect.getsource(admin_server.create_admin_app)
+    panel_source = inspect.getsource(build_admin_jizhile_panel)
+
+    assert 'ui.tab("选题雷达", icon="radar")' in admin_source
+    assert "build_admin_jizhile_panel(state)" in admin_source
+    assert 'state.db.for_user(None)' in panel_source
+    assert '"API Key"' in panel_source
+    assert '"测试并保存"' in panel_source
+    assert "save_jizhile_settings(" in panel_source
 
 
 def test_backend_login_input_normalizers_accept_beginner_copy_formats() -> None:

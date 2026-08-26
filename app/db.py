@@ -21,9 +21,11 @@ from app.schema_migrations import (
     COMMERCIAL_POINTS_BILLING,
     DROP_DUPLICATE_INDEXES,
     PHASE_ONE_COMPAT,
+    PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH,
     SHADOW_BILLING_SCHEMA,
     STRICT_TOKEN_METERING,
     apply_commercial_points_billing_schema,
+    apply_platform_jizhile_and_followed_refresh,
     apply_shadow_billing_schema,
     apply_strict_token_metering_schema,
     ensure_schema_migrations,
@@ -1237,6 +1239,16 @@ class Database:
                 record_schema_migration(
                     conn,
                     COMMERCIAL_POINTS_BILLING,
+                    applied_at=_utc_now(),
+                )
+            if not migration_applied(
+                conn,
+                PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH,
+            ):
+                apply_platform_jizhile_and_followed_refresh(conn)
+                record_schema_migration(
+                    conn,
+                    PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH,
                     applied_at=_utc_now(),
                 )
 

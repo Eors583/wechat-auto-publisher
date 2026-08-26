@@ -28,7 +28,12 @@ from app.services import (
     get_batch_service,
 )
 from app.services.auth import AuthService
-from app.services.billing import BillingService, live_configuration_issues
+from app.services.billing import (
+    BillingConfigurationError,
+    BillingService,
+    InsufficientCreditsError,
+    live_configuration_issues,
+)
 from app.services.configuration import ConfigurationService
 from app.services.failures import (
     classify_job_failure,
@@ -1096,15 +1101,42 @@ def create_api_app(
         return {"ok": True}
 
     @app.post("/api/v1/followed-accounts/{account_id}/refresh", dependencies=[Depends(require_token)])
-    def refresh_followed_account(account_id: str) -> dict[str, Any]:
+    def refresh_followed_account(
+        account_id: str,
+        idempotency_key: str | None = Header(
+            default=None,
+            alias="Idempotency-Key",
+        ),
+    ) -> dict[str, Any]:
         try:
-            return followed_service.discover_account(account_id)
+            return followed_service.discover_account(
+                account_id,
+                source_channel="api",
+                idempotency_key=str(idempotency_key or ""),
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except InsufficientCreditsError as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        except BillingConfigurationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/v1/followed-accounts/refresh", dependencies=[Depends(require_token)])
-    def refresh_all_followed_accounts() -> dict[str, Any]:
-        return followed_service.discover_all()
+    def refresh_all_followed_accounts(
+        idempotency_key: str | None = Header(
+            default=None,
+            alias="Idempotency-Key",
+        ),
+    ) -> dict[str, Any]:
+        try:
+            return followed_service.discover_all(
+                source_channel="api",
+                idempotency_key=str(idempotency_key or ""),
+            )
+        except InsufficientCreditsError as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        except BillingConfigurationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/v1/followed-articles", dependencies=[Depends(require_token)])
     def list_followed_articles(

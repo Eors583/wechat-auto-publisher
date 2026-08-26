@@ -12,6 +12,7 @@ from app.services.wechat_relay_settings import public_wechat_relay_settings
 from app.ui.auth_persistence import auth_session_middleware_kwargs
 from app.ui.panels.auth import AUTH_STORAGE_KEY, current_desktop_user
 from app.ui.panels.billing import build_admin_billing_panel
+from app.ui.panels.jizhile import build_admin_jizhile_panel
 from app.ui.panels.settings_hub import build_model_management_panel
 from app.ui.panels.wechat_relay import build_wechat_relay_panel
 from app.ui.state import AppState, set_button_loading
@@ -132,7 +133,8 @@ def _build_admin_login(state: AppState) -> None:
                 "text-h5 text-weight-bold text-teal-10"
             )
             ui.label(
-                "统一管理平台模型、用户和微信公众号云中转。仅管理员账号可以登录。"
+                "统一管理平台模型、选题雷达数据源、用户和微信公众号云中转。"
+                "仅管理员账号可以登录。"
             ).classes("text-body2 text-grey-7")
             username = (
                 ui.input("管理员账号")
@@ -311,7 +313,7 @@ def create_admin_app() -> None:
                         "text-h5 text-weight-bold"
                     )
                     ui.label(
-                        "统一管理公共模型、用户权限和微信固定 IP 中转"
+                        "统一管理公共模型、选题雷达数据源、用户权限和微信固定 IP 中转"
                     ).classes("text-body2 text-blue-grey-2")
                 with ui.row().classes("items-center q-gutter-sm"):
                     ui.badge(
@@ -332,6 +334,7 @@ def create_admin_app() -> None:
                 overview_tab = ui.tab("控制台", icon="dashboard")
                 models_tab = ui.tab("公共模型", icon="smart_toy")
                 relay_tab = ui.tab("微信中转", icon="cloud_sync")
+                jizhile_tab = ui.tab("选题雷达", icon="radar")
                 billing_tab = ui.tab("AI 成本", icon="query_stats")
                 users_tab = ui.tab("用户管理", icon="group")
             with ui.tab_panels(
@@ -347,6 +350,8 @@ def create_admin_app() -> None:
                         state,
                         allow_test_account_configuration=True,
                     )
+                with ui.tab_panel(jizhile_tab).classes("q-pa-none"):
+                    build_admin_jizhile_panel(state)
                 with ui.tab_panel(billing_tab).classes("q-pa-none"):
                     build_admin_billing_panel(state)
                 with ui.tab_panel(users_tab).classes("q-pa-none"):

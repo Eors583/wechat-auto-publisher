@@ -18,7 +18,6 @@ from app.ui.interaction_feedback import (
 )
 from app.ui.state import set_button_loading
 
-
 ARTICLE_LOAD_STEP = 8
 ARTICLE_LOAD_MAX = 100
 ARTICLE_RENDER_PAGE_SIZE = 8
@@ -79,7 +78,6 @@ def open_followed_articles_dialog(
     target_account_count: int,
     on_queue: Callable[[dict[str, Any], bool], None],
     on_configure_backend: Callable[[], None],
-    on_configure_jizhile: Callable[[], None] | None = None,
 ) -> None:
     """Show one followed account's recent public articles in a focused dialog."""
 
@@ -88,6 +86,8 @@ def open_followed_articles_dialog(
         ui.notify("关注公众号不存在或已删除", type="warning")
         return
     account_name = str(account.get("name") or "关注公众号")
+    article_refresh_points = service.article_refresh_points()
+    refresh_price = f"{article_refresh_points}积分"
 
     with ui.dialog() as dialog, ui.card().classes(
         "w-full ops-dialog-xl ops-dialog-scroll"
@@ -126,7 +126,7 @@ def open_followed_articles_dialog(
             unread = ui.switch("只看未读")
             unrewritten = ui.switch("只看未改写")
             favorite = ui.switch("只看收藏")
-            refresh_btn = ui.button("获取最新文章（自动切换）", icon="sync").props(
+            refresh_btn = ui.button(f"获取最新文章 · {refresh_price}", icon="sync").props(
                 "outline color=teal-9 no-caps"
             )
             add_btn = ui.button("手动添加文章链接", icon="add_link").props(
@@ -164,7 +164,7 @@ def open_followed_articles_dialog(
                         ui.label(message).classes("text-body1")
                         ui.label(
                             "系统已按顺序尝试该公众号的首选数据源和其他已启用数据源。"
-                            "你可以分别检查极致了 API 和公众号后台登录态。"
+                            "极致了 API 由平台管理员统一维护；你可以检查自己的公众号后台登录态。"
                         ).classes("muted text-caption q-mt-xs")
 
                 def configure_backend() -> None:
@@ -172,22 +172,10 @@ def open_followed_articles_dialog(
                     dialog.close()
                     on_configure_backend()
 
-                def configure_jizhile() -> None:
-                    error_dialog.close()
-                    dialog.close()
-                    if on_configure_jizhile is not None:
-                        on_configure_jizhile()
-
                 with ui.row().classes("w-full justify-end gap-2 q-mt-md"):
                     ui.button("关闭", on_click=error_dialog.close).props(
                         "flat color=grey-8 no-caps"
                     )
-                    if on_configure_jizhile is not None:
-                        ui.button(
-                            "配置极致了 API",
-                            icon="api",
-                            on_click=configure_jizhile,
-                        ).props("outline color=teal-9 no-caps")
                     ui.button(
                         "去配置登录态",
                         icon="key",
@@ -333,7 +321,7 @@ def open_followed_articles_dialog(
 
         with ui.row().classes("w-full justify-center q-mt-sm"):
             load_more_btn = ui.button(
-                "加载更多文章",
+                f"加载更多文章 · {refresh_price}",
                 icon="expand_more",
             ).props("outline color=teal-9 no-caps")
 
@@ -343,7 +331,7 @@ def open_followed_articles_dialog(
 
         def update_load_more_button() -> None:
             if fetch_state["has_more"]:
-                load_more_btn.set_text("加载更多文章")
+                load_more_btn.set_text(f"加载更多文章 · {refresh_price}")
                 load_more_btn.enable()
             else:
                 load_more_btn.set_text("没有更多文章了")
@@ -361,7 +349,8 @@ def open_followed_articles_dialog(
                 else:
                     source_label = str(report.get("source_label") or "可用数据源")
                     ui.notify(
-                        f'已通过{source_label}发现并同步 {report.get("added", 0)} 篇文章',
+                        f'已通过{source_label}发现并同步 {report.get("added", 0)} 篇文章，'
+                        f'本次 {report.get("points", article_refresh_points)} 积分',
                         type="positive",
                     )
                     if report.get("warning"):
@@ -421,6 +410,7 @@ def open_followed_articles_dialog(
                     source_label = str(report.get("source_label") or "可用数据源")
                     ui.notify(
                         f"已通过{source_label}加载 {new_count} 篇更早文章；"
+                        f"本次 {report.get('points', article_refresh_points)} 积分；"
                         "若当前列表未显示，请扩大日期范围",
                         type="positive",
                     )

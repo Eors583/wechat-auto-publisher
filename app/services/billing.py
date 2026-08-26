@@ -306,6 +306,32 @@ class BillingService:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    def ensure_task_capacity(self, task_code: str, *, count: int = 1) -> None:
+        """Reject a fixed-price batch before any paid provider work starts."""
+
+        owner_user_id = str(self.db.owner_user_id or "").strip()
+        policy = self.db.get_billing_pricing_policy()
+        if not owner_user_id or billing_mode(policy) != "live":
+            return
+        task_count = max(0, int(count))
+        if task_count == 0:
+            return
+        rate = self.db.get_billing_task_rate(task_code)
+        if not rate:
+            raise BillingConfigurationError(
+                f"任务 {task_code} 尚未配置积分价卡，暂不能正式计费"
+            )
+        required = max(0, int(rate.get("max_reserve_points") or 0)) * task_count
+        if required <= 0:
+            raise BillingConfigurationError("该任务尚未配置最高冻结积分")
+        self.db.release_expired_credit_reservations()
+        available = int(self.db.credit_wallet_summary().get("available") or 0)
+        if available < required:
+            raise InsufficientCreditsError(
+                f"积分不足：本次批量操作需冻结 {required} 积分，"
+                f"当前可用 {available} 积分"
+            )
+
     @contextmanager
     def operation(
         self,
@@ -317,6 +343,7 @@ class BillingService:
         idempotency_key: str = "",
         job_id: int | None = None,
         task_code: str = "",
+        task_only: bool = False,
     ) -> Iterator[str | None]:
         owner_user_id = str(self.db.owner_user_id or "").strip()
         policy = self.db.get_billing_pricing_policy()
@@ -420,6 +447,7 @@ class BillingService:
                 mode=mode,
                 policy=policy,
                 task_rate=task_rate or {},
+                task_only=task_only,
             )
             raise
         else:
@@ -429,6 +457,7 @@ class BillingService:
                 mode=mode,
                 policy=policy,
                 task_rate=task_rate or {},
+                task_only=task_only,
             )
 
     def _record_event(
@@ -503,6 +532,7 @@ class BillingService:
         mode: str,
         policy: dict[str, Any],
         task_rate: dict[str, Any],
+        task_only: bool = False,
     ) -> None:
         totals = self.db.usage_operation_totals(operation_id)
         event_count = int(totals.get("event_count") or 0)
@@ -511,11 +541,11 @@ class BillingService:
         customer_events = int(totals.get("customer_funded_events") or 0)
         task_base_points = (
             int(task_rate.get("base_points") or 0)
-            if status == "succeeded" and event_count > 0
+            if status == "succeeded" and (event_count > 0 or task_only)
             else 0
         )
         resource_points = 0
-        if status == "succeeded" and platform_events:
+        if status == "succeeded" and platform_events and not task_only:
             capacity = pricing_capacity(policy)
             cost = int(totals.get("risk_adjusted_cost_micro_cny") or 0)
             cost += max(
@@ -529,7 +559,7 @@ class BillingService:
                 ),
                 int(policy.get("rounding_points") or 5),
             )
-        elif status == "succeeded" and customer_events:
+        elif status == "succeeded" and customer_events and not task_only:
             resource_points = max(
                 0,
                 int(policy.get("byok_infrastructure_points") or 0),
@@ -538,9 +568,14 @@ class BillingService:
         uncapped_points = task_base_points + resource_points
         pricing_complete = bool(
             status == "succeeded"
-            and event_count > 0
-            and unpriced_events == 0
-            and (platform_events > 0 or customer_events > 0)
+            and (
+                task_only
+                or (
+                    event_count > 0
+                    and unpriced_events == 0
+                    and (platform_events > 0 or customer_events > 0)
+                )
+            )
         )
         final_status = status
         charged_points = 0
@@ -567,6 +602,7 @@ class BillingService:
                 pricing_complete and uncapped_points > reserved_points
             ),
             "pricing_complete": pricing_complete,
+            "task_only": bool(task_only),
             "unpriced_platform_events": unpriced_events,
             "provider_cost_micro_cny": int(
                 totals.get("provider_cost_micro_cny") or 0
@@ -608,6 +644,7 @@ class BillingService:
         mode: str,
         policy: dict[str, Any],
         task_rate: dict[str, Any],
+        task_only: bool = False,
     ) -> None:
         try:
             self._finish_operation(
@@ -616,6 +653,7 @@ class BillingService:
                 mode=mode,
                 policy=policy,
                 task_rate=task_rate,
+                task_only=task_only,
             )
         except Exception:  # noqa: BLE001
             logger.exception(

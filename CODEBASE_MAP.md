@@ -194,6 +194,7 @@ Visual authority: `docs/ui-style-spec.md`, `docs/codex/pixel-audit/`,
 | `auth.py` | Login/register/logout UI; stores only the opaque token in NiceGUI user storage and delegates to `AuthService`. |
 | `topics.py` | “选题雷达”: topic list/table, pagination/filtering, followed accounts, source management and refresh actions. |
 | `followed_articles.py` | Recent-article dialog for one followed account, pagination/load limits, cover proxy and actionable fetch errors. |
+| `jizhile.py` | Merchant-only Jizhile provider configuration for Topic Radar; customer pages can use the platform provider but cannot view or edit its credentials. |
 | `tasks.py` | “任务队列” plus full-page article review. Owns the single all-batches list, its filters/internal scrolling, retry/progress, title/body/image/history views, confirmation, AI review UI, background rewrite and draft-write confirmation. Business calls still go to `BatchService`. |
 | `review_jury.py` | AI review progress calculation, risk/result panel, review-profile configuration and profile options. |
 | `models.py` | Reusable custom model create/edit form, provider presets, local/API model choice and connection testing. Customer model management is embedded in the account default-model selector; platform model management remains in the merchant admin surface. |
@@ -229,9 +230,9 @@ Primary tab ownership inside `desktop.py`:
 | `feishu_integrations.py` | Per-user Feishu integration security boundary: encrypted credentials, globally unique App ID, dedicated callback key, public-HTTPS callback resolution, account/model ownership checks, p2p identity binding, hashed expiring pairing codes and safe legacy migration. |
 | `local_agents.py` | One-time device pairing, Agent Token authentication, device management, fixed `chat.completions` claims, 60-second leases and idempotent result submission. |
 | `creation_plans.py` | Reusable plans combining prompts, layout, image/cover and review settings; account defaults and account-specific template bindings. |
-| `followed_content.py` | Followed-account CRUD and article discovery. Chooses available acquisition paths (Jizhile, WeChat backend state, RSS/manual) and persists articles per user. |
+| `followed_content.py` | Followed-account CRUD and billable article discovery. Chooses available acquisition paths (platform Jizhile, per-user WeChat backend state, RSS/manual), charges one fixed task fee per successful upstream refresh and persists articles per user. |
 | `topic_sources.py` | Source CRUD, default sources, refresh/search/pagination and manual topics; adapters for RSS, Bing/Google, 36Kr and hot APIs. |
-| `jizhile_settings.py` | Per-user encrypted Jizhile configuration, public masked view, effective values and clear. |
+| `jizhile_settings.py` | Platform-scoped encrypted Jizhile configuration, safe public status/effective values and merchant-only save/test/clear operations. |
 | `wechat_backend_settings.py` | Per-user WeChat backend Token/Cookie state, masked public view and clear. |
 | `wechat_layout_import.py` | Fetches/parses a public WeChat article's typography: font size/weight/color, spacing, indentation, headings and safe preview HTML. |
 | `wechat_delivery.py` | Idempotent draft writing and reconciliation after uncertain network results; cached connection health; prevents duplicate drafts. |
@@ -433,7 +434,7 @@ non-transactional index work uses an autocommit connection and the same lock.
 | `processed_events` | shared compatibility | Generic cross-entry event idempotency still used by the WeChat command-agent webhook; it is not part of new Feishu Webhook storage and must not be retired until WeChat idempotency moves to an owner/account-scoped table |
 | `schema_migrations` | platform/schema | Ordered version/name/checksum/application-time history; never stores customer data |
 | `billing_plans`, `model_price_cards` | platform/billing | Plan metadata and TOKEN/FIXED/UNIT/BYOK provider cost cards; no online payment capture |
-| `billing_pricing_policies`, `billing_task_rates` | platform/billing | Versioned point-value/margin/risk policy and per-task base/freeze limits; seeded in migration `20260825_0006` with shadow mode as the safe default |
+| `billing_pricing_policies`, `billing_task_rates` | platform/billing | Versioned point-value/margin/risk policy and per-task base/freeze limits; seeded in migration `20260825_0006` with shadow mode as the safe default, while `20260826_0007` adds the fixed followed-article refresh rate |
 | `user_subscriptions`, `credit_buckets`, `credit_ledger` | user/billing | Subscription periods and append-only points grant/ledger data |
 | `usage_operations`, `ai_usage_events` | user/billing | Idempotent operation envelope and one sanitized event per physical provider call; migration `20260825_0005` adds strict Token/Credit truth, while `20260825_0006` adds task/resource/final-point snapshots plus atomic reservation settlement without treating missing usage as zero. |
 | `ads` | user/config-compatible | Advertisement pool and use tracking |
@@ -472,7 +473,7 @@ Use this table before searching the whole repository.
 | Layout tokens/styles/overflow | `ui/style_tokens.py`, `ui/styles.py` | affected component DOM in browser | `test_ui_style_tokens.py`, `test_ui_review_design_system.py`, `test_ui_performance_contract.py` |
 | Import layout from WeChat article | account layout UI in `desktop.py` | `services/wechat_layout_import.py`, `layout_profiles.py` | `test_wechat_layout_import.py`, `test_template_snapshot.py` |
 | Topic radar/list/pagination | `ui/panels/topics.py` | `services/topic_sources.py`, DB topic tables, API topic routes | `test_topic_center.py`, `test_topics_catalog.py`, `test_topic_navigation.py` |
-| Followed account recent articles | `ui/panels/topics.py`, `followed_articles.py` | `services/followed_content.py`, provider adapters, per-user settings | `test_article_search.py`, `test_wechat_backend_search.py`, `test_jizhile_api.py`, `test_topic_center.py` |
+| Followed account recent articles | `ui/panels/topics.py`, `followed_articles.py` | `services/followed_content.py`, fixed-task billing, platform Jizhile and per-user backend-search settings | `test_article_search.py`, `test_wechat_backend_search.py`, `test_jizhile_api.py`, `test_topic_center.py` |
 | Jizhile failures/fallback | `services/followed_content.py:discover_account` | `providers/jizhile_api.py`, `services/jizhile_settings.py`, backend-search provider/settings | `test_jizhile_api.py`, `test_wechat_backend_search.py` |
 | Generate/rewrite content | `services/batches.py:create_batch` | `Pipeline`, `workflows/generation.py`, selected AI client | `test_batch.py`, `test_p0_backend.py`, provider/model tests |
 | Token/Credit metering and commercial points | `ai/usage.py`, provider client, `services/batches.py` task code | `services/billing.py`, billing migrations/DB reservation ledger, admin/user billing panels and API | `test_ai_usage.py`, `test_billing.py`, `test_commercial_billing.py`, `test_schema_migrations_postgres.py`, `test_ui_review_inbox.py` |
@@ -527,16 +528,19 @@ chooses; never silently overwrite the article after background rewrite.
 ```text
 topics followed-account action / followed_articles dialog
   -> FollowedContentService.discover_account
-  -> effective per-user Jizhile settings, when valid
+  -> BillingService fixed-task reserve (one fee per requested account)
+  -> effective platform Jizhile settings, when valid
   -> effective per-user WeChat backend Token/Cookie search, when valid
   -> other supported/manual/RSS path
   -> normalize/deduplicate and DB.upsert_followed_article
+  -> settle one successful refresh fee or release the reservation on failure
   -> paginated list in the dialog/table
 ```
 
-When acquisition fails, show a durable dialog with the actual sanitized reason
-and a route to the relevant login/API settings. Do not use a disappearing toast
-as the only error explanation.
+When acquisition fails, show a durable dialog with the actual sanitized reason,
+a customer-owned backend-login action when applicable, and a clear platform-
+provider status for merchant-owned Jizhile configuration. Do not use a
+disappearing toast as the only error explanation.
 
 ### 7.4 Draft writing
 
@@ -943,7 +947,7 @@ unless noted.
 | `app/services/failures.py` | Sanitized/classified failures. |
 | `app/services/followed_content.py` | Followed accounts and recent articles. |
 | `app/services/image_prompts.py` | Article-level visual brief and argument-level image prompt agent orchestration. |
-| `app/services/jizhile_settings.py` | Per-user Jizhile settings. |
+| `app/services/jizhile_settings.py` | Platform-scoped Jizhile settings and merchant-only mutations. |
 | `app/services/job_attempts.py` | Attempt heartbeat/lease/backoff. |
 | `app/services/model_readiness.py` | Model auth-failure readiness state. |
 | `app/services/onboarding.py` | Onboarding workflow/readiness. |
@@ -984,6 +988,7 @@ unless noted.
 | `app/ui/panels/billing.py` | Customer point/usage ledger and merchant policy/task/provider-price/grant controls. |
 | `app/ui/panels/feishu.py` | Feishu settings UI. |
 | `app/ui/panels/followed_articles.py` | Followed-account article dialog. |
+| `app/ui/panels/jizhile.py` | Merchant-only Jizhile provider configuration. |
 | `app/ui/panels/models.py` | Custom/local/API model editor. |
 | `app/ui/panels/onboarding_wizard.py` | First-run wizard/readiness banner. |
 | `app/ui/panels/overview.py` | Compact overview cards. |

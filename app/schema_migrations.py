@@ -66,6 +66,14 @@ COMMERCIAL_POINTS_BILLING = SchemaMigration(
         "credit reservation and release idempotency"
     ),
 )
+PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH = SchemaMigration(
+    "20260826_0007",
+    "platform_jizhile_and_followed_refresh",
+    (
+        "move the legacy default-owner Jizhile credential into one platform "
+        "setting and seed a fixed ten-point followed-article refresh task rate"
+    ),
+)
 
 SCHEMA_MIGRATIONS = (
     BASELINE_SCHEMA,
@@ -74,6 +82,7 @@ SCHEMA_MIGRATIONS = (
     SHADOW_BILLING_SCHEMA,
     STRICT_TOKEN_METERING,
     COMMERCIAL_POINTS_BILLING,
+    PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH,
 )
 
 
@@ -432,6 +441,56 @@ def apply_commercial_points_billing_schema(conn: Any) -> None:
         )
 
 
+def apply_platform_jizhile_and_followed_refresh(conn: Any) -> None:
+    """Centralize Jizhile credentials and price one upstream article refresh."""
+
+    platform_key = "platform.jizhile_api"
+    existing = conn.execute(
+        "SELECT 1 FROM app_settings WHERE key = ?",
+        (platform_key,),
+    ).fetchone()
+    if not existing:
+        legacy = conn.execute(
+            """
+            SELECT customer.value
+            FROM user_settings AS customer
+            JOIN app_settings AS claim
+              ON claim.key = 'migration.customer_data_owner.v1'
+             AND claim.value = customer.user_id
+            WHERE customer.key = 'jizhile_api'
+            LIMIT 1
+            """
+        ).fetchone()
+        if not legacy:
+            legacy = conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'jizhile_api' LIMIT 1"
+            ).fetchone()
+        if legacy:
+            conn.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO NOTHING
+                """,
+                (platform_key, str(legacy["value"]), "2026-08-26T00:00:00+00:00"),
+            )
+
+    seed_time = "2026-08-26T00:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO billing_task_rates (
+            task_code, label, base_points, max_reserve_points,
+            enabled, version, created_at, updated_at
+        ) VALUES (
+            'followed_articles_refresh', '获取公众号文章', 10, 10,
+            1, 1, ?, ?
+        )
+        ON CONFLICT(task_code) DO NOTHING
+        """,
+        (seed_time, seed_time),
+    )
+
+
 def ensure_schema_migrations(conn: Any) -> None:
     conn.execute(
         """
@@ -503,12 +562,14 @@ __all__ = [
     "COMMERCIAL_POINTS_BILLING",
     "DROP_DUPLICATE_INDEXES",
     "PHASE_ONE_COMPAT",
+    "PLATFORM_JIZHILE_AND_FOLLOWED_REFRESH",
+    "SCHEMA_MIGRATIONS",
     "SHADOW_BILLING_SCHEMA",
     "STRICT_TOKEN_METERING",
-    "SCHEMA_MIGRATIONS",
     "SchemaMigration",
-    "apply_shadow_billing_schema",
     "apply_commercial_points_billing_schema",
+    "apply_platform_jizhile_and_followed_refresh",
+    "apply_shadow_billing_schema",
     "apply_strict_token_metering_schema",
     "ensure_schema_migrations",
     "migration_applied",

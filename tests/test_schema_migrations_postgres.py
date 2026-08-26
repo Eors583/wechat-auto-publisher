@@ -14,6 +14,10 @@ from app.db import _POSTGRES_SCHEMA_INITIALIZED, Database
 from app.db_audit import audit_database
 from app.schema_migrations import PHASE_ONE_COMPAT, SCHEMA_MIGRATIONS
 from app.services.auth import AuthService
+from app.services.jizhile_settings import (
+    effective_jizhile_settings,
+    save_jizhile_settings,
+)
 
 POSTGRES_ADMIN_URL = os.environ.get("POSTGRES_SCHEMA_TEST_URL", "").strip()
 pytestmark = pytest.mark.skipif(
@@ -174,6 +178,29 @@ def _rewind_phase_one(database_url: str) -> None:
             """
         )
     _POSTGRES_SCHEMA_INITIALIZED.discard(database_url)
+
+
+def test_platform_jizhile_migration_preserves_legacy_default_owner_setting(
+    postgres_database_url: str,
+) -> None:
+    root = Database(postgres_database_url)
+    user = AuthService(root).register("legacy-jizhile-owner", "secure-pass-123")
+    save_jizhile_settings(root, enabled=True, key="legacy-platform-secret")
+    legacy_value = root.get_setting("platform.jizhile_api") or ""
+    root.set_setting("migration.customer_data_owner.v1", str(user["id"]))
+    root.for_user(str(user["id"])).set_user_setting("jizhile_api", legacy_value)
+    with psycopg.connect(postgres_database_url) as conn:
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = 'platform.jizhile_api'"
+        )
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = '20260826_0007'"
+        )
+    _POSTGRES_SCHEMA_INITIALIZED.discard(postgres_database_url)
+
+    upgraded = Database(postgres_database_url)
+
+    assert effective_jizhile_settings(upgraded)["key"] == "legacy-platform-secret"
 
 
 def test_fresh_postgres_schema_records_all_versioned_migrations(
