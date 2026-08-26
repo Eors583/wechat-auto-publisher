@@ -956,7 +956,12 @@ def _build_followed_accounts(
                         ui.button("编辑", on_click=lambda _=None, row=dict(account): edit_dialog(row)).props("flat dense color=teal-9 no-caps")
                         ui.button(
                             "删除",
-                            on_click=lambda _=None, account_id=str(account["id"]): _delete_followed_account(service, account_id, render),
+                            on_click=lambda _=None, row=dict(account): _confirm_delete_followed_account(
+                                service,
+                                str(row["id"]),
+                                str(row["name"]),
+                                render,
+                            ),
                         ).props("flat dense color=red-7 no-caps")
 
     async def refresh_all() -> None:
@@ -1123,12 +1128,33 @@ def _queue_for_wizard(
     )
 
 
-def _delete_followed_account(
-    service: FollowedContentService, account_id: str, render: Callable[[], None]
+def _confirm_delete_followed_account(
+    service: FollowedContentService,
+    account_id: str,
+    account_name: str,
+    render: Callable[[], None],
 ) -> None:
-    service.delete_account(account_id)
-    render()
-    ui.notify("已删除关注公众号", type="positive")
+    with ui.dialog() as dialog, ui.card().classes("ops-dialog-sm"):
+        ui.label("删除关注公众号").classes("text-h6 text-weight-bold")
+        ui.label(
+            f"确定删除关注公众号“{account_name}”吗？删除后无法恢复。"
+        ).classes("ops-wrap-anywhere")
+
+        def remove() -> None:
+            try:
+                service.delete_account(account_id)
+                dialog.close()
+                render()
+                ui.notify("已删除关注公众号", type="positive")
+            except Exception as exc:  # noqa: BLE001
+                ui.notify(f"删除失败：{exc}", type="negative")
+
+        with ui.row().classes("w-full justify-end q-mt-md"):
+            ui.button("取消", on_click=dialog.close).props("flat no-caps")
+            ui.button("确认删除", on_click=remove).props(
+                "unelevated color=negative no-caps"
+            )
+    dialog.open()
 
 
 def _delete_source(

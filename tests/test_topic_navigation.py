@@ -4,6 +4,8 @@ import inspect
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+from nicegui import ui
+
 from app.ui import desktop
 from app.ui.panels.followed_articles import (
     ARTICLE_LOAD_MAX,
@@ -16,6 +18,7 @@ from app.ui.panels.topics import (
     TOPIC_CENTER_TABS,
     _build_followed_accounts,
     _build_hot_topics,
+    _confirm_delete_followed_account,
     _queue_for_wizard,
     build_topic_center,
 )
@@ -31,9 +34,63 @@ class _FakeTabs:
         self.value = value
 
 
+class _DeleteFollowedAccountService:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    def delete_account(self, account_id: str) -> None:
+        self.deleted.append(account_id)
+
+
+def _click_button(label: str) -> None:
+    button = next(
+        element
+        for element in ui.context.client.elements.values()
+        if type(element).__name__ == "Button"
+        and getattr(element, "text", None) == label
+    )
+    listener = next(
+        item
+        for item in button._event_listeners.values()
+        if item.type == "click"
+    )
+    listener.handler(None)
+
+
 def test_topic_center_merges_articles_into_followed_accounts() -> None:
     assert TOPIC_CENTER_TABS == ("我的关注", "选题内容", "来源管理")
     assert "关注文章" not in TOPIC_CENTER_TABS
+
+
+def test_followed_account_delete_requires_confirmation(monkeypatch) -> None:
+    service = _DeleteFollowedAccountService()
+    render_calls: list[bool] = []
+    notifications: list[str] = []
+    monkeypatch.setattr(
+        "app.ui.panels.topics.ui.notify",
+        lambda message, **_kwargs: notifications.append(str(message)),
+    )
+
+    try:
+        _confirm_delete_followed_account(
+            service,
+            "account-1",
+            "蓝血研究",
+            lambda: render_calls.append(True),
+        )
+
+        assert service.deleted == []
+        assert any(
+            "确定删除关注公众号“蓝血研究”吗？" in str(getattr(item, "text", ""))
+            for item in ui.context.client.elements.values()
+        )
+        _click_button("确认删除")
+    finally:
+        ui.context.client.remove_all_elements()
+
+    assert service.deleted == ["account-1"]
+    assert render_calls == [True]
+    assert notifications == ["已删除关注公众号"]
 
 
 def test_followed_accounts_is_the_default_primary_topic_view() -> None:
