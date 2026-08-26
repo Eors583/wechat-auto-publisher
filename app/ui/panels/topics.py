@@ -533,10 +533,6 @@ def _build_followed_accounts(
     *,
     open_backend_config: bool = False,
 ) -> None:
-    official_options = {
-        str(item["id"]): str(item["name"])
-        for item in service.db.list_official_accounts()
-    }
     article_refresh_points = service.article_refresh_points()
     refresh_price = f"{article_refresh_points}积分"
     with ui.row().classes("w-full items-center justify-between"):
@@ -818,37 +814,20 @@ def _build_followed_accounts(
         with ui.dialog() as dialog, ui.card().classes("w-full ops-dialog-md"):
             ui.label("编辑关注公众号" if row else "添加关注公众号").classes("text-h6 text-weight-bold")
             name = ui.input("公众号名称", value=str(row.get("name") or "")).classes("w-full").props("outlined stack-label")
-            wechat_id = ui.input("微信号（可选）", value=str(row.get("wechat_id") or "")).classes("w-full").props("outlined stack-label")
-            with ui.row().classes("w-full gap-3"):
-                category = ui.input("分类", value=str(row.get("category") or "")).classes("col").props("outlined stack-label")
-                default_method = "backend_search"
-                current_method = str(row.get("fetch_method") or default_method)
-                if current_method not in FOLLOWED_PUBLICATION_METHODS:
-                    current_method = "backend_search"
-                method = ui.select(FOLLOWED_PUBLICATION_METHODS, value=current_method, label="获取方式").classes("col").props("outlined stack-label")
-                refresh_hours = ui.number("刷新间隔（小时）", value=int(row.get("refresh_hours") or 12), min=1, max=720).classes("w-48").props("outlined stack-label")
-            tags = ui.input("标签（逗号分隔）", value="，".join(row.get("tags") or [])).classes("w-full").props("outlined stack-label")
-            keywords = ui.input("关键词限制（逗号分隔）", value="，".join(row.get("keywords") or [])).classes("w-full").props("outlined stack-label")
-            sample_url = ui.input("示例文章链接（可选）", value=str(row.get("sample_url") or "")).classes("w-full").props("outlined stack-label")
-            official_account = ui.select(
-                official_options,
-                value=str(row.get("official_account_id") or "") or None,
-                label="绑定自有公众号",
-            ).classes("w-full").props("outlined stack-label clearable")
-            source_url = ui.input("官网 / RSS / 第三方 API 地址", value=str(row.get("source_url") or "")).classes("w-full").props("outlined stack-label")
-            with ui.row().classes("items-center gap-4"):
-                is_owned = ui.switch("自有公众号", value=bool(row.get("is_owned")))
-                enabled = ui.switch("启用关注", value=bool(row.get("enabled", 1)))
-
-            def sync_method() -> None:
-                selected_method = str(method.value or default_method)
-                official_account.set_visibility(selected_method == "official")
-                source_url.set_visibility(selected_method in {"rss", "third_party"})
-                is_owned.value = selected_method == "official"
-                is_owned.disable() if selected_method == "official" else is_owned.enable()
-
-            method.on_value_change(lambda _: sync_method())
-            sync_method()
+            default_method = "backend_search"
+            current_method = str(row.get("fetch_method") or default_method)
+            method_options = {
+                key: value
+                for key, value in FOLLOWED_PUBLICATION_METHODS.items()
+                if key != "official" or current_method == "official"
+            }
+            if current_method not in method_options:
+                current_method = default_method
+            method = ui.select(
+                method_options,
+                value=current_method,
+                label="获取方式",
+            ).classes("w-full").props("outlined stack-label")
 
             def save() -> None:
                 try:
@@ -856,17 +835,8 @@ def _build_followed_accounts(
                         {
                             **row,
                             "name": str(name.value or ""),
-                            "wechat_id": str(wechat_id.value or ""),
-                            "category": str(category.value or ""),
                             "fetch_method": str(method.value or default_method),
-                            "official_account_id": str(official_account.value or ""),
-                            "refresh_hours": int(refresh_hours.value or 12),
-                            "tags": str(tags.value or ""),
-                            "keywords": str(keywords.value or ""),
-                            "sample_url": str(sample_url.value or ""),
-                            "source_url": str(source_url.value or ""),
-                            "is_owned": bool(is_owned.value),
-                            "enabled": bool(enabled.value),
+                            "enabled": True,
                         }
                     )
                     dialog.close()

@@ -40,6 +40,28 @@ class _FakeFollowedContentService:
         return 10
 
 
+class _EditingFollowedContentService(_FakeFollowedContentService):
+    def __init__(self) -> None:
+        self.saved: list[dict[str, Any]] = []
+        self.account = {
+            "id": "followed-1",
+            "name": "蓝血研究",
+            "fetch_method": "jizhile_api",
+            "wechat_id": "legacy-wechat-id",
+            "category": "企业管理",
+            "tags": ["管理"],
+            "enabled": False,
+        }
+
+    def list_accounts(self) -> list[dict[str, Any]]:
+        return [dict(self.account)]
+
+    def save_account(self, account: dict[str, Any]) -> dict[str, Any]:
+        self.saved.append(dict(account))
+        self.account = dict(account)
+        return dict(account)
+
+
 class _FakeState:
     def account_options(self) -> dict[str, str]:
         return {}
@@ -125,6 +147,54 @@ def test_followed_accounts_keeps_jizhile_configuration_in_admin_backend() -> Non
     assert "配置极致了 API" not in snapshot
     assert "配置 API" not in snapshot
     assert "刷新全部 · 每个公众号10积分" in snapshot
+
+
+def test_followed_account_editor_only_shows_name_and_fetch_method() -> None:
+    service = _EditingFollowedContentService()
+    try:
+        topics._build_followed_accounts(
+            _FakeState(),
+            service,
+            workspace_tabs=object(),
+            tab_wizard=object(),
+        )
+        _click_button("编辑")
+        labels = {
+            str(getattr(element, "_props", {}).get("label") or "")
+            for element in ui.context.client.elements.values()
+        }
+        switch_texts = {
+            str(getattr(element, "text", "") or "")
+            for element in ui.context.client.elements.values()
+            if type(element).__name__ == "Switch"
+        }
+
+        assert {"公众号名称", "获取方式"} <= labels
+        assert labels.isdisjoint(
+            {
+                "微信号（可选）",
+                "分类",
+                "刷新间隔（小时）",
+                "标签（逗号分隔）",
+                "关键词限制（逗号分隔）",
+                "示例文章链接（可选）",
+                "绑定自有公众号",
+                "官网 / RSS / 第三方 API 地址",
+            }
+        )
+        assert switch_texts.isdisjoint({"启用关注", "自有公众号"})
+        _click_button("保存")
+    finally:
+        ui.context.client.remove_all_elements()
+
+    assert len(service.saved) == 1
+    saved = service.saved[0]
+    assert saved["name"] == "蓝血研究"
+    assert saved["fetch_method"] == "jizhile_api"
+    assert saved["wechat_id"] == "legacy-wechat-id"
+    assert saved["category"] == "企业管理"
+    assert saved["tags"] == ["管理"]
+    assert saved["enabled"] is True
 
 
 def test_admin_backend_owns_jizhile_credentials() -> None:
