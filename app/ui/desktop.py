@@ -4665,7 +4665,9 @@ def _render_account_config_workspace(
     creation_plan_options = {
         str(item["id"]): str(item["name"]) for item in creation_plans
     }
-    selected_plan_id = str(creation_default.get("plan_id") or "")
+    selected_plan_id = str(creation_default.get("plan_id") or "") or next(
+        iter(creation_plan_options), ""
+    )
     if selected_plan_id and selected_plan_id not in creation_plan_options:
         creation_plan_options[selected_plan_id] = str(
             dict(creation_default.get("plan") or {}).get("name")

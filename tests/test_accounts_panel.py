@@ -69,9 +69,9 @@ class _CreationPlanService:
 
     def get_account_default(self, _account_id: str) -> dict[str, Any]:
         return {
-            "bound": True,
-            "plan_id": "plan-1",
-            "plan": {"id": "plan-1", "name": "企业管理深度文章"},
+            "bound": False,
+            "plan_id": "",
+            "plan": None,
             "in_sync": True,
         }
 
@@ -189,6 +189,7 @@ def test_account_card_is_simple_by_default_but_builds_advanced_controls(
             _direct_parent_visible(element) and element.visible
             for element in advanced_selects.values()
         )
+        assert advanced_selects["内容定位 / 创作方案"].value == "plan-1"
 
         structured_rule_labels = {
             str(getattr(element, "text", "") or "")
