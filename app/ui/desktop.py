@@ -648,7 +648,11 @@ def create_desktop_app() -> None:
             if open_requested_config or open_requested_admin
             else tab_wizard
         )
-        topbar.set_visibility(initial_tab is not tab_wizard)
+        hidden_topbar_tabs = {
+            str(tab_wizard.props["name"]),
+            str(tab_accounts.props["name"]),
+        }
+        topbar.set_visibility(str(initial_tab.props["name"]) not in hidden_topbar_tabs)
         panels = ui.tab_panels(
             tabs,
             value=initial_tab,
@@ -828,11 +832,6 @@ def create_desktop_app() -> None:
         def mount_accounts() -> None:
             accounts_host.clear()
             with accounts_host:
-                render_page_heading(
-                    "ACCOUNT READINESS",
-                    "公众号与创作规则",
-                    "先确认账号能力，再配置创作、审核、排版和草稿写入规则。",
-                )
                 _build_accounts_panel(
                     page_state,
                     initial_account_id=requested_config_account_id,
@@ -907,7 +906,7 @@ def create_desktop_app() -> None:
                 if hasattr(selected_tab, "props")
                 else selected_tab
             )
-            topbar.set_visibility(selected_name != str(tab_wizard.props["name"]))
+            topbar.set_visibility(selected_name not in hidden_topbar_tabs)
             schedule_tab(selected_tab)
 
         mount_tab(initial_tab)

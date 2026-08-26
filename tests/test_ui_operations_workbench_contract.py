@@ -487,6 +487,21 @@ def test_create_workbench_contains_long_text_and_dynamic_progress_in_flow() -> N
     assert "今天准备做什么内容" not in app_source
     assert "topbar.set_visibility" in app_source
 
+
+def test_account_center_uses_the_full_workspace_without_redundant_heading() -> None:
+    app_source = inspect.getsource(desktop.create_desktop_app)
+    account_mount = app_source[
+        app_source.index("def mount_accounts() -> None:") :
+        app_source.index("def mount_feishu() -> None:")
+    ]
+    account_css = APP_CSS[APP_CSS.index(".ops-accounts-page .ops-page-host {") :]
+
+    assert 'str(tab_accounts.props["name"])' in app_source
+    assert "公众号与创作规则" not in account_mount
+    assert "ACCOUNT READINESS" not in account_mount
+    assert "grid-template-rows: minmax(0, 1fr)" in account_css[:250]
+    assert "gap: 0 !important" in account_css[:250]
+
     assert 'grid-template-areas: "workflow"' in APP_CSS
     assert '"workflow priority"' not in APP_CSS
     assert '"source priority"' not in APP_CSS

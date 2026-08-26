@@ -2924,8 +2924,8 @@ APP_CSS += """
 /* Account center */
 .ops-accounts-page .ops-page-host {
   display: grid !important;
-  grid-template-rows: 78px minmax(0, 1fr);
-  gap: var(--ui-layout-page-gap) !important;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0 !important;
 }
 .ops-account-add-top { position: absolute; z-index: 2; top: 0; right: 0; width: 121px; }
 .ops-account-add-top .q-btn__content { flex-wrap: nowrap; gap: 5px; white-space: nowrap; }
