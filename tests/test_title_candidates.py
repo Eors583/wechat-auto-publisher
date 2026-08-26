@@ -162,6 +162,36 @@ def test_candidate_sections_can_be_prefixed_or_placed_before_body() -> None:
     assert result.body == "# 真正的文章标题\n\n正文内容。"
 
 
+def test_plain_text_wrapper_keeps_only_the_article_body() -> None:
+    output = """10个可选标题
+1. 机器人会翻跟头，离走进家庭还有多远？
+2. 人形机器人真正的战场，不是表演而是稳定干活
+3. 商业化的关键不是动作，而是泛化与交付
+
+Digest
+机器人商业化需要跨越泛化、成本、交付与服务体系等门槛。
+
+正文
+## 真正的价值是持续解决问题
+
+机器人进入日常经营，靠的不是一次性炫技，而是长期稳定完成任务。"""
+
+    result = parse_rewrite_output(output)
+
+    assert result.body == (
+        "## 真正的价值是持续解决问题\n\n"
+        "机器人进入日常经营，靠的不是一次性炫技，而是长期稳定完成任务。"
+    )
+    assert result.titles == [
+        "机器人会翻跟头，离走进家庭还有多远？",
+        "人形机器人真正的战场，不是表演而是稳定干活",
+        "商业化的关键不是动作，而是泛化与交付",
+    ]
+    assert result.subtitles == []
+    assert "Digest" not in result.body
+    assert "10个可选标题" not in result.body
+
+
 def test_review_workbench_uses_clean_candidates_and_offers_subtitle_radio() -> None:
     job = {
         "title_candidates": [

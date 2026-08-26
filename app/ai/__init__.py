@@ -98,7 +98,11 @@ def parse_rewrite_output(text: str) -> RewriteResult:
     if not titles:
         titles = _extract_numbered_section(text, ("标题", "title"))
     if not subtitles:
-        subtitles = _extract_numbered_section(text, ("副标题", "subtitle"))
+        subtitles = _extract_numbered_section(
+            text,
+            ("副标题", "subtitle"),
+            fallback_to_all=False,
+        )
     # Strip title sections from body if present
     body = re.sub(r"(?is)(标题|titles?)\s*[:：]?[\s\S]*$", "", body).strip() or normalize_model_body(text)
     return RewriteResult(
@@ -157,9 +161,15 @@ def strip_candidate_appendix(text: str) -> str:
     heading_pattern = re.compile(
         r"""(?ix)^[ \t]*(?:\#{1,6}[ \t]*)?(?:\*\*|__)?(?:【|\[)?[ \t]*
         (?:(?:[一二三四五六七八九十百]+|\d+)[、.．）)][ \t]*)?
-        (?:(?:\d+[ \t]*个[ \t]*)(?:主标题|标题|副标题)(?:候选)?|
+        (?:(?:\d+[ \t]*个[ \t]*)(?:可选|候选|备选)?
+           (?:主标题|标题|副标题)(?:候选|列表|方案|备选)?|
            (?:主标题|标题|副标题)(?:候选|列表|方案|备选)|
            (?:候选|备选)(?:主标题|标题|副标题))
+        [ \t]*(?:】|\])?(?:\*\*|__)?[ \t]*[:：]?[ \t]*$""",
+    )
+    body_heading_pattern = re.compile(
+        r"""(?ix)^[ \t]*(?:\#{1,6}[ \t]*)?(?:\*\*|__)?(?:【|\[)?[ \t]*
+        (?:正文|文章正文|完整正文|body|article)
         [ \t]*(?:】|\])?(?:\*\*|__)?[ \t]*[:：]?[ \t]*$""",
     )
     lines = value.splitlines()
@@ -171,6 +181,17 @@ def strip_candidate_appendix(text: str) -> str:
 
     start = candidate_indexes[0]
     last_candidate = candidate_indexes[-1]
+    body_start = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if body_heading_pattern.match(lines[index])
+        ),
+        None,
+    )
+    if body_start is not None:
+        return "\n".join(lines[body_start + 1 :]).strip()
+
     next_article_heading = next(
         (
             index
@@ -392,12 +413,19 @@ def _extract_loose_array(text: str, keys: tuple[str, ...]) -> list[str]:
     )
 
 
-def _extract_numbered_section(text: str, keywords: tuple[str, ...]) -> list[str]:
+def _extract_numbered_section(
+    text: str,
+    keywords: tuple[str, ...],
+    *,
+    fallback_to_all: bool = True,
+) -> list[str]:
     pattern = "|".join(re.escape(k) for k in keywords)
     section = re.search(
         rf"(?is)(?:{pattern})\s*[:：]?\s*(?:\n|\r\n)([\s\S]{{0,1200}}?)(?:\n\s*\n|(?:副标题|subtitles?)|$)",
         text,
     )
+    if section is None and not fallback_to_all:
+        return []
     block = section.group(1) if section else text
     items = re.findall(
         r"(?:^|\n)\s*(?:\d+[\.\)、]|[-•])\s*(.+)",
